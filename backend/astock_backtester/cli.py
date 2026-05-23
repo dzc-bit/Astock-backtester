@@ -66,6 +66,14 @@ def handle_command(payload: dict[str, Any]) -> dict[str, Any]:
         if command == "coverage":
             cache = LocalCache(payload["cache_dir"])
             return {"ok": True, "coverage": [_jsonable_model(item) for item in cache.coverage()]}
+        if command == "fetch_status":
+            return {
+                "ok": True,
+                "status": {
+                    "configured": False,
+                    "message": "a-stock-data adapter boundary is present; configure fetcher functions before live fetching.",
+                },
+            }
         if command == "demo_backtest":
             frame = sample_daily_bars()
             frame = add_moving_average(frame, [3])
