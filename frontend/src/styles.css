@@ -1,0 +1,41 @@
+:root {
+  font-family: Inter, "Segoe UI", Arial, sans-serif;
+  color: #18202b;
+  background: #f4f6f8;
+}
+
+body {
+  margin: 0;
+}
+
+.app-shell {
+  min-height: 100vh;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 20px 28px;
+  background: #ffffff;
+  border-bottom: 1px solid #d9dee7;
+}
+
+.topbar h1 {
+  margin: 0;
+  font-size: 24px;
+}
+
+.topbar p {
+  margin: 4px 0 0;
+  color: #5d6978;
+}
+
+.panel {
+  margin: 24px;
+  padding: 20px;
+  background: #ffffff;
+  border: 1px solid #d9dee7;
+  border-radius: 8px;
+}
