@@ -73,6 +73,12 @@ def _capital_flow_n_day_sum_at_least(
     symbol_frame = frame[
         (frame["symbol"] == row["symbol"]) & (frame["trade_date"] <= row["trade_date"])
     ].sort_values("trade_date")
+    if len(symbol_frame) < window:
+        return ConditionResult(
+            False,
+            f"{window}d main net inflow unavailable before enough history",
+            None,
+        )
     value = float(symbol_frame.tail(window)["main_net_inflow"].sum())
     passed = value >= minimum
     return ConditionResult(passed, f"{window}d main net inflow {value:.0f} >= {minimum:.0f}", value)
