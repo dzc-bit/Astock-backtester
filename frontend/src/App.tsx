@@ -1,13 +1,28 @@
-import { useMemo, useState } from "react";
+import { useEffect, useState } from "react";
+import { loadCoverage, runDemoBacktest } from "./api";
+import { BacktestSettings } from "./components/BacktestSettings";
+import { DataCenter } from "./components/DataCenter";
+import { ResultsOverview } from "./components/ResultsOverview";
+import { StrategyEditor } from "./components/StrategyEditor";
+import { TradesTable } from "./components/TradesTable";
 import { defaultStrategy } from "./strategyDefaults";
-import type { StrategyConfig } from "./types";
+import type { BacktestResult, DatasetCoverage } from "./types";
 
 export function App() {
-  const [strategy] = useState<StrategyConfig>(defaultStrategy);
-  const enabledCount = useMemo(
-    () => strategy.market_filters.length + strategy.entry_groups.flatMap((group) => group.conditions).length,
-    [strategy]
-  );
+  const [coverage, setCoverage] = useState<DatasetCoverage[]>([]);
+  const [result, setResult] = useState<BacktestResult | null>(null);
+
+  const refreshCoverage = async () => {
+    setCoverage(await loadCoverage(".astock-cache"));
+  };
+
+  const runBacktest = async () => {
+    setResult(await runDemoBacktest());
+  };
+
+  useEffect(() => {
+    void refreshCoverage();
+  }, []);
 
   return (
     <main className="app-shell">
@@ -16,12 +31,15 @@ export function App() {
           <h1>A-Stock Backtester</h1>
           <p>Daily historical strategy research for A-share data.</p>
         </div>
-        <strong>{enabledCount} active conditions</strong>
+        <strong>Conservative daily backtest</strong>
       </header>
-      <section className="panel">
-        <h2>{strategy.name}</h2>
-        <p>Market cap, capital flow, market heat, and technical conditions are ready for editing.</p>
-      </section>
+      <div className="workspace">
+        <DataCenter coverage={coverage} onRefresh={refreshCoverage} />
+        <StrategyEditor strategy={defaultStrategy} />
+        <BacktestSettings />
+        <ResultsOverview result={result} onRun={runBacktest} />
+        <TradesTable trades={result?.trades ?? []} />
+      </div>
     </main>
   );
 }
