@@ -5,11 +5,22 @@ from pydantic import ValidationError
 
 from astock_backtester.models import (
     BacktestSettings,
+    ConditionGroup,
     ConditionNode,
     ConditionOperator,
     DatasetCoverage,
     StrategyConfig,
 )
+
+
+def make_backtest_settings(**overrides):
+    settings = {
+        "start_date": date(2024, 1, 2),
+        "end_date": date(2024, 1, 10),
+        "initial_cash": 100_000,
+    }
+    settings.update(overrides)
+    return BacktestSettings(**settings)
 
 
 def test_strategy_config_rejects_empty_entry_groups():
@@ -49,6 +60,40 @@ def test_backtest_settings_defaults_to_conservative_execution():
     assert settings.buy_price == "next_open"
     assert settings.limit_up_blocks_buy is True
     assert settings.limit_down_blocks_sell is True
+
+
+def test_backtest_settings_rejects_negative_fee_rate():
+    with pytest.raises(ValidationError):
+        make_backtest_settings(fee_rate=-0.0001)
+
+
+def test_backtest_settings_rejects_negative_stamp_tax_rate():
+    with pytest.raises(ValidationError):
+        make_backtest_settings(stamp_tax_rate=-0.0001)
+
+
+def test_backtest_settings_rejects_negative_slippage_rate():
+    with pytest.raises(ValidationError):
+        make_backtest_settings(slippage_rate=-0.0001)
+
+
+def test_backtest_settings_rejects_negative_min_listing_days():
+    with pytest.raises(ValidationError):
+        make_backtest_settings(min_listing_days=-1)
+
+
+def test_condition_node_rejects_negative_data_lag_days():
+    with pytest.raises(ValidationError):
+        ConditionNode(
+            id="cap-small",
+            condition_id="market_cap_between",
+            data_lag_days=-1,
+        )
+
+
+def test_condition_group_rejects_empty_conditions():
+    with pytest.raises(ValidationError):
+        ConditionGroup(id="entry", operator=ConditionOperator.AND, conditions=[])
 
 
 def test_dataset_coverage_tracks_market_cap_and_capital_flow():

@@ -83,12 +83,20 @@ class BacktestSettings(BaseModel):
             raise ValueError("end_date must be on or after start_date")
         if self.initial_cash <= 0:
             raise ValueError("initial_cash must be > 0")
+        if self.fee_rate < 0:
+            raise ValueError("fee_rate must be >= 0")
+        if self.stamp_tax_rate < 0:
+            raise ValueError("stamp_tax_rate must be >= 0")
+        if self.slippage_rate < 0:
+            raise ValueError("slippage_rate must be >= 0")
         if self.fixed_holding_days < 1:
             raise ValueError("fixed_holding_days must be >= 1")
         if self.max_positions < 1:
             raise ValueError("max_positions must be >= 1")
         if self.max_daily_buys < 1:
             raise ValueError("max_daily_buys must be >= 1")
+        if self.min_listing_days < 0:
+            raise ValueError("min_listing_days must be >= 0")
         if self.stop_loss_pct is not None and self.stop_loss_pct >= 0:
             raise ValueError("stop_loss_pct must be negative")
         if self.take_profit_pct is not None and self.take_profit_pct <= 0:
