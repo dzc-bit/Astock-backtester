@@ -24,6 +24,18 @@
     "active": true,
     "useLocalToolsDir": true,
     "targets": ["nsis"],
+    "createUpdaterArtifacts": true,
     "resources": []
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDlGNDc3NDI3QUQ2RkM3MTIKUldRU3gyK3RKM1JIbjkyT25QZm4vTEZOcWlaYkVlRmIwRkFRelpCdUo4b2RVcG1wWUx2dG5HcmEK",
+      "endpoints": [
+        "https://github.com/dzc-bit/A_stock_receiver/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

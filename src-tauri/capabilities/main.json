@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main-window-capabilities",
+  "description": "Allow the main desktop window to run the backtester, check signed updates, install them, and restart after installation.",
+  "windows": ["main"],
+  "permissions": ["core:default", "updater:default", "process:default"]
+}
