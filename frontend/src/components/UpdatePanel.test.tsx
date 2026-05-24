@@ -30,7 +30,8 @@ describe("UpdatePanel", () => {
   it("installs an available update, shows notes, progress, and relaunches", async () => {
     const user = userEvent.setup();
     const downloadAndInstall = vi.fn(async (onEvent?: (event: InstallEvent) => void) => {
-      onEvent?.({ event: "Progress", data: { chunkLength: 100, contentLength: 200 } });
+      onEvent?.({ event: "Started", data: { contentLength: 200 } });
+      onEvent?.({ event: "Progress", data: { chunkLength: 100 } });
     });
     const relaunch = vi.fn().mockResolvedValue(undefined);
     const api = createApi({

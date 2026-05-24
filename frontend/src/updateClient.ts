@@ -11,7 +11,7 @@ declare global {
 
 export type InstallEvent =
   | { event: "Started"; data: { contentLength?: number } }
-  | { event: "Progress"; data: { chunkLength: number; contentLength?: number } }
+  | { event: "Progress"; data: { chunkLength: number } }
   | { event: "Finished" };
 
 export interface AvailableUpdate {

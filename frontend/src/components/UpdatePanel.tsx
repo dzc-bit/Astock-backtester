@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { CheckCircle2, Download, RefreshCw, ShieldAlert } from "lucide-react";
 import {
   createTauriUpdateApi,
@@ -30,6 +30,7 @@ export function UpdatePanel({ api: injectedApi }: UpdatePanelProps) {
   const [update, setUpdate] = useState<AvailableUpdate | null>(null);
   const [receivedBytes, setReceivedBytes] = useState(0);
   const [totalBytes, setTotalBytes] = useState<number | undefined>();
+  const totalBytesRef = useRef<number | undefined>();
 
   useEffect(() => {
     let active = true;
@@ -74,6 +75,7 @@ export function UpdatePanel({ api: injectedApi }: UpdatePanelProps) {
 
   const handleInstallEvent = (event: InstallEvent) => {
     if (event.event === "Started") {
+      totalBytesRef.current = event.data.contentLength;
       setReceivedBytes(0);
       setTotalBytes(event.data.contentLength);
       setMessage(event.data.contentLength ? "开始下载更新" : "正在下载更新");
@@ -82,10 +84,7 @@ export function UpdatePanel({ api: injectedApi }: UpdatePanelProps) {
     if (event.event === "Progress") {
       setReceivedBytes((current) => {
         const next = current + event.data.chunkLength;
-        const knownTotal = event.data.contentLength ?? totalBytes;
-        if (event.data.contentLength) {
-          setTotalBytes(event.data.contentLength);
-        }
+        const knownTotal = totalBytesRef.current ?? totalBytes;
         setMessage(formatProgress(next, knownTotal));
         return next;
       });
@@ -101,6 +100,7 @@ export function UpdatePanel({ api: injectedApi }: UpdatePanelProps) {
     setState("installing");
     setReceivedBytes(0);
     setTotalBytes(undefined);
+    totalBytesRef.current = undefined;
     setMessage("准备安装更新...");
 
     try {
