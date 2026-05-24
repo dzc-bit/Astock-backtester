@@ -23,6 +23,18 @@ def add_returns(df: pd.DataFrame, windows: list[int]) -> pd.DataFrame:
     return out
 
 
+def add_volume_ratio(df: pd.DataFrame, windows: list[int]) -> pd.DataFrame:
+    out = _sorted(df).copy()
+    pieces: list[pd.DataFrame] = []
+    for _, group in out.groupby("symbol", sort=False):
+        group = group.copy()
+        for window in windows:
+            prior_average = group["volume"].shift(1).rolling(window=window).mean()
+            group[f"volume_ratio_{window}d"] = group["volume"] / prior_average
+        pieces.append(group)
+    return pd.concat(pieces, ignore_index=True)
+
+
 def add_macd(df: pd.DataFrame, fast: int = 12, slow: int = 26, signal: int = 9) -> pd.DataFrame:
     out = _sorted(df).copy()
     pieces: list[pd.DataFrame] = []

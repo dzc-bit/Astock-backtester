@@ -52,6 +52,10 @@ def registered_conditions() -> list[ConditionDefinition]:
         ConditionDefinition("close_below_ma", "Close below moving average", "trend", ()),
         ConditionDefinition("turnover_between", "Turnover range", "volume", ("turnover_rate",)),
         ConditionDefinition("past_return_at_most", "Past return upper bound", "price_movement", ()),
+        ConditionDefinition("past_return_between", "Past return range", "price_movement", ()),
+        ConditionDefinition("volume_ratio_between", "Volume ratio range", "volume", ()),
+        ConditionDefinition("macd_histogram_at_least", "MACD histogram floor", "technical", ("macd_hist",)),
+        ConditionDefinition("breakout_above_n_day_high", "Breakout above prior high", "pattern", ()),
     ]
 
 
@@ -120,6 +124,48 @@ def _past_return_at_most(node: ConditionNode, row: pd.Series, frame: pd.DataFram
     return ConditionResult(value <= maximum, f"{window}d return {value:.2%} <= {maximum:.2%}", value)
 
 
+def _past_return_between(node: ConditionNode, row: pd.Series, frame: pd.DataFrame) -> ConditionResult:
+    window = int(node.params["window"])
+    value = float(row[f"return_{window}d"])
+    minimum = float(node.params["min"])
+    maximum = float(node.params["max"])
+    return ConditionResult(
+        minimum <= value <= maximum,
+        f"{window}d return {value:.2%} in [{minimum:.2%}, {maximum:.2%}]",
+        value,
+    )
+
+
+def _volume_ratio_between(node: ConditionNode, row: pd.Series, frame: pd.DataFrame) -> ConditionResult:
+    window = int(node.params["window"])
+    value = float(row[f"volume_ratio_{window}d"])
+    minimum = float(node.params["min"])
+    maximum = float(node.params["max"])
+    return ConditionResult(
+        minimum <= value <= maximum,
+        f"{window}d volume ratio {value:.2f} in [{minimum:.2f}, {maximum:.2f}]",
+        value,
+    )
+
+
+def _macd_histogram_at_least(node: ConditionNode, row: pd.Series, frame: pd.DataFrame) -> ConditionResult:
+    value = float(row["macd_hist"])
+    minimum = float(node.params["min"])
+    return ConditionResult(value >= minimum, f"MACD histogram {value:.4f} >= {minimum:.4f}", value)
+
+
+def _breakout_above_n_day_high(node: ConditionNode, row: pd.Series, frame: pd.DataFrame) -> ConditionResult:
+    window = int(node.params["window"])
+    symbol_frame = frame[
+        (frame["symbol"] == row["symbol"]) & (frame["trade_date"] < row["trade_date"])
+    ].sort_values("trade_date")
+    if len(symbol_frame) < window:
+        return ConditionResult(False, f"{window}d prior high unavailable before enough history", None)
+    prior_high = float(symbol_frame.tail(window)["high"].max())
+    value = float(row["close"] - prior_high)
+    return ConditionResult(value > 0, f"close {row['close']:.2f} broke prior {window}d high {prior_high:.2f}", value)
+
+
 EVALUATORS: dict[str, Evaluator] = {
     "market_cap_between": _market_cap_between,
     "capital_flow_n_day_sum_at_least": _capital_flow_n_day_sum_at_least,
@@ -128,6 +174,10 @@ EVALUATORS: dict[str, Evaluator] = {
     "close_below_ma": _close_below_ma,
     "turnover_between": _turnover_between,
     "past_return_at_most": _past_return_at_most,
+    "past_return_between": _past_return_between,
+    "volume_ratio_between": _volume_ratio_between,
+    "macd_histogram_at_least": _macd_histogram_at_least,
+    "breakout_above_n_day_high": _breakout_above_n_day_high,
 }
 
 

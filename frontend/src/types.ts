@@ -29,6 +29,24 @@ export type StrategyConfig = {
   score_threshold?: number | null;
 };
 
+export type BacktestSettingsConfig = {
+  start_date: string;
+  end_date: string;
+  initial_cash: number;
+  benchmark_symbol: string;
+  fixed_holding_days: number;
+  take_profit_pct: number | null;
+  stop_loss_pct: number | null;
+  max_positions: number;
+  max_daily_buys: number;
+  fee_rate: number;
+  stamp_tax_rate: number;
+  slippage_rate: number;
+  min_listing_days: number;
+  exclude_st: boolean;
+  conservative_execution: boolean;
+};
+
 export type BacktestMetrics = {
   total_return_pct: number;
   annualized_return_pct: number;

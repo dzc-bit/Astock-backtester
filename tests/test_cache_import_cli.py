@@ -51,6 +51,167 @@ def test_cli_demo_backtest_returns_metrics():
     assert response["result"]["trades"]
 
 
+def test_cli_lists_condition_definitions_for_ui():
+    response = handle_command({"command": "conditions"})
+
+    assert response["ok"] is True
+    ids = {item["condition_id"] for item in response["conditions"]}
+    assert "macd_histogram_at_least" in ids
+    assert "volume_ratio_between" in ids
+    assert "capital_flow_n_day_sum_at_least" in ids
+
+
+def test_cli_run_backtest_accepts_strategy_and_settings_payload():
+    strategy = {
+        "name": "ui supplied strategy",
+        "market_filters": [
+            {
+                "id": "market",
+                "condition_id": "market_rising_ratio_at_least",
+                "enabled": True,
+                "params": {"min_ratio": 0.5},
+                "data_lag_days": 0,
+            }
+        ],
+        "entry_groups": [
+            {
+                "id": "entry",
+                "operator": "and",
+                "conditions": [
+                    {
+                        "id": "cap",
+                        "condition_id": "market_cap_between",
+                        "enabled": True,
+                        "params": {"min": 1, "max": 30_000_000_000},
+                        "data_lag_days": 0,
+                    },
+                    {
+                        "id": "vr",
+                        "condition_id": "volume_ratio_between",
+                        "enabled": True,
+                        "params": {"window": 2, "min": 1.0, "max": 2.0},
+                        "data_lag_days": 0,
+                    },
+                ],
+            }
+        ],
+        "exit_rules": [
+            {
+                "id": "exit",
+                "condition_id": "close_below_ma",
+                "enabled": True,
+                "params": {"window": 3},
+                "data_lag_days": 0,
+            }
+        ],
+        "score_threshold": None,
+    }
+    settings = {
+        "start_date": "2024-01-02",
+        "end_date": "2024-01-08",
+        "initial_cash": 100000,
+        "fixed_holding_days": 3,
+        "take_profit_pct": 0.08,
+        "stop_loss_pct": -0.05,
+        "max_positions": 2,
+        "max_daily_buys": 1,
+    }
+
+    response = handle_command({"command": "run_backtest", "strategy": strategy, "settings": settings})
+
+    assert response["ok"] is True
+    assert response["result"]["metrics"]["trade_count"] >= 1
+    assert any("volume ratio" in reason for trade in response["result"]["trades"] for reason in trade["buy_reason"])
+
+
+def test_cli_run_backtest_reports_empty_cache_when_cache_dir_is_explicit(tmp_path):
+    strategy = {
+        "name": "ui supplied strategy",
+        "market_filters": [],
+        "entry_groups": [
+            {
+                "id": "entry",
+                "operator": "and",
+                "conditions": [
+                    {
+                        "id": "cap",
+                        "condition_id": "market_cap_between",
+                        "enabled": True,
+                        "params": {"min": 1, "max": 30_000_000_000},
+                        "data_lag_days": 0,
+                    }
+                ],
+            }
+        ],
+        "exit_rules": [],
+        "score_threshold": None,
+    }
+    settings = {
+        "start_date": "2024-01-02",
+        "end_date": "2024-01-08",
+        "initial_cash": 100000,
+    }
+
+    response = handle_command(
+        {"command": "run_backtest", "cache_dir": str(tmp_path), "strategy": strategy, "settings": settings}
+    )
+
+    assert response["ok"] is False
+    assert response["error"]["code"] == "command_failed"
+    assert "No cached daily bars found" in response["error"]["message"]
+
+
+def test_cli_run_backtest_enriches_dynamic_condition_windows():
+    strategy = {
+        "name": "dynamic windows",
+        "market_filters": [],
+        "entry_groups": [
+            {
+                "id": "entry",
+                "operator": "and",
+                "conditions": [
+                    {
+                        "id": "cap",
+                        "condition_id": "market_cap_between",
+                        "enabled": True,
+                        "params": {"min": 1, "max": 30_000_000_000},
+                        "data_lag_days": 0,
+                    },
+                    {
+                        "id": "gain",
+                        "condition_id": "past_return_between",
+                        "enabled": True,
+                        "params": {"window": 4, "min": -0.5, "max": 0.5},
+                        "data_lag_days": 0,
+                    },
+                    {
+                        "id": "vr",
+                        "condition_id": "volume_ratio_between",
+                        "enabled": True,
+                        "params": {"window": 4, "min": 0.1, "max": 3.0},
+                        "data_lag_days": 0,
+                    },
+                ],
+            }
+        ],
+        "exit_rules": [],
+        "score_threshold": None,
+    }
+    settings = {
+        "start_date": "2024-01-02",
+        "end_date": "2024-01-08",
+        "initial_cash": 100000,
+        "fixed_holding_days": 3,
+        "max_positions": 2,
+        "max_daily_buys": 1,
+    }
+
+    response = handle_command({"command": "run_backtest", "strategy": strategy, "settings": settings})
+
+    assert response["ok"] is True
+    assert response["result"]["preflight_issues"] == []
+
+
 def test_cli_rejects_unknown_command():
     response = handle_command({"command": "nope"})
 

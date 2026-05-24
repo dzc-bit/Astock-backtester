@@ -1,6 +1,6 @@
 import pandas as pd
 
-from astock_backtester.indicators import add_macd, add_market_heat, add_moving_average, add_returns
+from astock_backtester.indicators import add_macd, add_market_heat, add_moving_average, add_returns, add_volume_ratio
 from astock_backtester.sample_data import sample_daily_bars
 
 
@@ -66,3 +66,11 @@ def test_add_market_heat_computes_rising_ratio_by_date():
     row = heat[heat["trade_date"] == pd.Timestamp("2024-01-03")].iloc[0]
 
     assert row["market_rising_ratio"] == 1.0
+
+
+def test_add_volume_ratio_uses_prior_window_only():
+    result = add_volume_ratio(sample_daily_bars(), windows=[2])
+    aaa = result[result["symbol"] == "AAA"].reset_index(drop=True)
+
+    assert pd.isna(aaa.loc[0, "volume_ratio_2d"])
+    assert round(aaa.loc[2, "volume_ratio_2d"], 6) == round(2200 / ((1000 + 1500) / 2), 6)

@@ -11,7 +11,7 @@ export function ResultsOverview({ result, onRun }: Props) {
     <section className="surface">
       <div className="section-title">
         <h2>Result Overview</h2>
-        <button type="button" onClick={onRun}>Run Demo Backtest</button>
+        <button type="button" onClick={onRun}>Run Backtest</button>
       </div>
       {result ? (
         <>

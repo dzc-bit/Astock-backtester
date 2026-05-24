@@ -17,8 +17,10 @@
     "recharts": "^2.12.7"
   },
   "devDependencies": {
+    "@tauri-apps/cli": "^2.11.2",
     "@testing-library/jest-dom": "^6.4.6",
     "@testing-library/react": "^15.0.7",
+    "@testing-library/user-event": "^14.6.1",
     "@types/react": "^18.3.3",
     "@types/react-dom": "^18.3.0",
     "@vitejs/plugin-react": "^4.3.1",

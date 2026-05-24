@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { BacktestResult, DatasetCoverage } from "./types";
+import type { BacktestResult, BacktestSettingsConfig, DatasetCoverage, StrategyConfig } from "./types";
 
 type BackendResponse<T> = ({ ok: true } & T) | { ok: false; error: { code: string; message: string } };
 
@@ -9,7 +9,7 @@ const demoResult: BacktestResult = {
     annualized_return_pct: 0.032,
     max_drawdown_pct: -0.018,
     win_rate_pct: 0.6,
-    trade_count: 5,
+    trade_count: 1,
     average_trade_return_pct: 0.011
   },
   equity_curve: [
@@ -63,7 +63,12 @@ export async function loadCoverage(cacheDir: string): Promise<DatasetCoverage[]>
   return response.coverage;
 }
 
-export async function runDemoBacktest(): Promise<BacktestResult> {
-  const response = await callBackend<{ result: BacktestResult }>({ command: "demo_backtest" });
+export async function runConfiguredBacktest(strategy: StrategyConfig, settings: BacktestSettingsConfig): Promise<BacktestResult> {
+  const response = await callBackend<{ result: BacktestResult }>({
+    command: "run_backtest",
+    strategy,
+    settings,
+    cache_dir: ".astock-cache"
+  });
   return response.result;
 }
