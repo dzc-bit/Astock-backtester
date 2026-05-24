@@ -15,7 +15,7 @@
 ### 普通用户（Windows）
 
 1. 打开 [Releases](https://github.com/dzc-bit/A_stock_receiver/releases) 页面。
-2. 下载最新版本里的 `A股策略回测工作台_*_x64-setup.exe` 安装包。
+2. 下载最新版本里的 `A-Stock-Receiver_*_x64-setup.exe` 安装包。
 3. 双击安装包并按提示安装。
 4. 安装完成后打开 `A股策略回测工作台`。
 
