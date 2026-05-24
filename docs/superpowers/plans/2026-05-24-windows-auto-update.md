@@ -721,10 +721,11 @@ Use a tag matching the version, for example `v0.2.0`.
 PowerShell:
 
 ```powershell
-$env:TAURI_SIGNING_PRIVATE_KEY="$env:USERPROFILE\.tauri\a-stock-receiver.key"
+$env:TAURI_SIGNING_PRIVATE_KEY = Get-Content -Raw "$env:USERPROFILE\.tauri\a-stock-receiver.key"
 $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
 npm run build
-npm run tauri -- build
+npm run tauri -- build --ci
+Remove-Item Env:\TAURI_SIGNING_PRIVATE_KEY
 ```
 
 Expected Windows outputs:
@@ -846,9 +847,10 @@ Expected: Vite build succeeds. Existing chunk-size warnings are acceptable if th
 Run:
 
 ```powershell
-$env:TAURI_SIGNING_PRIVATE_KEY="$env:USERPROFILE\.tauri\a-stock-receiver.key"
+$env:TAURI_SIGNING_PRIVATE_KEY = Get-Content -Raw "$env:USERPROFILE\.tauri\a-stock-receiver.key"
 $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
-npm run tauri -- build --debug
+npm run tauri -- build --debug --ci
+Remove-Item Env:\TAURI_SIGNING_PRIVATE_KEY
 ```
 
 Expected:

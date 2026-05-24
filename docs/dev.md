@@ -76,6 +76,15 @@ Verify the desktop app binary without creating an installer:
 npm run tauri -- build --debug --no-bundle
 ```
 
+Verify a signed debug installer and updater signature:
+
+```powershell
+$env:TAURI_SIGNING_PRIVATE_KEY = Get-Content -Raw "$env:USERPROFILE\.tauri\a-stock-receiver.key"
+$env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = ""
+npm run tauri -- build --debug --ci
+Remove-Item Env:\TAURI_SIGNING_PRIVATE_KEY
+```
+
 The Python backend must be importable in the environment that launches Tauri. During development, run:
 
 ```powershell
@@ -105,7 +114,10 @@ $env:RUSTUP_HOME = Join-Path $tools "rustup-home"
 $env:CARGO_HOME = Join-Path $tools "cargo-home"
 $env:npm_config_cache = Join-Path $tools "npm-cache"
 $env:CARGO_PROFILE_DEV_DEBUG = "0"
-cmd /S /C "call `"C:\BuildTools\VC\Auxiliary\Build\vcvars64.bat`" && set `"PATH=$tools;$cargoBin;$nodeDir;%PATH%`" && set `"RUSTUP_HOME=$env:RUSTUP_HOME`" && set `"CARGO_HOME=$env:CARGO_HOME`" && set `"npm_config_cache=$env:npm_config_cache`" && set `"CARGO_PROFILE_DEV_DEBUG=0`" && `"$nodeDir\node.exe`" `"$npm`" run tauri -- build --debug"
+$env:TAURI_SIGNING_PRIVATE_KEY = Get-Content -Raw "$env:USERPROFILE\.tauri\a-stock-receiver.key"
+$env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = ""
+cmd /S /C "call `"C:\BuildTools\VC\Auxiliary\Build\vcvars64.bat`" && set `"PATH=$tools;$cargoBin;$nodeDir;%PATH%`" && set `"RUSTUP_HOME=$env:RUSTUP_HOME`" && set `"CARGO_HOME=$env:CARGO_HOME`" && set `"npm_config_cache=$env:npm_config_cache`" && set `"CARGO_PROFILE_DEV_DEBUG=0`" && `"$nodeDir\node.exe`" `"$npm`" run tauri -- build --debug --ci"
+Remove-Item Env:\TAURI_SIGNING_PRIVATE_KEY
 ```
 
 ## Release And Updates

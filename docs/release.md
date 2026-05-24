@@ -57,10 +57,11 @@ v0.2.0
 在 Windows 发布机器上执行：
 
 ```powershell
-$env:TAURI_SIGNING_PRIVATE_KEY = "$env:USERPROFILE\.tauri\a-stock-receiver.key"
+$env:TAURI_SIGNING_PRIVATE_KEY = Get-Content -Raw "$env:USERPROFILE\.tauri\a-stock-receiver.key"
 $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = ""
 npm run build
-npm run tauri -- build
+npm run tauri -- build --ci
+Remove-Item Env:\TAURI_SIGNING_PRIVATE_KEY
 ```
 
 预期生成：
