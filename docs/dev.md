@@ -107,3 +107,7 @@ $env:npm_config_cache = Join-Path $tools "npm-cache"
 $env:CARGO_PROFILE_DEV_DEBUG = "0"
 cmd /S /C "call `"C:\BuildTools\VC\Auxiliary\Build\vcvars64.bat`" && set `"PATH=$tools;$cargoBin;$nodeDir;%PATH%`" && set `"RUSTUP_HOME=$env:RUSTUP_HOME`" && set `"CARGO_HOME=$env:CARGO_HOME`" && set `"npm_config_cache=$env:npm_config_cache`" && set `"CARGO_PROFILE_DEV_DEBUG=0`" && `"$nodeDir\node.exe`" `"$npm`" run tauri -- build --debug"
 ```
+
+## Release And Updates
+
+Windows update signing, release asset requirements, `latest.json`, and installed-user update flow are documented in `docs/release.md`.
