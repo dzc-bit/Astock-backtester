@@ -32,7 +32,15 @@ const demoResult = {
       buy_price: 12,
       sell_price: 10.2,
       shares: 4000,
-      buy_reason: ["float market cap in range"],
+      buy_reason: [
+        "float market cap 8000000000 in [1000000000, 30000000000]",
+        "3d main net inflow 6000000 >= 3000000",
+        "2d volume ratio 1.20 in [1.00, 2.50]",
+        "turnover 4.00% in [2.00%, 8.00%]",
+        "MACD histogram 0.0310 >= 0.0000",
+        "5d return 8.00% in [0.00%, 20.00%]",
+        "close 12.00 broke prior 20d high 11.80"
+      ],
       sell_reason: ["fixed holding days reached"],
       pnl: -7200,
       pnl_pct: -0.15
@@ -41,7 +49,7 @@ const demoResult = {
   preflight_issues: []
 };
 
-describe("Backtester UI", () => {
+describe("A 股回测工作台界面", () => {
   beforeEach(() => {
     apiMocks.loadCoverage.mockResolvedValue([
       { dataset: "daily_bars", symbols: 2, start_date: "2024-01-02", end_date: "2024-01-08", missing_rows: 0 }
@@ -49,38 +57,55 @@ describe("Backtester UI", () => {
     apiMocks.runConfiguredBacktest.mockResolvedValue(demoResult);
   });
 
-  it("renders the five first-version work areas", async () => {
+  it("renders the Chinese workstation areas", async () => {
     render(<App />);
 
-    expect(screen.getByRole("heading", { name: "Data Center" })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Strategy Editor" })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Backtest Settings" })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Result Overview" })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Trade Explanations" })).toBeInTheDocument();
-    expect(await screen.findByText("daily_bars")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "A股策略回测工作台" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "数据中心" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "策略条件" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "回测设置" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "收益概览" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "交易明细" })).toBeInTheDocument();
+    expect(screen.getAllByText("市场热度").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("资金流向").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("风险提示").length).toBeGreaterThan(0);
+    expect(await screen.findByText("日线行情")).toBeInTheDocument();
   });
 
-  it("exposes market cap and capital flow conditions", async () => {
+  it("exposes common A-share strategy conditions in Chinese", async () => {
     render(<App />);
 
-    expect(screen.getByText("Float market cap range")).toBeInTheDocument();
-    expect(screen.getByText("N-day main net inflow")).toBeInTheDocument();
-    expect(await screen.findByText("daily_bars")).toBeInTheDocument();
+    expect(screen.getAllByText("流通市值区间").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("近N日主力净流入").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("MACD柱线下限").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("量比区间").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("换手率区间").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("前期涨幅区间").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("突破前高形态").length).toBeGreaterThan(0);
+    expect(await screen.findByText("日线行情")).toBeInTheDocument();
   });
 
-  it("lets the user adjust strategy parameters before running a backtest", async () => {
+  it("lets the user adjust Chinese strategy parameters before running a backtest", async () => {
     const user = userEvent.setup();
     render(<App />);
 
-    await user.clear(screen.getByLabelText("Minimum float market cap"));
-    await user.type(screen.getByLabelText("Minimum float market cap"), "5000000000");
-    await user.clear(screen.getByLabelText("Volume ratio minimum"));
-    await user.type(screen.getByLabelText("Volume ratio minimum"), "1.2");
-    await user.clear(screen.getByLabelText("Initial capital"));
-    await user.type(screen.getByLabelText("Initial capital"), "250000");
-    await user.click(screen.getByRole("button", { name: "Run Backtest" }));
+    await user.clear(screen.getByLabelText("流通市值下限"));
+    await user.type(screen.getByLabelText("流通市值下限"), "5000000000");
+    await user.clear(screen.getByLabelText("量比下限"));
+    await user.type(screen.getByLabelText("量比下限"), "1.2");
+    await user.clear(screen.getByLabelText("初始资金"));
+    await user.type(screen.getByLabelText("初始资金"), "250000");
+    await user.click(screen.getByRole("button", { name: "运行历史回测" }));
 
-    expect(await screen.findByText("Trades 1")).toBeInTheDocument();
+    expect(await screen.findByText("交易次数 1")).toBeInTheDocument();
+    expect(screen.getAllByText(/流通市值/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/主力净流入/).length).toBeGreaterThan(0);
+    expect(screen.getByText(/2d 量比 1\.20 位于区间/)).toBeInTheDocument();
+    expect(screen.getByText(/换手率 4\.00% 位于区间/)).toBeInTheDocument();
+    expect(screen.getByText(/MACD柱线 0\.0310 >= 0\.0000/)).toBeInTheDocument();
+    expect(screen.getByText(/5d 前期涨幅 8\.00% 位于区间/)).toBeInTheDocument();
+    expect(screen.getByText(/收盘价 12\.00 突破前 20d 高点 11\.80/)).toBeInTheDocument();
+    expect(screen.queryByText(/volume ratio|turnover|MACD histogram|return|prior high/)).not.toBeInTheDocument();
   });
 
   it("shows backend errors without dropping the page", async () => {
@@ -88,9 +113,20 @@ describe("Backtester UI", () => {
     apiMocks.runConfiguredBacktest.mockRejectedValue(new Error("No cached daily bars found."));
     render(<App />);
 
-    await user.click(screen.getByRole("button", { name: "Run Backtest" }));
+    await user.click(screen.getByRole("button", { name: "运行历史回测" }));
 
-    expect(await screen.findByRole("alert")).toHaveTextContent("No cached daily bars found.");
-    expect(screen.getByRole("heading", { name: "Strategy Editor" })).toBeInTheDocument();
+    expect(await screen.findByRole("alert")).toHaveTextContent("未找到已缓存的日线行情");
+    expect(screen.getByRole("heading", { name: "策略条件" })).toBeInTheDocument();
+  });
+
+  it("uses a Chinese fallback for unrecognized backend errors", async () => {
+    const user = userEvent.setup();
+    apiMocks.runConfiguredBacktest.mockRejectedValue(new Error("initial_cash must be > 0"));
+    render(<App />);
+
+    await user.click(screen.getByRole("button", { name: "运行历史回测" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("回测参数不合法");
+    expect(screen.queryByText(/initial_cash must be > 0/)).not.toBeInTheDocument();
   });
 });

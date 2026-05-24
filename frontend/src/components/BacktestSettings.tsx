@@ -11,28 +11,34 @@ export function BacktestSettings({ settings, onSettingsChange }: Props) {
   };
 
   return (
-    <section className="surface">
-      <h2>Backtest Settings</h2>
+    <section className="surface settings-surface">
+      <div className="section-title">
+        <div>
+          <span className="section-kicker">历史回滚参数</span>
+          <h2>回测设置</h2>
+        </div>
+        <span className="status-pill compact">股票池：全A</span>
+      </div>
       <div className="settings-grid">
         <label>
-          Start date
+          开始日期
           <input value={settings.start_date} onChange={(event) => update("start_date", event.target.value)} />
         </label>
         <label>
-          End date
+          结束日期
           <input value={settings.end_date} onChange={(event) => update("end_date", event.target.value)} />
         </label>
         <label>
-          Initial capital
+          初始资金
           <input
-            aria-label="Initial capital"
+            aria-label="初始资金"
             type="number"
             value={settings.initial_cash}
             onChange={(event) => update("initial_cash", Number(event.target.value))}
           />
         </label>
         <label>
-          Fixed holding days
+          固定持仓天数
           <input
             type="number"
             value={settings.fixed_holding_days}
@@ -40,7 +46,7 @@ export function BacktestSettings({ settings, onSettingsChange }: Props) {
           />
         </label>
         <label>
-          Take profit
+          止盈比例
           <input
             type="number"
             step="0.01"
@@ -49,7 +55,7 @@ export function BacktestSettings({ settings, onSettingsChange }: Props) {
           />
         </label>
         <label>
-          Stop loss
+          止损比例
           <input
             type="number"
             step="0.01"
@@ -58,7 +64,7 @@ export function BacktestSettings({ settings, onSettingsChange }: Props) {
           />
         </label>
         <label>
-          Max holdings
+          最大持仓数
           <input
             type="number"
             value={settings.max_positions}
@@ -66,7 +72,7 @@ export function BacktestSettings({ settings, onSettingsChange }: Props) {
           />
         </label>
         <label>
-          Slippage
+          滑点比例
           <input
             type="number"
             step="0.0001"
@@ -74,6 +80,9 @@ export function BacktestSettings({ settings, onSettingsChange }: Props) {
             onChange={(event) => update("slippage_rate", Number(event.target.value))}
           />
         </label>
+      </div>
+      <div className="settings-footnote">
+        <span>执行假设：次日买入、保守处理同日止盈止损冲突、默认过滤 ST 与停牌样本。</span>
       </div>
     </section>
   );

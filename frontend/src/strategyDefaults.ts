@@ -1,27 +1,30 @@
 import type { BacktestSettingsConfig, StrategyConfig } from "./types";
 
 export const conditionCategories = [
-  "Market Heat",
-  "Market Cap",
-  "Capital Flow",
-  "Trend",
-  "Volume",
-  "Price Movement",
-  "Pattern"
+  "市场热度",
+  "市值",
+  "资金流向",
+  "趋势",
+  "量价",
+  "前期涨幅",
+  "形态"
 ] as const;
 
 export const conditionLibrary = [
-  { id: "market_rising_ratio_at_least", label: "Market rising ratio", category: "Market Heat" },
-  { id: "market_cap_between", label: "Float market cap range", category: "Market Cap" },
-  { id: "capital_flow_n_day_sum_at_least", label: "N-day main net inflow", category: "Capital Flow" },
-  { id: "macd_histogram_at_least", label: "MACD histogram floor", category: "Trend" },
-  { id: "close_above_ma", label: "Close above moving average", category: "Trend" },
-  { id: "volume_ratio_between", label: "Volume ratio range", category: "Volume" },
-  { id: "turnover_between", label: "Turnover range", category: "Volume" }
+  { id: "market_rising_ratio_at_least", label: "市场上涨家数占比", category: "市场热度" },
+  { id: "market_cap_between", label: "流通市值区间", category: "市值" },
+  { id: "capital_flow_n_day_sum_at_least", label: "近N日主力净流入", category: "资金流向" },
+  { id: "macd_histogram_at_least", label: "MACD柱线下限", category: "趋势" },
+  { id: "close_above_ma", label: "收盘价站上均线", category: "趋势" },
+  { id: "volume_ratio_between", label: "量比区间", category: "量价" },
+  { id: "turnover_between", label: "换手率区间", category: "量价" },
+  { id: "past_return_between", label: "前期涨幅区间", category: "前期涨幅" },
+  { id: "past_return_at_most", label: "前期涨幅上限", category: "前期涨幅" },
+  { id: "breakout_above_n_day_high", label: "突破前高形态", category: "形态" }
 ];
 
 export const defaultStrategy: StrategyConfig = {
-  name: "Market heat + small cap inflow",
+  name: "市场热度 + 小市值资金流入",
   market_filters: [
     {
       id: "market",
