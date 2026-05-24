@@ -1,10 +1,18 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from datetime import date, datetime
+import json
+from typing import Any
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 
 import pandas as pd
 
 from astock_backtester.data.importer import normalize_daily_bars
+
+
+UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 
 
 class AStockDataUnavailable(RuntimeError):
@@ -12,11 +20,193 @@ class AStockDataUnavailable(RuntimeError):
 
 
 DailyBarsFetcher = Callable[[Sequence[str], str, str], pd.DataFrame]
+JsonGetter = Callable[[str, dict[str, str], dict[str, str], int], dict[str, Any]]
+
+
+def _normalize_code(symbol: str) -> str:
+    code = symbol.strip().upper()
+    if code.startswith(("SH", "SZ", "BJ")):
+        code = code[2:]
+    if "." in code:
+        code = code.split(".", 1)[0]
+    return code
+
+
+def _market_code(code: str) -> int:
+    return 1 if code.startswith(("6", "9")) else 0
+
+
+def _to_float(value: Any, default: float = 0.0) -> float:
+    if value in (None, "", "-"):
+        return default
+    return float(value)
+
+
+def _parse_date(value: Any) -> date | None:
+    text = str(value or "").strip()
+    for fmt in ("%Y-%m-%d", "%Y%m%d"):
+        try:
+            return datetime.strptime(text[:10] if fmt == "%Y-%m-%d" else text[:8], fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def _default_json_get(url: str, params: dict[str, str], headers: dict[str, str], timeout: int) -> dict[str, Any]:
+    query = urlencode(params)
+    request = Request(f"{url}?{query}", headers=headers)
+    with urlopen(request, timeout=timeout) as response:
+        charset = response.headers.get_content_charset() or "utf-8"
+        return json.loads(response.read().decode(charset, "ignore"))
+
+
+class HttpAStockFetcher:
+    """HTTP subset learned from simonlin1212/a-stock-data for daily backtest cache fills."""
+
+    def __init__(self, json_get: JsonGetter | None = None) -> None:
+        self._json_get = json_get or _default_json_get
+
+    def fetch_daily_bars(self, symbols: Sequence[str], start_date: str, end_date: str) -> pd.DataFrame:
+        frames = [self._fetch_one(symbol, start_date, end_date) for symbol in symbols]
+        rows = [frame for frame in frames if not frame.empty]
+        if not rows:
+            return pd.DataFrame()
+        return normalize_daily_bars(pd.concat(rows, ignore_index=True))
+
+    def _fetch_one(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
+        code = _normalize_code(symbol)
+        bars = self._fetch_baidu_kline(code, start_date, end_date)
+        if bars.empty:
+            return bars
+
+        info = self._try_fetch_eastmoney_stock_info(code)
+        flow_by_date = {item["date"]: item["main_net"] for item in self._try_fetch_eastmoney_fund_flow_120d(code)}
+        bars["main_net_inflow"] = bars["trade_date"].dt.strftime("%Y-%m-%d").map(flow_by_date)
+        bars["float_market_cap"] = _to_float(info.get("float_mcap"), float("nan"))
+        list_date = _parse_date(info.get("list_date"))
+        if list_date is None:
+            bars["listing_days"] = 9999
+        else:
+            bars["listing_days"] = (bars["trade_date"].dt.date - list_date).map(lambda delta: delta.days)
+        return bars
+
+    def _try_fetch_eastmoney_fund_flow_120d(self, code: str) -> list[dict[str, Any]]:
+        try:
+            return self._fetch_eastmoney_fund_flow_120d(code)
+        except OSError:
+            return []
+
+    def _try_fetch_eastmoney_stock_info(self, code: str) -> dict[str, Any]:
+        try:
+            return self._fetch_eastmoney_stock_info(code)
+        except OSError:
+            return {}
+
+    def _fetch_baidu_kline(self, code: str, start_date: str, end_date: str) -> pd.DataFrame:
+        payload = self._json_get(
+            "https://finance.pae.baidu.com/selfselect/getstockquotation",
+            {
+                "all": "1",
+                "isIndex": "false",
+                "isBk": "false",
+                "isBlock": "false",
+                "isFutures": "false",
+                "isStock": "true",
+                "newFormat": "1",
+                "group": "quotation_kline_ab",
+                "finClientType": "pc",
+                "code": code,
+                "start_time": start_date,
+                "ktype": "1",
+            },
+            {
+                "User-Agent": UA,
+                "Accept": "application/vnd.finance-web.v1+json",
+                "Origin": "https://gushitong.baidu.com",
+                "Referer": "https://gushitong.baidu.com/",
+            },
+            10,
+        )
+        market_data = payload.get("Result", {}).get("newMarketData", {})
+        keys = list(market_data.get("keys") or [])
+        rows = []
+        for raw_row in str(market_data.get("marketData") or "").split(";"):
+            if not raw_row.strip():
+                continue
+            values = raw_row.split(",")
+            item = dict(zip(keys, values, strict=False))
+            trade_date = _parse_date(item.get("time"))
+            if trade_date is None or not (start_date <= trade_date.isoformat() <= end_date):
+                continue
+            rows.append(
+                {
+                    "symbol": code,
+                    "trade_date": trade_date.isoformat(),
+                    "open": _to_float(item.get("open")),
+                    "high": _to_float(item.get("high")),
+                    "low": _to_float(item.get("low")),
+                    "close": _to_float(item.get("close")),
+                    "volume": _to_float(item.get("volume")),
+                }
+            )
+        return normalize_daily_bars(pd.DataFrame(rows)) if rows else pd.DataFrame()
+
+    def _fetch_eastmoney_fund_flow_120d(self, code: str) -> list[dict[str, Any]]:
+        payload = self._json_get(
+            "https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get",
+            {
+                "secid": f"{_market_code(code)}.{code}",
+                "fields1": "f1,f2,f3,f7",
+                "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63,f64,f65",
+                "lmt": "120",
+            },
+            {
+                "User-Agent": UA,
+                "Referer": "https://quote.eastmoney.com/",
+                "Origin": "https://quote.eastmoney.com",
+            },
+            15,
+        )
+        rows = []
+        for line in payload.get("data", {}).get("klines", []) or []:
+            parts = str(line).split(",")
+            if len(parts) >= 2:
+                rows.append({"date": parts[0], "main_net": _to_float(parts[1])})
+        return rows
+
+    def _fetch_eastmoney_stock_info(self, code: str) -> dict[str, Any]:
+        payload = self._json_get(
+            "https://push2.eastmoney.com/api/qt/stock/get",
+            {
+                "fltt": "2",
+                "invt": "2",
+                "fields": "f57,f58,f84,f85,f127,f116,f117,f189,f43",
+                "secid": f"{_market_code(code)}.{code}",
+            },
+            {"User-Agent": UA},
+            10,
+        )
+        data = payload.get("data", {}) or {}
+        return {
+            "code": data.get("f57", ""),
+            "name": data.get("f58", ""),
+            "industry": data.get("f127", ""),
+            "total_shares": data.get("f84", 0),
+            "float_shares": data.get("f85", 0),
+            "mcap": data.get("f116", 0),
+            "float_mcap": data.get("f117", 0),
+            "list_date": data.get("f189", ""),
+            "price": data.get("f43", 0),
+        }
 
 
 class AStockDataAdapter:
     def __init__(self, fetcher: DailyBarsFetcher | None = None) -> None:
         self.fetcher = fetcher
+
+    @classmethod
+    def from_http_sources(cls) -> "AStockDataAdapter":
+        return cls(fetcher=HttpAStockFetcher().fetch_daily_bars)
 
     def fetch_daily_bars(self, symbols: Sequence[str], start_date: str, end_date: str) -> pd.DataFrame:
         if self.fetcher is None:

@@ -6,6 +6,8 @@ from datetime import date
 from typing import Any
 
 from astock_backtester.data.cache import LocalCache
+from astock_backtester.data.importer import read_daily_bars
+from astock_backtester.data.astock_adapter import AStockDataAdapter
 from astock_backtester.conditions import registered_conditions
 from astock_backtester.engine import run_backtest
 from astock_backtester.indicators import add_macd, add_market_heat, add_moving_average, add_returns, add_volume_ratio
@@ -103,13 +105,43 @@ def handle_command(payload: dict[str, Any]) -> dict[str, Any]:
         if command == "coverage":
             cache = LocalCache(payload["cache_dir"])
             return {"ok": True, "coverage": [_jsonable_model(item) for item in cache.coverage()]}
+        if command == "import_daily_bars":
+            cache = LocalCache(payload["cache_dir"])
+            source = payload.get("source", "file")
+            if source == "sample":
+                frame = sample_daily_bars()
+            elif source == "file":
+                frame = read_daily_bars(payload["path"])
+            else:
+                raise ValueError("source must be 'sample' or 'file'")
+            cache.write_daily_bars(frame)
+            return {
+                "ok": True,
+                "imported_rows": int(len(frame)),
+                "coverage": [_jsonable_model(item) for item in cache.coverage()],
+            }
         if command == "fetch_status":
             return {
                 "ok": True,
                 "status": {
-                    "configured": False,
-                    "message": "a-stock-data adapter boundary is present; configure fetcher functions before live fetching.",
+                    "configured": True,
+                    "message": "a-stock-data HTTP sources are configured for Baidu daily K-line, Eastmoney capital flow, and Eastmoney stock metadata.",
                 },
+            }
+        if command == "fetch_daily_bars":
+            cache = LocalCache(payload["cache_dir"])
+            frame = AStockDataAdapter.from_http_sources().fetch_daily_bars(
+                payload["symbols"],
+                payload["start_date"],
+                payload["end_date"],
+            )
+            if frame.empty:
+                raise ValueError("a-stock-data returned no daily bars for the requested symbols and date range")
+            cache.write_daily_bars(frame)
+            return {
+                "ok": True,
+                "imported_rows": int(len(frame)),
+                "coverage": [_jsonable_model(item) for item in cache.coverage()],
             }
         if command == "conditions":
             return {"ok": True, "conditions": [_condition_definition_json(item) for item in registered_conditions()]}

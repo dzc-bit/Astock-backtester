@@ -47,3 +47,13 @@ def test_preflight_reports_missing_capital_flow_when_required(basic_strategy, ba
 
     assert any(issue.dataset == "capital_flow" and issue.severity == "error" for issue in result.preflight_issues)
     assert result.trades == []
+
+
+def test_preflight_reports_empty_capital_flow_values_when_required(basic_strategy, basic_settings):
+    data = enriched_data()
+    data["main_net_inflow"] = float("nan")
+
+    result = run_backtest(data, basic_strategy, basic_settings)
+
+    assert any(issue.code == "empty_capital_flow" and issue.severity == "error" for issue in result.preflight_issues)
+    assert result.trades == []

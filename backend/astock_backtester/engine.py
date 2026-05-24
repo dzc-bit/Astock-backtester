@@ -59,6 +59,16 @@ def _preflight(frame: pd.DataFrame, strategy: StrategyConfig) -> list[PreflightI
                 message="Selected strategy requires capital-flow data.",
             )
         )
+    if "capital_flow_n_day_sum_at_least" in condition_ids and "main_net_inflow" in frame.columns:
+        if frame["main_net_inflow"].isna().all():
+            issues.append(
+                PreflightIssue(
+                    code="empty_capital_flow",
+                    dataset="capital_flow",
+                    severity="error",
+                    message="Selected strategy requires capital-flow data, but all cached values are missing.",
+                )
+            )
     return issues
 
 

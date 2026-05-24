@@ -1,4 +1,5 @@
 .worktrees/
+.astock-cache/
 .tools/
 node_modules/
 dist/

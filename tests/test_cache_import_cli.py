@@ -43,6 +43,34 @@ def test_cli_coverage_command_returns_daily_bars_dataset(tmp_path):
     assert response["coverage"][0]["dataset"] == "daily_bars"
 
 
+def test_cli_import_daily_bars_sample_populates_cache(tmp_path):
+    response = handle_command(
+        {"command": "import_daily_bars", "source": "sample", "cache_dir": str(tmp_path)}
+    )
+
+    assert response["ok"] is True
+    assert response["imported_rows"] == 10
+    assert response["coverage"][0]["symbols"] == 2
+
+
+def test_cli_import_daily_bars_file_populates_cache(tmp_path):
+    source = tmp_path / "daily.csv"
+    sample_daily_bars().to_csv(source, index=False)
+
+    response = handle_command(
+        {
+            "command": "import_daily_bars",
+            "source": "file",
+            "path": str(source),
+            "cache_dir": str(tmp_path / "cache"),
+        }
+    )
+
+    assert response["ok"] is True
+    assert response["imported_rows"] == 10
+    assert response["coverage"][0]["start_date"] == "2024-01-02"
+
+
 def test_cli_demo_backtest_returns_metrics():
     response = handle_command({"command": "demo_backtest"})
 

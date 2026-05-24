@@ -1,7 +1,7 @@
 import pandas as pd
 
 from astock_backtester.cli import handle_command
-from astock_backtester.data.astock_adapter import AStockDataAdapter, AStockDataUnavailable
+from astock_backtester.data.astock_adapter import AStockDataAdapter, AStockDataUnavailable, HttpAStockFetcher
 
 
 def test_adapter_reports_unconfigured_fetcher():
@@ -42,4 +42,125 @@ def test_fetch_status_is_explicit():
     response = handle_command({"command": "fetch_status"})
 
     assert response["ok"] is True
-    assert response["status"]["configured"] is False
+    assert response["status"]["configured"] is True
+
+
+def test_http_fetcher_maps_astock_data_sources_to_daily_bars():
+    def fake_json_get(url, params, headers, timeout):
+        if "getstockquotation" in url:
+            return {
+                "Result": {
+                    "newMarketData": {
+                        "keys": ["time", "open", "close", "high", "low", "volume", "amount"],
+                        "marketData": (
+                            "2024-01-02,10,10.5,11,9.8,1000,100000;"
+                            "2024-01-03,10.5,11,11.2,10.1,1500,165000"
+                        ),
+                    }
+                }
+            }
+        if "fflow/daykline/get" in url:
+            return {"data": {"klines": ["2024-01-02,2000,1,2,3,4", "2024-01-03,3000,1,2,3,4"]}}
+        if "api/qt/stock/get" in url:
+            return {"data": {"f117": 8_800_000_000, "f189": "20200101"}}
+        raise AssertionError(f"unexpected url: {url}")
+
+    fetcher = HttpAStockFetcher(json_get=fake_json_get)
+
+    result = fetcher.fetch_daily_bars(["SH600519"], "2024-01-02", "2024-01-03")
+
+    assert result["symbol"].tolist() == ["600519", "600519"]
+    assert result["trade_date"].dt.strftime("%Y-%m-%d").tolist() == ["2024-01-02", "2024-01-03"]
+    assert result["open"].tolist() == [10.0, 10.5]
+    assert result["high"].tolist() == [11.0, 11.2]
+    assert result["low"].tolist() == [9.8, 10.1]
+    assert result["close"].tolist() == [10.5, 11.0]
+    assert result["volume"].tolist() == [1000, 1500]
+    assert result["main_net_inflow"].tolist() == [2000.0, 3000.0]
+    assert result["float_market_cap"].tolist() == [8_800_000_000, 8_800_000_000]
+    assert result["listing_days"].min() > 1000
+
+
+def test_http_fetcher_keeps_missing_flow_as_missing_value():
+    def fake_json_get(url, params, headers, timeout):
+        if "getstockquotation" in url:
+            return {
+                "Result": {
+                    "newMarketData": {
+                        "keys": ["time", "open", "close", "high", "low", "volume"],
+                        "marketData": "2024-01-02,10,10.5,11,9.8,1000",
+                    }
+                }
+            }
+        if "fflow/daykline/get" in url:
+            return {"data": {"klines": ["2026-05-20,2000,1,2,3,4"]}}
+        if "api/qt/stock/get" in url:
+            return {"data": {"f117": 8_800_000_000, "f189": "20200101"}}
+        raise AssertionError(f"unexpected url: {url}")
+
+    fetcher = HttpAStockFetcher(json_get=fake_json_get)
+
+    result = fetcher.fetch_daily_bars(["600519"], "2024-01-02", "2024-01-02")
+
+    assert pd.isna(result.loc[0, "main_net_inflow"])
+
+
+def test_http_fetcher_keeps_daily_bars_when_optional_sources_fail():
+    def fake_json_get(url, params, headers, timeout):
+        if "getstockquotation" in url:
+            return {
+                "Result": {
+                    "newMarketData": {
+                        "keys": ["time", "open", "close", "high", "low", "volume"],
+                        "marketData": "2024-01-02,10,10.5,11,9.8,1000",
+                    }
+                }
+            }
+        raise OSError("optional source unavailable")
+
+    fetcher = HttpAStockFetcher(json_get=fake_json_get)
+
+    result = fetcher.fetch_daily_bars(["600519"], "2024-01-02", "2024-01-02")
+
+    assert len(result) == 1
+    assert result.loc[0, "close"] == 10.5
+    assert pd.isna(result.loc[0, "main_net_inflow"])
+    assert pd.isna(result.loc[0, "float_market_cap"])
+
+
+def test_cli_fetch_daily_bars_writes_cache(monkeypatch, tmp_path):
+    class FakeAdapter:
+        def fetch_daily_bars(self, symbols, start_date, end_date):
+            assert symbols == ["600519"]
+            assert start_date == "2024-01-02"
+            assert end_date == "2024-01-08"
+            return pd.DataFrame(
+                {
+                    "symbol": ["600519"],
+                    "trade_date": ["2024-01-02"],
+                    "open": [10.0],
+                    "high": [11.0],
+                    "low": [9.8],
+                    "close": [10.5],
+                    "volume": [1000],
+                }
+            )
+
+    monkeypatch.setattr(
+        "astock_backtester.cli.AStockDataAdapter.from_http_sources",
+        lambda: FakeAdapter(),
+    )
+
+    response = handle_command(
+        {
+            "command": "fetch_daily_bars",
+            "symbols": ["600519"],
+            "start_date": "2024-01-02",
+            "end_date": "2024-01-08",
+            "cache_dir": str(tmp_path),
+        }
+    )
+
+    assert response["ok"] is True
+    assert response["imported_rows"] == 1
+    assert response["coverage"][0]["symbols"] == 1
