@@ -774,7 +774,8 @@ $latest = @{
     }
   }
 }
-$latest | ConvertTo-Json -Depth 5 | Set-Content -Encoding UTF8 latest.json
+$latestJson = $latest | ConvertTo-Json -Depth 5
+[System.IO.File]::WriteAllText((Resolve-Path ".\latest.json"), $latestJson, [System.Text.UTF8Encoding]::new($false))
 ```
 
 Do not include platform entries for macOS or Linux until those release assets are valid. Tauri validates the whole static JSON before comparing versions.

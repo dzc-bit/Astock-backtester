@@ -100,7 +100,8 @@ $latest = @{
     }
   }
 }
-$latest | ConvertTo-Json -Depth 5 | Set-Content -Encoding UTF8 latest.json
+$latestJson = $latest | ConvertTo-Json -Depth 5
+[System.IO.File]::WriteAllText((Resolve-Path ".\latest.json"), $latestJson, [System.Text.UTF8Encoding]::new($false))
 ```
 
 不要提前加入 macOS 或 Linux 平台字段。静态 JSON 会被 updater 整体解析，只有真实可用的平台资产才应该写入。
