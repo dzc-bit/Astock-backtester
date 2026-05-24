@@ -24,7 +24,7 @@ $env:PYTHONPATH = "backend"
 In this Codex desktop environment, the system `python` command is not on PATH. The bundled Python used for verification is:
 
 ```powershell
-C:\Users\大帝之资\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe
+$env:USERPROFILE\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe
 ```
 
 The bundled Python can run the backend tests, but it does not include `pyarrow`. The local cache falls back to a pickle file when Parquet support is unavailable, while preserving the Parquet path for environments with `pyarrow` installed.
@@ -54,7 +54,7 @@ This environment has a bundled `node.exe`, but no global `npm`, `npx`, `pnpm`, `
 For this Codex desktop workspace only, a local npm tarball was downloaded to the gitignored `.tools\npm-10.9.0` directory and run with the bundled Node:
 
 ```powershell
-$nodeDir = "C:\Users\大帝之资\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin"
+$nodeDir = "$env:USERPROFILE\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin"
 $npm = ".tools\npm-10.9.0\package\bin\npm-cli.js"
 $env:PATH = "$nodeDir;$env:PATH"
 & "$nodeDir\node.exe" $npm install
@@ -86,4 +86,24 @@ before starting the desktop app.
 
 The Tauri bridge calls `python -m astock_backtester.cli` with `PYTHONPATH=backend` in development. Packaged sidecar bundling is a later hardening step after the development bridge is verified.
 
-For a normal Windows checkout, install Rust with rustup and install the Windows build tools required by Tauri. This Codex workspace used a gitignored project-local Rust toolchain under `.tools\cargo-home` and `.tools\rustup-home`; `npm run tauri -- build --debug --no-bundle` compiled the desktop app binary here. Full NSIS/MSI installer bundling still requires the matching Windows bundling tools on PATH; without them `tauri build --debug` fails after the executable is built.
+For a normal Windows checkout, install:
+
+- Node.js LTS with npm.
+- Rust with rustup, using the `x86_64-pc-windows-msvc` toolchain.
+- Visual Studio Build Tools 2022 with the C++ workload (`Microsoft.VisualStudio.Workload.VCTools`) and Windows 10/11 SDK.
+
+The app is configured for NSIS bundles. `bundle.useLocalToolsDir` is enabled in `src-tauri\tauri.conf.json`, so Tauri caches NSIS under `src-tauri\target\.tauri` instead of the user profile cache. If the first installer build runs on a network-restricted machine, allow access to Tauri's GitHub binary releases or pre-populate that cache.
+
+This Codex workspace used a gitignored project-local Rust/npm setup under `.tools`. Because the elevated Codex sandbox maps the workspace through `C:\Users\CodexSandboxOffline\.codex\.sandbox\cwd\...`, MSVC debug PDB writes can fail in debug builds. For this environment only, load the MSVC environment and disable dev debug symbols for the build process:
+
+```powershell
+$tools = (Resolve-Path .tools).Path
+$nodeDir = "$env:USERPROFILE\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin"
+$cargoBin = Join-Path $tools "cargo-home\bin"
+$npm = Join-Path $tools "npm-10.9.0\package\bin\npm-cli.js"
+$env:RUSTUP_HOME = Join-Path $tools "rustup-home"
+$env:CARGO_HOME = Join-Path $tools "cargo-home"
+$env:npm_config_cache = Join-Path $tools "npm-cache"
+$env:CARGO_PROFILE_DEV_DEBUG = "0"
+cmd /S /C "call `"C:\BuildTools\VC\Auxiliary\Build\vcvars64.bat`" && set `"PATH=$tools;$cargoBin;$nodeDir;%PATH%`" && set `"RUSTUP_HOME=$env:RUSTUP_HOME`" && set `"CARGO_HOME=$env:CARGO_HOME`" && set `"npm_config_cache=$env:npm_config_cache`" && set `"CARGO_PROFILE_DEV_DEBUG=0`" && `"$nodeDir\node.exe`" `"$npm`" run tauri -- build --debug"
+```
