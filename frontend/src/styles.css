@@ -70,6 +70,7 @@ body {
   flex-wrap: wrap;
   justify-content: flex-end;
   gap: 10px;
+  max-width: 680px;
 }
 
 .status-pill,
@@ -91,6 +92,72 @@ body {
 .status-pill.compact {
   padding: 5px 9px;
   font-size: 12px;
+}
+
+.update-panel {
+  display: grid;
+  gap: 8px;
+  min-width: min(100%, 430px);
+  border: 1px solid #d7dee8;
+  border-radius: 8px;
+  background: #fbfcfe;
+  padding: 10px;
+}
+
+.update-panel.has-error {
+  border-color: #f4b4a2;
+  background: #fff7ed;
+}
+
+.update-panel-main,
+.update-panel-actions,
+.update-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.update-panel-main {
+  justify-content: space-between;
+}
+
+.update-panel-actions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.update-version {
+  background: #eef6f5;
+  border-color: #99d6cc;
+  color: #0f766e;
+}
+
+.update-status {
+  color: #526071;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.update-panel.has-error .update-status {
+  color: #9a3412;
+}
+
+.update-details {
+  display: grid;
+  gap: 4px;
+  border-top: 1px solid #e3e9f1;
+  padding-top: 8px;
+  color: #334155;
+  font-size: 13px;
+}
+
+.update-details strong {
+  color: #0f766e;
+}
+
+.update-details p {
+  margin: 0;
+  color: #526071;
 }
 
 .summary-band {
@@ -461,6 +528,22 @@ input:focus {
   .topbar,
   .section-title {
     align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .topbar-actions,
+  .update-panel,
+  .update-panel-main {
+    width: 100%;
+  }
+
+  .topbar-actions,
+  .update-panel-main {
+    align-items: flex-start;
+    justify-content: flex-start;
+  }
+
+  .update-panel-main {
     flex-direction: column;
   }
 

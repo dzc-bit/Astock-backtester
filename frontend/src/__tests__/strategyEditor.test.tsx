@@ -61,6 +61,8 @@ describe("A 股回测工作台界面", () => {
     render(<App />);
 
     expect(screen.getByRole("heading", { name: "A股策略回测工作台" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "检查更新" })).toBeInTheDocument();
+    expect(screen.getByText(/当前版本/)).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "数据中心" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "策略条件" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "回测设置" })).toBeInTheDocument();

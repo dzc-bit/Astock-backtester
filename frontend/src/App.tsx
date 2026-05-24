@@ -6,6 +6,7 @@ import { DataCenter } from "./components/DataCenter";
 import { ResultsOverview } from "./components/ResultsOverview";
 import { StrategyEditor } from "./components/StrategyEditor";
 import { TradesTable } from "./components/TradesTable";
+import { UpdatePanel } from "./components/UpdatePanel";
 import { defaultSettings, defaultStrategy } from "./strategyDefaults";
 import type { BacktestResult, BacktestSettingsConfig, DatasetCoverage, StrategyConfig } from "./types";
 
@@ -80,6 +81,7 @@ export function App() {
           <p>基于本地 a-stock-data 历史数据，调参、回滚、查看策略预期收益。</p>
         </div>
         <div className="topbar-actions" aria-label="运行状态">
+          <UpdatePanel />
           <span className="status-pill"><Activity size={16} aria-hidden="true" /> 保守日线撮合</span>
           <span className="status-pill"><Database size={16} aria-hidden="true" /> 本地缓存</span>
         </div>
