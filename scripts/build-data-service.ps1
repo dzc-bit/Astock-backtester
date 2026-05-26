@@ -38,6 +38,9 @@ try {
     --workpath $workDir `
     --specpath $specDir `
     --paths backend `
+    --collect-all adata `
+    --hidden-import requests `
+    --hidden-import bs4 `
     backend\astock_backtester\service.py
   if ($LASTEXITCODE -ne 0) {
     throw "PyInstaller failed with exit code $LASTEXITCODE"
