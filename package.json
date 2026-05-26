@@ -7,6 +7,7 @@
     "dev": "vite --host 127.0.0.1 --config frontend/vite.config.ts",
     "test:ui": "vitest --config frontend/vitest.config.ts",
     "build": "vite build --config frontend/vite.config.ts",
+    "build:data-service": "powershell -ExecutionPolicy Bypass -File scripts/build-data-service.ps1",
     "tauri": "tauri"
   },
   "dependencies": {
