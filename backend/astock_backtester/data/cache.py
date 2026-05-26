@@ -39,6 +39,15 @@ class LocalCache:
 
     def write_daily_bars(self, frame: pd.DataFrame) -> None:
         normalized = normalize_daily_bars(frame)
+        current = self.read_daily_bars()
+        if not current.empty:
+            normalized = (
+                normalized.set_index(["symbol", "trade_date"])
+                .combine_first(current.set_index(["symbol", "trade_date"]))
+                .reset_index()
+                .sort_values(["symbol", "trade_date"])
+                .reset_index(drop=True)
+            )
         try:
             normalized.to_parquet(self.daily_bars_path, index=False)
             if self.daily_bars_pickle_path.exists():
@@ -60,13 +69,33 @@ class LocalCache:
     def coverage(self) -> list[DatasetCoverage]:
         bars = self.read_daily_bars()
         if bars.empty:
-            return [DatasetCoverage(dataset="daily_bars", symbols=0, start_date=None, end_date=None)]
+            return [
+                DatasetCoverage(dataset="daily_bars", symbols=0, start_date=None, end_date=None),
+                DatasetCoverage(dataset="capital_flow", symbols=0, start_date=None, end_date=None),
+                DatasetCoverage(dataset="market_cap", symbols=0, start_date=None, end_date=None),
+            ]
+        start_date = bars["trade_date"].min().date()
+        end_date = bars["trade_date"].max().date()
         return [
             DatasetCoverage(
                 dataset="daily_bars",
                 symbols=int(bars["symbol"].nunique()),
-                start_date=bars["trade_date"].min().date(),
-                end_date=bars["trade_date"].max().date(),
+                start_date=start_date,
+                end_date=end_date,
                 missing_rows=int(bars[["open", "high", "low", "close"]].isna().any(axis=1).sum()),
-            )
+            ),
+            DatasetCoverage(
+                dataset="capital_flow",
+                symbols=int(bars.loc[bars["main_net_inflow"].notna(), "symbol"].nunique()),
+                start_date=start_date,
+                end_date=end_date,
+                missing_rows=int(bars["main_net_inflow"].isna().sum()),
+            ),
+            DatasetCoverage(
+                dataset="market_cap",
+                symbols=int(bars.loc[bars["float_market_cap"].notna(), "symbol"].nunique()),
+                start_date=start_date,
+                end_date=end_date,
+                missing_rows=int(bars["float_market_cap"].isna().sum()),
+            ),
         ]

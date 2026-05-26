@@ -24,7 +24,7 @@ def normalize_daily_bars(frame: pd.DataFrame) -> pd.DataFrame:
     optional_defaults = {
         "turnover_rate": 0.0,
         "float_market_cap": float("nan"),
-        "main_net_inflow": 0.0,
+        "main_net_inflow": float("nan"),
         "is_st": False,
         "is_suspended": False,
         "listing_days": 9999,

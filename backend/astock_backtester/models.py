@@ -112,6 +112,42 @@ class DatasetCoverage(BaseModel):
     missing_rows: int = 0
 
 
+class ServiceLogEntry(BaseModel):
+    level: Literal["info", "warning", "error"]
+    message: str
+
+
+class DailyBarsCoverageItem(BaseModel):
+    symbol: str
+    start_date: date | None
+    end_date: date | None
+    rows: int
+    missing_trade_dates: list[date] = Field(default_factory=list)
+    missing_capital_flow_dates: list[date] = Field(default_factory=list)
+    missing_market_cap_dates: list[date] = Field(default_factory=list)
+
+
+class DailyBarsCoverageResponse(BaseModel):
+    items: list[DailyBarsCoverageItem]
+
+
+class DataOperationResult(BaseModel):
+    status: Literal["ok", "partial"]
+    imported_rows: int
+    requested_symbols: list[str] = Field(default_factory=list)
+    fetched_symbols: list[str] = Field(default_factory=list)
+    missing_symbols: list[str] = Field(default_factory=list)
+    coverage: list[DatasetCoverage]
+    logs: list[ServiceLogEntry] = Field(default_factory=list)
+
+
+class ServiceHealth(BaseModel):
+    ok: bool
+    cache_path: str
+    port: int | None = None
+    coverage: list[DatasetCoverage]
+
+
 class PreflightIssue(BaseModel):
     code: str
     message: str
