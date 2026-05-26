@@ -148,6 +148,20 @@ class ServiceHealth(BaseModel):
     coverage: list[DatasetCoverage]
 
 
+class SyncJobStatus(BaseModel):
+    job_id: str
+    mode: Literal["full_market_bootstrap", "incremental_update", "retry_failed"]
+    status: Literal["running", "completed", "completed_with_errors", "failed"]
+    total_symbols: int
+    completed_symbols: int = 0
+    failed_symbols: int = 0
+    imported_rows: int = 0
+    current_symbol: str | None = None
+    start_date: date
+    end_date: date
+    errors: list[str] = Field(default_factory=list)
+
+
 class PreflightIssue(BaseModel):
     code: str
     message: str
