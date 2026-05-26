@@ -22,8 +22,13 @@ def normalize_daily_bars(frame: pd.DataFrame) -> pd.DataFrame:
         out[column] = pd.to_numeric(out[column], errors="raise")
 
     optional_defaults = {
+        "amount": 0.0,
+        "change_pct": 0.0,
+        "change": 0.0,
         "turnover_rate": 0.0,
+        "pre_close": float("nan"),
         "float_market_cap": float("nan"),
+        "total_market_cap": float("nan"),
         "main_net_inflow": float("nan"),
         "is_st": False,
         "is_suspended": False,
@@ -32,6 +37,18 @@ def normalize_daily_bars(frame: pd.DataFrame) -> pd.DataFrame:
     for column, default in optional_defaults.items():
         if column not in out.columns:
             out[column] = default
+
+    for column in [
+        "amount",
+        "change_pct",
+        "change",
+        "turnover_rate",
+        "pre_close",
+        "float_market_cap",
+        "total_market_cap",
+        "main_net_inflow",
+    ]:
+        out[column] = pd.to_numeric(out[column], errors="coerce")
 
     return out.sort_values(["symbol", "trade_date"]).reset_index(drop=True)
 
