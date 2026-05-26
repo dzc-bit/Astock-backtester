@@ -1,3 +1,5 @@
+import pandas as pd
+
 from astock_backtester.engine import run_backtest
 from astock_backtester.indicators import add_market_heat, add_moving_average, add_returns
 from astock_backtester.sample_data import sample_daily_bars
@@ -57,3 +59,25 @@ def test_preflight_reports_empty_capital_flow_values_when_required(basic_strateg
 
     assert any(issue.code == "empty_capital_flow" and issue.severity == "error" for issue in result.preflight_issues)
     assert result.trades == []
+
+
+def test_market_cap_strategy_requires_non_empty_market_cap(basic_strategy, basic_settings):
+    frame = pd.DataFrame(
+        {
+            "symbol": ["AAA"],
+            "trade_date": pd.to_datetime(["2024-01-02"]),
+            "open": [10.0],
+            "high": [10.5],
+            "low": [9.8],
+            "close": [10.2],
+            "volume": [1000],
+            "is_suspended": [False],
+            "listing_days": [100],
+            "float_market_cap": [float("nan")],
+            "main_net_inflow": [1000000.0],
+        }
+    )
+
+    result = run_backtest(frame, basic_strategy, basic_settings)
+
+    assert any(issue.code == "empty_market_cap" for issue in result.preflight_issues)

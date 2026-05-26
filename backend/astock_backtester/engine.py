@@ -69,6 +69,16 @@ def _preflight(frame: pd.DataFrame, strategy: StrategyConfig) -> list[PreflightI
                     message="Selected strategy requires capital-flow data, but all cached values are missing.",
                 )
             )
+    if "market_cap_between" in condition_ids and "float_market_cap" in frame.columns:
+        if frame["float_market_cap"].isna().all():
+            issues.append(
+                PreflightIssue(
+                    code="empty_market_cap",
+                    dataset="market_cap",
+                    severity="error",
+                    message="Selected strategy requires market-cap data, but all cached values are missing.",
+                )
+            )
     return issues
 
 
