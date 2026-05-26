@@ -1,6 +1,6 @@
 # Windows 发布与应用内更新
 
-本项目的 Windows 桌面版使用 Tauri updater 和 GitHub Releases 发布更新。应用内更新入口读取：
+Windows 桌面版使用 Tauri updater 和 GitHub Releases 发布更新。应用内“检查更新”读取：
 
 ```text
 https://github.com/dzc-bit/A_stock_receiver/releases/latest/download/latest.json
@@ -43,14 +43,39 @@ npm run tauri -- signer generate -w "$env:USERPROFILE\.tauri\a-stock-receiver.ke
 发布前把这些版本号保持一致：
 
 - `package.json`
+- `pyproject.toml`
 - `src-tauri/Cargo.toml`
 - `src-tauri/tauri.conf.json`
 
 Git tag 使用 `v版本号`，例如：
 
 ```text
-v0.2.0
+v0.1.1
 ```
+
+## Release Order
+
+1. Bump `package.json`, `pyproject.toml`, `src-tauri/Cargo.toml`, and `src-tauri/tauri.conf.json` to the same version.
+2. Build the sidecar with `scripts/build-data-service.ps1`.
+3. Build the signed NSIS installer.
+4. Generate `release-assets/latest.json` with `scripts/write-latest-json.ps1`.
+5. Create the GitHub Release and upload the installer plus `latest.json`.
+6. Verify `https://github.com/dzc-bit/A_stock_receiver/releases/latest/download/latest.json` returns the new version.
+
+`latest.json` must be generated from the real `.sig` file produced next to the installer. Do not hand-edit a future version into `release-assets/latest.json` before the installer and signature exist, because the app updater verifies that signature.
+
+## Build The Local Data Service Sidecar
+
+Before a release build, create the Windows service executable:
+
+```powershell
+python -m pip install -e ".[dev]"
+powershell -ExecutionPolicy Bypass -File scripts/build-data-service.ps1
+```
+
+Expected output:
+
+- `src-tauri\bin\astock-data-service.exe`
 
 ## 构建签名安装包
 
@@ -59,6 +84,7 @@ v0.2.0
 ```powershell
 $env:TAURI_SIGNING_PRIVATE_KEY = Get-Content -Raw "$env:USERPROFILE\.tauri\a-stock-receiver.key"
 $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = ""
+npm run build:data-service
 npm run build
 npm run tauri -- build --ci
 Remove-Item Env:\TAURI_SIGNING_PRIVATE_KEY
@@ -82,26 +108,14 @@ Remove-Item Env:\TAURI_SIGNING_PRIVATE_KEY
 
 ## latest.json
 
-用发布版本、安装包 URL 和签名内容生成 `latest.json`。示例：
+用发布版本、安装包 URL 和签名内容生成 `latest.json`：
 
 ```powershell
-$version = "0.2.0"
-$tag = "v$version"
-$assetName = "A股策略回测工作台_0.2.0_x64-setup.exe"
-$signature = (Get-Content -Raw "src-tauri\target\release\bundle\nsis\$assetName.sig").Trim()
-$latest = @{
-  version = $version
-  notes = "新增应用内更新。"
-  pub_date = "2026-05-24T08:00:00Z"
-  platforms = @{
-    "windows-x86_64" = @{
-      signature = $signature
-      url = "https://github.com/dzc-bit/A_stock_receiver/releases/download/$tag/$assetName"
-    }
-  }
-}
-$latestJson = $latest | ConvertTo-Json -Depth 5
-[System.IO.File]::WriteAllText((Resolve-Path ".\latest.json"), $latestJson, [System.Text.UTF8Encoding]::new($false))
+$assetName = "A股策略回测工作台_0.1.1_x64-setup.exe"
+powershell -ExecutionPolicy Bypass -File scripts/write-latest-json.ps1 `
+  -Version "0.1.1" `
+  -AssetName $assetName `
+  -Notes "新增本地数据服务与数据中心缺口补数。"
 ```
 
 不要提前加入 macOS 或 Linux 平台字段。静态 JSON 会被 updater 整体解析，只有真实可用的平台资产才应该写入。
@@ -112,6 +126,6 @@ $latestJson = $latest | ConvertTo-Json -Depth 5
 2. 点击“检查更新”。
 3. 如果 `latest.json` 版本更高，并且签名有效，应用显示“发现新版本”。
 4. 用户点击“安装并重启”。
-5. Tauri 下载 NSIS 安装包、校验签名、安装并重启应用。
+5. Tauri 下载安装包、校验签名、安装并重启应用。
 
-真实跨版本验证需要至少两个已发布的签名版本。本地验证只能证明构建、签名产物和应用内更新入口可用。
+真实跨版本验证需要至少两个已经发布的签名版本。本地验证只能证明构建、签名产物和应用内更新入口可用。

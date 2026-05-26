@@ -63,22 +63,22 @@ describe("A 股回测工作台界面", () => {
       message: "browser preview uses mock local service"
     });
     apiMocks.loadDailyBarsCoverage.mockResolvedValue({
-      summary: [
-        { dataset: "daily_bars", symbols: 2, start_date: "2024-01-02", end_date: "2024-01-08", missing_rows: 0 }
-      ],
       items: []
     });
     apiMocks.fetchDailyBars.mockResolvedValue({
+      status: "ok",
       imported_rows: 0,
-      symbols_with_data: [],
-      symbols_missing: [],
+      requested_symbols: [],
+      fetched_symbols: [],
+      missing_symbols: [],
       coverage: [],
-      message: "no-op"
+      logs: []
     });
     apiMocks.importDailyBars.mockResolvedValue({
+      status: "ok",
       imported_rows: 0,
       coverage: [],
-      message: "no-op"
+      logs: []
     });
     apiMocks.loadCoverage.mockResolvedValue([
       { dataset: "daily_bars", symbols: 2, start_date: "2024-01-02", end_date: "2024-01-08", missing_rows: 0 }

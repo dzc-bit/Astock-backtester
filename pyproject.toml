@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "astock-backtester"
-version = "0.1.0"
+version = "0.1.1"
 description = "Windows desktop A-share daily historical backtester backend"
 requires-python = ">=3.11"
 dependencies = [
@@ -16,6 +16,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+  "pyinstaller>=6.10",
   "pytest>=8.2",
   "ruff>=0.5",
 ]

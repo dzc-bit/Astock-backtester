@@ -2,6 +2,8 @@ param(
   [string]$Python = $env:ASTOCK_BACKTESTER_PYTHON
 )
 
+$ErrorActionPreference = "Stop"
+
 if (-not $Python) {
   $Python = "python"
 }
@@ -10,22 +12,40 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 $distDir = Join-Path $repoRoot "src-tauri\bin"
 $workDir = Join-Path $repoRoot ".pyinstaller\build"
 $specDir = Join-Path $repoRoot ".pyinstaller\spec"
+$targetExe = Join-Path $distDir "astock-data-service.exe"
 
 New-Item -ItemType Directory -Force $distDir | Out-Null
 New-Item -ItemType Directory -Force $workDir | Out-Null
 New-Item -ItemType Directory -Force $specDir | Out-Null
 
-& $Python -m PyInstaller `
-  --noconfirm `
-  --clean `
-  --onefile `
-  --name astock-data-service `
-  --distpath $distDir `
-  --workpath $workDir `
-  --specpath $specDir `
-  --paths backend `
-  backend\astock_backtester\service.py
+$pythonCommand = Get-Command $Python -ErrorAction SilentlyContinue
+if (-not $pythonCommand) {
+  throw "Python executable not found: $Python. Install Python 3.11+ or set ASTOCK_BACKTESTER_PYTHON."
+}
 
-if (-not (Test-Path (Join-Path $distDir "astock-data-service.exe"))) {
+if (Test-Path $targetExe) {
+  Remove-Item -LiteralPath $targetExe -Force
+}
+
+Push-Location $repoRoot
+try {
+  & $pythonCommand.Source -m PyInstaller `
+    --noconfirm `
+    --clean `
+    --onefile `
+    --name astock-data-service `
+    --distpath $distDir `
+    --workpath $workDir `
+    --specpath $specDir `
+    --paths backend `
+    backend\astock_backtester\service.py
+  if ($LASTEXITCODE -ne 0) {
+    throw "PyInstaller failed with exit code $LASTEXITCODE"
+  }
+} finally {
+  Pop-Location
+}
+
+if (-not (Test-Path $targetExe)) {
   throw "astock-data-service.exe was not created"
 }

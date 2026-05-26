@@ -95,6 +95,21 @@ before starting the desktop app.
 
 The Tauri bridge calls `python -m astock_backtester.cli` with `PYTHONPATH=backend` in development. Packaged sidecar bundling is a later hardening step after the development bridge is verified.
 
+## Build The Local Data Service Sidecar
+
+Before a release build, create the Windows service executable:
+
+```powershell
+python -m pip install -e ".[dev]"
+powershell -ExecutionPolicy Bypass -File scripts/build-data-service.ps1
+```
+
+Expected output:
+
+- `src-tauri\bin\astock-data-service.exe`
+
+The Tauri release build runs `npm run build:data-service` through `build.beforeBuildCommand`, but running it explicitly first makes missing Python or PyInstaller problems easier to diagnose.
+
 For a normal Windows checkout, install:
 
 - Node.js LTS with npm.

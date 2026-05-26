@@ -33,24 +33,27 @@ describe("DataCenter", () => {
           symbol: "600519",
           start_date: "2024-01-02",
           end_date: "2024-01-03",
-          row_count: 2,
-          missing_dates: ["2024-01-04"],
+          rows: 2,
+          missing_trade_dates: ["2024-01-04"],
           missing_capital_flow_dates: ["2024-01-02"],
           missing_market_cap_dates: []
         }
       ]
     });
     apiMocks.fetchDailyBars.mockResolvedValue({
+      status: "ok",
       imported_rows: 3,
-      symbols_with_data: ["600519"],
-      symbols_missing: [],
+      requested_symbols: ["600519"],
+      fetched_symbols: ["600519"],
+      missing_symbols: [],
       coverage,
-      message: "daily bars fetched and merged into local cache"
+      logs: [{ level: "info", message: "Fetched 3 daily bar rows" }]
     });
     apiMocks.importDailyBars.mockResolvedValue({
+      status: "ok",
       imported_rows: 2,
       coverage,
-      message: "daily bars imported into local cache"
+      logs: [{ level: "info", message: "Imported daily bars from sample" }]
     });
   });
 
@@ -87,6 +90,6 @@ describe("DataCenter", () => {
       "2024-01-08"
     ));
     expect(onRefresh).toHaveBeenCalledTimes(1);
-    expect(await screen.findByText("daily bars fetched and merged into local cache")).toBeInTheDocument();
+    expect(await screen.findByText("Fetched 3 daily bar rows")).toBeInTheDocument();
   });
 });

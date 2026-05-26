@@ -18,29 +18,36 @@ export type DailyBarsCoverageItem = {
   symbol: string;
   start_date: string | null;
   end_date: string | null;
-  row_count: number;
-  missing_dates: string[];
+  rows: number;
+  missing_trade_dates: string[];
   missing_capital_flow_dates: string[];
   missing_market_cap_dates: string[];
 };
 
 export type DailyBarsCoverageResponse = {
-  summary: DatasetCoverage[];
   items: DailyBarsCoverageItem[];
 };
 
-export type FetchResult = {
-  imported_rows: number;
-  symbols_with_data: string[];
-  symbols_missing: string[];
-  coverage: DatasetCoverage[];
+export type ServiceLogEntry = {
+  level: "info" | "warning" | "error";
   message: string;
 };
 
+export type FetchResult = {
+  status: "ok" | "partial";
+  imported_rows: number;
+  requested_symbols: string[];
+  fetched_symbols: string[];
+  missing_symbols: string[];
+  coverage: DatasetCoverage[];
+  logs: ServiceLogEntry[];
+};
+
 export type ImportResult = {
+  status: "ok" | "partial";
   imported_rows: number;
   coverage: DatasetCoverage[];
-  message: string;
+  logs: ServiceLogEntry[];
 };
 
 export type ConditionNode = {

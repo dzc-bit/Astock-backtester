@@ -21,6 +21,10 @@ function formatList(values: string[]): string {
   return values.length === 0 ? "无" : values.join(", ");
 }
 
+function operationMessage(logs: { message: string }[]): string {
+  return logs.at(-1)?.message ?? "数据操作已完成";
+}
+
 export function DataCenter({ cacheDir, coverage, onRefresh }: Props) {
   const [service, setService] = useState<DataServiceStatus | null>(null);
   const [symbolsInput, setSymbolsInput] = useState("600519");
@@ -102,7 +106,7 @@ export function DataCenter({ cacheDir, coverage, onRefresh }: Props) {
     setBusy(true);
     try {
       const result = await fetchDailyBars(service.base_url, symbols, startDate, endDate);
-      setMessage(result.message);
+      setMessage(operationMessage(result.logs));
       await onRefresh();
       await refreshDetails(service);
     } catch (error) {
@@ -119,7 +123,7 @@ export function DataCenter({ cacheDir, coverage, onRefresh }: Props) {
     setBusy(true);
     try {
       const result = await importDailyBars(service.base_url, "sample");
-      setMessage(result.message);
+      setMessage(operationMessage(result.logs));
       await onRefresh();
       await refreshDetails(service);
     } catch (error) {
@@ -136,7 +140,7 @@ export function DataCenter({ cacheDir, coverage, onRefresh }: Props) {
     setBusy(true);
     try {
       const result = await importDailyBars(service.base_url, "file", importPath.trim());
-      setMessage(result.message);
+      setMessage(operationMessage(result.logs));
       await onRefresh();
       await refreshDetails(service);
     } catch (error) {
@@ -248,8 +252,8 @@ export function DataCenter({ cacheDir, coverage, onRefresh }: Props) {
         {items.map((item) => (
           <article key={item.symbol} className="coverage-item">
             <strong>{item.symbol}</strong>
-            <span>{item.start_date ?? "-"} 至 {item.end_date ?? "-"}，{item.row_count} 行</span>
-            <span>缺失日期: {formatList(item.missing_dates)}</span>
+            <span>{item.start_date ?? "-"} 至 {item.end_date ?? "-"}，{item.rows} 行</span>
+            <span>缺失日期: {formatList(item.missing_trade_dates)}</span>
             <span>缺失资金流: {formatList(item.missing_capital_flow_dates)}</span>
             <span>缺失市值: {formatList(item.missing_market_cap_dates)}</span>
           </article>
