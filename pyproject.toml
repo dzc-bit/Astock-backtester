@@ -8,10 +8,13 @@ version = "0.1.2"
 description = "Windows desktop A-share daily historical backtester backend"
 requires-python = ">=3.11"
 dependencies = [
+  "adata>=2.9.5",
+  "beautifulsoup4>=4.14",
   "numpy>=1.26",
   "pandas>=2.2",
   "pyarrow>=15",
   "pydantic>=2.7",
+  "requests>=2.32",
 ]
 
 [project.optional-dependencies]
