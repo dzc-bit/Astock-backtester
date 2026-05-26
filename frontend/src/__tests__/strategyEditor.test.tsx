@@ -4,6 +4,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "../App";
 
 const apiMocks = vi.hoisted(() => ({
+  ensureDataService: vi.fn(),
+  fetchDailyBars: vi.fn(),
+  importDailyBars: vi.fn(),
+  loadDailyBarsCoverage: vi.fn(),
   loadCoverage: vi.fn(),
   runConfiguredBacktest: vi.fn()
 }));
@@ -51,6 +55,31 @@ const demoResult = {
 
 describe("A 股回测工作台界面", () => {
   beforeEach(() => {
+    apiMocks.ensureDataService.mockResolvedValue({
+      running: true,
+      port: 9010,
+      base_url: "http://127.0.0.1:9010",
+      cache_dir: ".astock-cache",
+      message: "browser preview uses mock local service"
+    });
+    apiMocks.loadDailyBarsCoverage.mockResolvedValue({
+      summary: [
+        { dataset: "daily_bars", symbols: 2, start_date: "2024-01-02", end_date: "2024-01-08", missing_rows: 0 }
+      ],
+      items: []
+    });
+    apiMocks.fetchDailyBars.mockResolvedValue({
+      imported_rows: 0,
+      symbols_with_data: [],
+      symbols_missing: [],
+      coverage: [],
+      message: "no-op"
+    });
+    apiMocks.importDailyBars.mockResolvedValue({
+      imported_rows: 0,
+      coverage: [],
+      message: "no-op"
+    });
     apiMocks.loadCoverage.mockResolvedValue([
       { dataset: "daily_bars", symbols: 2, start_date: "2024-01-02", end_date: "2024-01-08", missing_rows: 0 }
     ]);

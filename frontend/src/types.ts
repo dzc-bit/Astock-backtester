@@ -6,6 +6,43 @@ export type DatasetCoverage = {
   missing_rows: number;
 };
 
+export type DataServiceStatus = {
+  running: boolean;
+  port: number;
+  base_url: string;
+  cache_dir: string;
+  message: string;
+};
+
+export type DailyBarsCoverageItem = {
+  symbol: string;
+  start_date: string | null;
+  end_date: string | null;
+  row_count: number;
+  missing_dates: string[];
+  missing_capital_flow_dates: string[];
+  missing_market_cap_dates: string[];
+};
+
+export type DailyBarsCoverageResponse = {
+  summary: DatasetCoverage[];
+  items: DailyBarsCoverageItem[];
+};
+
+export type FetchResult = {
+  imported_rows: number;
+  symbols_with_data: string[];
+  symbols_missing: string[];
+  coverage: DatasetCoverage[];
+  message: string;
+};
+
+export type ImportResult = {
+  imported_rows: number;
+  coverage: DatasetCoverage[];
+  message: string;
+};
+
 export type ConditionNode = {
   id: string;
   condition_id: string;

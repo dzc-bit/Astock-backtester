@@ -334,6 +334,61 @@ td small {
   color: #b45309;
 }
 
+.data-service-panel {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid #d7e1e8;
+  border-radius: 8px;
+  background: #f8fbfd;
+  margin-bottom: 16px;
+}
+
+.service-summary {
+  display: grid;
+  gap: 4px;
+}
+
+.service-summary span {
+  color: #536174;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.service-form {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.service-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.coverage-details {
+  display: grid;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.coverage-item {
+  display: grid;
+  gap: 6px;
+  padding: 12px;
+  border: 1px solid #d7e1e8;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #536174;
+  font-size: 13px;
+}
+
+.coverage-item strong {
+  color: #17212f;
+  font-size: 14px;
+}
+
 .strategy-grid {
   display: grid;
   grid-template-columns: minmax(260px, 360px) minmax(0, 1fr);
@@ -522,6 +577,10 @@ input:focus {
   .results-surface {
     grid-column: 1 / -1;
   }
+
+  .service-form {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 760px) {
@@ -550,7 +609,8 @@ input:focus {
   .summary-band,
   .workspace,
   .strategy-grid,
-  .parameter-panel {
+  .parameter-panel,
+  .service-form {
     grid-template-columns: minmax(0, 1fr);
   }
 

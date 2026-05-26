@@ -1,5 +1,14 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { BacktestResult, BacktestSettingsConfig, DatasetCoverage, StrategyConfig } from "./types";
+import type {
+  BacktestResult,
+  BacktestSettingsConfig,
+  DataServiceStatus,
+  DatasetCoverage,
+  DailyBarsCoverageResponse,
+  FetchResult,
+  ImportResult,
+  StrategyConfig
+} from "./types";
 
 type BackendResponse<T> = ({ ok: true } & T) | { ok: false; error: { code: string; message: string } };
 
@@ -58,9 +67,65 @@ async function callBackend<T>(payload: Record<string, unknown>): Promise<T> {
   return response;
 }
 
+async function serviceFetch<T>(baseUrl: string, path: string, payload?: Record<string, unknown>): Promise<T> {
+  const response = await fetch(`${baseUrl}${path}`, {
+    method: payload ? "POST" : "GET",
+    headers: { "Content-Type": "application/json" },
+    body: payload ? JSON.stringify(payload) : undefined
+  });
+  const json = await response.json();
+  if (!response.ok) {
+    throw new Error(json.message ?? "local data service request failed");
+  }
+  return json as T;
+}
+
+export async function ensureDataService(cacheDir: string): Promise<DataServiceStatus> {
+  if (!isTauriRuntime()) {
+    return {
+      running: true,
+      port: 9010,
+      base_url: "http://127.0.0.1:9010",
+      cache_dir: cacheDir,
+      message: "browser preview uses mock local service"
+    };
+  }
+  return invoke<DataServiceStatus>("ensure_data_service", { cacheDir });
+}
+
 export async function loadCoverage(cacheDir: string): Promise<DatasetCoverage[]> {
   const response = await callBackend<{ coverage: DatasetCoverage[] }>({ command: "coverage", cache_dir: cacheDir });
   return response.coverage;
+}
+
+export async function loadDailyBarsCoverage(
+  baseUrl: string,
+  symbols: string[],
+  startDate: string,
+  endDate: string
+): Promise<DailyBarsCoverageResponse> {
+  return serviceFetch<DailyBarsCoverageResponse>(baseUrl, "/coverage/daily-bars", {
+    symbols,
+    start_date: startDate,
+    end_date: endDate
+  });
+}
+
+export async function fetchDailyBars(
+  baseUrl: string,
+  symbols: string[],
+  startDate: string,
+  endDate: string
+): Promise<FetchResult> {
+  return serviceFetch<FetchResult>(baseUrl, "/fetch/daily-bars", {
+    symbols,
+    start_date: startDate,
+    end_date: endDate
+  });
+}
+
+export async function importDailyBars(baseUrl: string, source: "sample" | "file", path?: string): Promise<ImportResult> {
+  return serviceFetch<ImportResult>(baseUrl, "/import/daily-bars", { source, path });
 }
 
 export async function runConfiguredBacktest(strategy: StrategyConfig, settings: BacktestSettingsConfig): Promise<BacktestResult> {

@@ -121,7 +121,7 @@ export function App() {
         </article>
       </section>
       <div className="workspace">
-        <DataCenter coverage={coverage} onRefresh={refreshCoverage} />
+        <DataCenter cacheDir=".astock-cache" coverage={coverage} onRefresh={refreshCoverage} />
         <BacktestSettings settings={settings} onSettingsChange={setSettings} />
         <StrategyEditor strategy={strategy} onStrategyChange={setStrategy} />
         {error ? <div className="error-banner" role="alert">{error}</div> : null}
