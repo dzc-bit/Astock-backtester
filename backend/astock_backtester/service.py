@@ -18,6 +18,9 @@ from astock_backtester.data.operations import (
     fetch_daily_bars_into_cache,
     import_daily_bars_into_cache,
 )
+from astock_backtester.data.providers import ADataProvider, CompositeProvider, HttpAStockProvider
+from astock_backtester.data.sync import SyncJobManager
+from astock_backtester.data.warehouse import Warehouse
 from astock_backtester.backtest_runner import run_configured_backtest
 from astock_backtester.models import BacktestSettings, StrategyConfig
 
@@ -25,6 +28,9 @@ from astock_backtester.models import BacktestSettings, StrategyConfig
 class DataServiceState:
     def __init__(self, cache_dir: str | Path, port: int) -> None:
         self.cache = LocalCache(cache_dir)
+        self.warehouse = Warehouse(cache_dir)
+        self.provider = CompositeProvider([ADataProvider(), HttpAStockProvider()])
+        self.sync_manager = SyncJobManager(warehouse=self.warehouse, provider=self.provider)
         self.port = port
         self.logs: deque[dict[str, str]] = deque(maxlen=100)
         self.log("info", "local data service started")
@@ -91,6 +97,18 @@ class DataServiceHandler(BaseHTTPRequestHandler):
                     ).model_dump(mode="json")
                 )
                 return
+            if self.path == "/sync/full-market":
+                job = self.server.state.sync_manager.run_full_market(
+                    symbols=payload.get("symbols") or [],
+                    start_date=payload.get("start_date", "2015-01-01"),
+                    end_date=payload["end_date"],
+                )
+                self.server.state.log(
+                    "info",
+                    f"Full-market sync {job.status}: {job.completed_symbols}/{job.total_symbols} symbols",
+                )
+                self._send_json({"job": job.model_dump(mode="json")})
+                return
             if self.path == "/import/daily-bars":
                 if payload.get("source") == "sample":
                     from astock_backtester.sample_data import sample_daily_bars
@@ -122,7 +140,12 @@ class DataServiceHandler(BaseHTTPRequestHandler):
             if self.path == "/run/backtest":
                 strategy = StrategyConfig.model_validate(payload["strategy"])
                 settings = BacktestSettings.model_validate(payload["settings"])
-                frame = self.server.state.cache.read_daily_bars()
+                frame = self.server.state.warehouse.read_daily_bars(
+                    start_date=str(settings.start_date),
+                    end_date=str(settings.end_date),
+                )
+                if frame.empty:
+                    frame = self.server.state.cache.read_daily_bars()
                 if frame.empty:
                     raise ValueError("No cached daily bars found. Import or fetch data before running a configured backtest.")
                 result = run_configured_backtest(frame, strategy, settings)

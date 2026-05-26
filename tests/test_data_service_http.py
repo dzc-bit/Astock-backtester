@@ -88,3 +88,42 @@ def test_service_run_backtest_uses_sidecar_cache(tmp_path, basic_strategy, basic
     finally:
         server.shutdown()
         thread.join(timeout=5)
+
+
+def test_service_starts_full_market_sync_job(tmp_path):
+    class FakeManager:
+        def run_full_market(self, symbols, start_date, end_date):
+            from datetime import date
+
+            from astock_backtester.models import SyncJobStatus
+
+            assert symbols == ["000001", "000002"]
+            return SyncJobStatus(
+                job_id="job-1",
+                mode="full_market_bootstrap",
+                status="completed",
+                total_symbols=2,
+                completed_symbols=2,
+                failed_symbols=0,
+                imported_rows=2,
+                start_date=date.fromisoformat(start_date),
+                end_date=date.fromisoformat(end_date),
+            )
+
+    server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
+    server.state.sync_manager = FakeManager()
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        response = _request_json(
+            "POST",
+            f"http://127.0.0.1:{port}/sync/full-market",
+            {"symbols": ["000001", "000002"], "start_date": "2015-01-01", "end_date": "2015-01-05"},
+        )
+
+        assert response["job"]["status"] == "completed"
+        assert response["job"]["imported_rows"] == 2
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
