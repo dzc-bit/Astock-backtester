@@ -5,9 +5,10 @@ import {
   importDailyBars,
   loadDailyBarsCoverage,
   loadDataServiceHealth,
-  loadDataServiceLogs
+  loadDataServiceLogs,
+  startFullMarketSync
 } from "../api";
-import type { DailyBarsCoverageItem, DataServiceStatus, DatasetCoverage, ServiceLogEntry } from "../types";
+import type { DailyBarsCoverageItem, DataServiceStatus, DatasetCoverage, ServiceLogEntry, SyncJobStatus } from "../types";
 
 type Props = {
   cacheDir: string;
@@ -41,6 +42,7 @@ export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceRead
   const [importPath, setImportPath] = useState("");
   const [items, setItems] = useState<DailyBarsCoverageItem[]>([]);
   const [logs, setLogs] = useState<ServiceLogEntry[]>([]);
+  const [syncJob, setSyncJob] = useState<SyncJobStatus | null>(null);
   const [message, setMessage] = useState("正在连接本地数据服务");
   const [busy, setBusy] = useState(false);
 
@@ -182,6 +184,24 @@ export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceRead
     }
   };
 
+  const handleFullMarketSync = async () => {
+    if (!service) {
+      return;
+    }
+    setBusy(true);
+    try {
+      const result = await startFullMarketSync(service.base_url, startDate, endDate);
+      setSyncJob(result.job);
+      setMessage(`全市场下载完成，导入 ${result.job.imported_rows} 行`);
+      await refreshServiceState(service);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "全市场下载失败");
+      await refreshLogs(service);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <section className="surface data-center">
       <div className="section-title">
@@ -222,6 +242,9 @@ export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceRead
           </label>
         </div>
         <div className="service-actions">
+          <button className="primary-button" type="button" onClick={handleFullMarketSync} disabled={!service || busy}>
+            下载全市场历史数据
+          </button>
           <button className="primary-button" type="button" onClick={handleFetch} disabled={!service || busy || symbols.length === 0}>
             补全缺失数据
           </button>
@@ -235,6 +258,12 @@ export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceRead
         <p className="muted-code" role="status">
           {message}
         </p>
+        {syncJob ? (
+          <div className="sync-progress" role="status">
+            <strong>已完成 {syncJob.completed_symbols}/{syncJob.total_symbols}</strong>
+            <span>失败 {syncJob.failed_symbols}，导入 {syncJob.imported_rows} 行</span>
+          </div>
+        ) : null}
         {logs.length > 0 ? (
           <div className="service-log-list" aria-label="本地服务日志">
             {logs.slice(0, 5).map((entry, index) => (

@@ -9,7 +9,8 @@ const apiMocks = vi.hoisted(() => ({
   importDailyBars: vi.fn(),
   loadDataServiceHealth: vi.fn(),
   loadDataServiceLogs: vi.fn(),
-  loadDailyBarsCoverage: vi.fn()
+  loadDailyBarsCoverage: vi.fn(),
+  startFullMarketSync: vi.fn()
 }));
 
 vi.mock("../api", () => apiMocks);
@@ -120,5 +121,32 @@ describe("DataCenter", () => {
     ));
     expect(onCoverageChange).toHaveBeenCalledWith(coverage);
     expect(await screen.findByText("Fetched 3 daily bar rows")).toBeInTheDocument();
+  });
+
+  it("starts a full-market sync job and shows progress", async () => {
+    const user = userEvent.setup();
+    apiMocks.startFullMarketSync.mockResolvedValue({
+      job: {
+        job_id: "job-1",
+        mode: "full_market_bootstrap",
+        status: "completed",
+        total_symbols: 2,
+        completed_symbols: 2,
+        failed_symbols: 0,
+        imported_rows: 20,
+        current_symbol: null,
+        start_date: "2015-01-01",
+        end_date: "2026-05-26",
+        errors: []
+      }
+    });
+
+    render(<DataCenter cacheDir=".astock-cache" coverage={coverage} onCoverageChange={vi.fn()} />);
+
+    await screen.findByText(/http:\/\/127\.0\.0\.1:9011/);
+    await user.click(screen.getByRole("button", { name: "下载全市场历史数据" }));
+
+    expect(await screen.findByText(/已完成 2\/2/)).toBeInTheDocument();
+    expect(screen.getAllByText(/导入 20 行/).length).toBeGreaterThan(0);
   });
 });

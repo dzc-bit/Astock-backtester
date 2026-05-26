@@ -8,7 +8,8 @@ import type {
   DailyBarsCoverageResponse,
   FetchResult,
   ImportResult,
-  StrategyConfig
+  StrategyConfig,
+  SyncJobStatus
 } from "./types";
 
 type BackendResponse<T> = ({ ok: true } & T) | { ok: false; error: { code: string; message: string } };
@@ -191,6 +192,37 @@ export async function importDailyBars(baseUrl: string, source: "sample" | "file"
     };
   }
   return serviceFetch<ImportResult>(baseUrl, "/import/daily-bars", { source, path });
+}
+
+export async function startFullMarketSync(
+  baseUrl: string,
+  startDate: string,
+  endDate: string,
+  symbols?: string[]
+): Promise<{ job: SyncJobStatus }> {
+  if (!isTauriRuntime()) {
+    const totalSymbols = symbols?.length ?? 2;
+    return {
+      job: {
+        job_id: "preview",
+        mode: "full_market_bootstrap",
+        status: "completed",
+        total_symbols: totalSymbols,
+        completed_symbols: totalSymbols,
+        failed_symbols: 0,
+        imported_rows: totalSymbols * 10,
+        current_symbol: null,
+        start_date: startDate,
+        end_date: endDate,
+        errors: []
+      }
+    };
+  }
+  return serviceFetch<{ job: SyncJobStatus }>(baseUrl, "/sync/full-market", {
+    symbols,
+    start_date: startDate,
+    end_date: endDate
+  });
 }
 
 export async function runBacktestWithDataService(

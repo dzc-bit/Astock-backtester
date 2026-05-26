@@ -58,6 +58,20 @@ export type ImportResult = {
   logs: ServiceLogEntry[];
 };
 
+export type SyncJobStatus = {
+  job_id: string;
+  mode: "full_market_bootstrap" | "incremental_update" | "retry_failed";
+  status: "running" | "completed" | "completed_with_errors" | "failed";
+  total_symbols: number;
+  completed_symbols: number;
+  failed_symbols: number;
+  imported_rows: number;
+  current_symbol?: string | null;
+  start_date: string;
+  end_date: string;
+  errors: string[];
+};
+
 export type ConditionNode = {
   id: string;
   condition_id: string;
