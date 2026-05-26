@@ -4,11 +4,16 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+$repoRoot = Split-Path -Parent $PSScriptRoot
+$bundledPython = Join-Path $repoRoot ".tools\python-3.11.9\python.exe"
 if (-not $Python) {
-  $Python = "python"
+  if (Test-Path $bundledPython) {
+    $Python = $bundledPython
+  } else {
+    $Python = "python"
+  }
 }
 
-$repoRoot = Split-Path -Parent $PSScriptRoot
 $distDir = Join-Path $repoRoot "src-tauri\bin"
 $workDir = Join-Path $repoRoot ".pyinstaller\build"
 $specDir = Join-Path $repoRoot ".pyinstaller\spec"
