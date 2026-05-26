@@ -6,6 +6,7 @@ import pandas as pd
 
 from astock_backtester.data.importer import normalize_daily_bars
 from astock_backtester.data.providers import (
+    ADataProvider,
     CompositeProvider,
     enrich_market_cap_from_share_history,
 )
@@ -122,3 +123,51 @@ def test_composite_provider_falls_back_when_primary_returns_empty():
     result = provider.fetch_daily_bars("000001", "2024-01-02", "2024-01-02")
 
     assert result.loc[0, "source"] == "fallback"
+
+
+def test_adata_provider_lists_normalized_symbols():
+    class FakeInfo:
+        def all_code(self):
+            return pd.DataFrame({"stock_code": ["sh600519", "000001.SZ", "bj430047"]})
+
+    class FakeAdata:
+        class stock:
+            info = FakeInfo()
+
+    class FakeADataProvider(ADataProvider):
+        def _adata(self):
+            return FakeAdata
+
+    provider = FakeADataProvider()
+
+    assert provider.list_symbols() == ["600519", "000001", "430047"]
+
+
+def test_composite_provider_lists_symbols_from_first_available_provider():
+    class EmptyProvider:
+        name = "empty"
+
+        def list_symbols(self):
+            return []
+
+        def fetch_daily_bars(self, symbol, start_date, end_date):
+            return pd.DataFrame()
+
+        def fetch_share_history(self, symbol):
+            return pd.DataFrame()
+
+    class FallbackProvider:
+        name = "fallback"
+
+        def list_symbols(self):
+            return ["000001", "600519"]
+
+        def fetch_daily_bars(self, symbol, start_date, end_date):
+            return pd.DataFrame()
+
+        def fetch_share_history(self, symbol):
+            return pd.DataFrame()
+
+    provider = CompositeProvider([EmptyProvider(), FallbackProvider()])
+
+    assert provider.list_symbols() == ["000001", "600519"]

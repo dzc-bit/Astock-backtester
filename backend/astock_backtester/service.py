@@ -98,8 +98,11 @@ class DataServiceHandler(BaseHTTPRequestHandler):
                 )
                 return
             if self.path == "/sync/full-market":
+                symbols = payload.get("symbols") or self.server.state.provider.list_symbols()
+                if not symbols:
+                    raise ValueError("No symbols available for full-market sync.")
                 job = self.server.state.sync_manager.run_full_market(
-                    symbols=payload.get("symbols") or [],
+                    symbols=symbols,
                     start_date=payload.get("start_date", "2015-01-01"),
                     end_date=payload["end_date"],
                 )

@@ -16,6 +16,9 @@ class ProviderError(RuntimeError):
 class DailyDataProvider(Protocol):
     name: str
 
+    def list_symbols(self) -> list[str]:
+        ...
+
     def fetch_daily_bars(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
         ...
 
@@ -30,6 +33,18 @@ def normalize_symbol(symbol: str) -> str:
     if "." in code:
         code = code.split(".", 1)[0]
     return code.zfill(6) if code.isdigit() else code
+
+
+def _unique_symbols(symbols: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for symbol in symbols:
+        code = normalize_symbol(symbol)
+        if not code or code in seen:
+            continue
+        seen.add(code)
+        out.append(code)
+    return out
 
 
 def enrich_market_cap_from_share_history(bars: pd.DataFrame, shares: pd.DataFrame) -> pd.DataFrame:
@@ -68,6 +83,17 @@ class ADataProvider:
 
         return adata
 
+    def list_symbols(self) -> list[str]:
+        adata = self._adata()
+        frame = adata.stock.info.all_code()
+        if frame is None or frame.empty:
+            return []
+        code_column = next(
+            (column for column in ["stock_code", "code", "symbol"] if column in frame.columns),
+            frame.columns[0],
+        )
+        return _unique_symbols([str(item) for item in frame[code_column].dropna().tolist()])
+
     def fetch_daily_bars(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
         adata = self._adata()
         code = normalize_symbol(symbol)
@@ -91,6 +117,9 @@ class ADataProvider:
 class HttpAStockProvider:
     name: str = "http"
 
+    def list_symbols(self) -> list[str]:
+        return []
+
     def fetch_daily_bars(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
         frame = AStockDataAdapter.from_http_sources().fetch_daily_bars([symbol], start_date, end_date)
         if frame.empty:
@@ -105,6 +134,21 @@ class HttpAStockProvider:
 @dataclass
 class CompositeProvider:
     providers: list[DailyDataProvider]
+
+    def list_symbols(self) -> list[str]:
+        errors: list[str] = []
+        for provider in self.providers:
+            try:
+                symbols = provider.list_symbols()
+            except Exception as exc:
+                errors.append(f"{provider.name}: {exc}")
+                continue
+            normalized = _unique_symbols(symbols)
+            if normalized:
+                return normalized
+        if errors:
+            raise ProviderError("; ".join(errors))
+        return []
 
     def fetch_daily_bars(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
         errors: list[str] = []

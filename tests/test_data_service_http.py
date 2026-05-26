@@ -127,3 +127,47 @@ def test_service_starts_full_market_sync_job(tmp_path):
     finally:
         server.shutdown()
         thread.join(timeout=5)
+
+
+def test_service_uses_provider_symbols_for_full_market_sync_when_not_supplied(tmp_path):
+    class FakeProvider:
+        def list_symbols(self):
+            return ["000001", "600519"]
+
+    class FakeManager:
+        def run_full_market(self, symbols, start_date, end_date):
+            from datetime import date
+
+            from astock_backtester.models import SyncJobStatus
+
+            assert symbols == ["000001", "600519"]
+            return SyncJobStatus(
+                job_id="job-2",
+                mode="full_market_bootstrap",
+                status="completed",
+                total_symbols=2,
+                completed_symbols=2,
+                failed_symbols=0,
+                imported_rows=2,
+                start_date=date.fromisoformat(start_date),
+                end_date=date.fromisoformat(end_date),
+            )
+
+    server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
+    server.state.provider = FakeProvider()
+    server.state.sync_manager = FakeManager()
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        response = _request_json(
+            "POST",
+            f"http://127.0.0.1:{port}/sync/full-market",
+            {"start_date": "2015-01-01", "end_date": "2015-01-05"},
+        )
+
+        assert response["job"]["status"] == "completed"
+        assert response["job"]["total_symbols"] == 2
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
