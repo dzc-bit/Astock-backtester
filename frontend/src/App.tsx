@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Activity, Database, Flame, ShieldAlert, TrendingUp } from "lucide-react";
-import { loadCoverage, runConfiguredBacktest } from "./api";
+import { loadCoverage, runBacktestWithDataService, runConfiguredBacktest } from "./api";
 import { BacktestSettings } from "./components/BacktestSettings";
 import { DataCenter } from "./components/DataCenter";
 import { ResultsOverview } from "./components/ResultsOverview";
@@ -8,7 +8,7 @@ import { StrategyEditor } from "./components/StrategyEditor";
 import { TradesTable } from "./components/TradesTable";
 import { UpdatePanel } from "./components/UpdatePanel";
 import { defaultSettings, defaultStrategy } from "./strategyDefaults";
-import type { BacktestResult, BacktestSettingsConfig, DatasetCoverage, StrategyConfig } from "./types";
+import type { BacktestResult, BacktestSettingsConfig, DataServiceStatus, DatasetCoverage, StrategyConfig } from "./types";
 
 function formatPercent(value: number | null | undefined): string {
   return value == null ? "--" : `${(value * 100).toFixed(2)}%`;
@@ -48,6 +48,7 @@ export function App() {
   const [strategy, setStrategy] = useState<StrategyConfig>(defaultStrategy);
   const [settings, setSettings] = useState<BacktestSettingsConfig>(defaultSettings);
   const [error, setError] = useState<string | null>(null);
+  const [dataService, setDataService] = useState<DataServiceStatus | null>(null);
 
   const refreshCoverage = async () => {
     setCoverage(await loadCoverage(".astock-cache"));
@@ -56,7 +57,11 @@ export function App() {
   const runBacktest = async () => {
     try {
       setError(null);
-      setResult(await runConfiguredBacktest(strategy, settings));
+      setResult(
+        dataService
+          ? await runBacktestWithDataService(dataService.base_url, strategy, settings)
+          : await runConfiguredBacktest(strategy, settings)
+      );
     } catch (caught) {
       setError(caught instanceof Error ? translateError(caught.message) : "回测运行失败。");
     }
@@ -121,7 +126,12 @@ export function App() {
         </article>
       </section>
       <div className="workspace">
-        <DataCenter cacheDir=".astock-cache" coverage={coverage} onRefresh={refreshCoverage} />
+        <DataCenter
+          cacheDir=".astock-cache"
+          coverage={coverage}
+          onCoverageChange={setCoverage}
+          onServiceReady={setDataService}
+        />
         <BacktestSettings settings={settings} onSettingsChange={setSettings} />
         <StrategyEditor strategy={strategy} onStrategyChange={setStrategy} />
         {error ? <div className="error-banner" role="alert">{error}</div> : null}

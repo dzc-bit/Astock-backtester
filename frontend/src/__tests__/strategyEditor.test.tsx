@@ -7,8 +7,11 @@ const apiMocks = vi.hoisted(() => ({
   ensureDataService: vi.fn(),
   fetchDailyBars: vi.fn(),
   importDailyBars: vi.fn(),
+  loadDataServiceHealth: vi.fn(),
+  loadDataServiceLogs: vi.fn(),
   loadDailyBarsCoverage: vi.fn(),
   loadCoverage: vi.fn(),
+  runBacktestWithDataService: vi.fn(),
   runConfiguredBacktest: vi.fn()
 }));
 
@@ -65,6 +68,15 @@ describe("A 股回测工作台界面", () => {
     apiMocks.loadDailyBarsCoverage.mockResolvedValue({
       items: []
     });
+    apiMocks.loadDataServiceHealth.mockResolvedValue({
+      ok: true,
+      cache_path: "C:\\cache",
+      port: 9010,
+      coverage: [
+        { dataset: "daily_bars", symbols: 2, start_date: "2024-01-02", end_date: "2024-01-08", missing_rows: 0 }
+      ]
+    });
+    apiMocks.loadDataServiceLogs.mockResolvedValue({ items: [] });
     apiMocks.fetchDailyBars.mockResolvedValue({
       status: "ok",
       imported_rows: 0,
@@ -83,6 +95,7 @@ describe("A 股回测工作台界面", () => {
     apiMocks.loadCoverage.mockResolvedValue([
       { dataset: "daily_bars", symbols: 2, start_date: "2024-01-02", end_date: "2024-01-08", missing_rows: 0 }
     ]);
+    apiMocks.runBacktestWithDataService.mockResolvedValue(demoResult);
     apiMocks.runConfiguredBacktest.mockResolvedValue(demoResult);
   });
 
@@ -128,6 +141,12 @@ describe("A 股回测工作台界面", () => {
     await user.type(screen.getByLabelText("初始资金"), "250000");
     await user.click(screen.getByRole("button", { name: "运行历史回测" }));
 
+    expect(apiMocks.runBacktestWithDataService).toHaveBeenCalledWith(
+      "http://127.0.0.1:9010",
+      expect.objectContaining({ name: "市场热度 + 小市值资金流入" }),
+      expect.objectContaining({ initial_cash: 250000 })
+    );
+    expect(apiMocks.runConfiguredBacktest).not.toHaveBeenCalled();
     expect(await screen.findByText("交易次数 1")).toBeInTheDocument();
     expect(screen.getAllByText(/流通市值/).length).toBeGreaterThan(0);
     expect(screen.getAllByText(/主力净流入/).length).toBeGreaterThan(0);
@@ -141,7 +160,7 @@ describe("A 股回测工作台界面", () => {
 
   it("shows backend errors without dropping the page", async () => {
     const user = userEvent.setup();
-    apiMocks.runConfiguredBacktest.mockRejectedValue(new Error("No cached daily bars found."));
+    apiMocks.runBacktestWithDataService.mockRejectedValue(new Error("No cached daily bars found."));
     render(<App />);
 
     await user.click(screen.getByRole("button", { name: "运行历史回测" }));
@@ -152,7 +171,7 @@ describe("A 股回测工作台界面", () => {
 
   it("uses a Chinese fallback for unrecognized backend errors", async () => {
     const user = userEvent.setup();
-    apiMocks.runConfiguredBacktest.mockRejectedValue(new Error("initial_cash must be > 0"));
+    apiMocks.runBacktestWithDataService.mockRejectedValue(new Error("initial_cash must be > 0"));
     render(<App />);
 
     await user.click(screen.getByRole("button", { name: "运行历史回测" }));

@@ -112,6 +112,33 @@ def test_coverage_reports_missing_ranges_and_optional_field_gaps(tmp_path):
     assert [day.isoformat() for day in aaa.missing_market_cap_dates] == ["2024-01-04"]
 
 
+def test_coverage_filters_symbols_dates_and_ignores_weekends(tmp_path):
+    cache = LocalCache(tmp_path)
+    cache.write_daily_bars(
+        _bars(
+            [
+                ("AAA", "2024-01-02", 10.0, 11.0, 9.0, 10.5, 1000, 0.1, 9_000_000_000.0, 1_500_000.0, False, False, 90),
+                ("AAA", "2024-01-05", 10.5, 11.5, 10.0, 11.0, 1200, 0.1, 9_100_000_000.0, 1_600_000.0, False, False, 93),
+                ("BBB", "2024-01-03", 20.0, 21.0, 19.0, 20.5, 900, 0.2, 20_000_000_000.0, 1_000_000.0, False, False, 120),
+            ]
+        )
+    )
+
+    details = build_daily_bars_coverage(
+        cache,
+        symbols=["AAA"],
+        start_date="2024-01-02",
+        end_date="2024-01-08",
+    )
+
+    assert [item.symbol for item in details.items] == ["AAA"]
+    aaa = details.items[0]
+    assert aaa.start_date.isoformat() == "2024-01-02"
+    assert aaa.end_date.isoformat() == "2024-01-05"
+    assert aaa.rows == 2
+    assert [day.isoformat() for day in aaa.missing_trade_dates] == ["2024-01-03", "2024-01-04"]
+
+
 def test_fetch_result_reports_partial_success(tmp_path):
     cache = LocalCache(tmp_path)
 

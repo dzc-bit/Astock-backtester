@@ -367,6 +367,32 @@ td small {
   flex-wrap: wrap;
 }
 
+.service-log-list {
+  display: grid;
+  gap: 6px;
+}
+
+.service-log {
+  display: block;
+  padding: 7px 9px;
+  border-radius: 6px;
+  background: #eef6f8;
+  color: #536174;
+  font-size: 12px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.service-log.error {
+  background: #feecec;
+  color: #b42318;
+}
+
+.service-log.warning {
+  background: #fff7ed;
+  color: #b45309;
+}
+
 .coverage-details {
   display: grid;
   gap: 10px;

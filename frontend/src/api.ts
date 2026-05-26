@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   BacktestResult,
   BacktestSettingsConfig,
+  DataServiceHealth,
   DataServiceStatus,
   DatasetCoverage,
   DailyBarsCoverageResponse,
@@ -75,7 +76,8 @@ async function serviceFetch<T>(baseUrl: string, path: string, payload?: Record<s
   });
   const json = await response.json();
   if (!response.ok) {
-    throw new Error(json.message ?? "local data service request failed");
+    const code = json.code ? `${json.code} - ` : "";
+    throw new Error(`HTTP ${response.status}: ${code}${json.message ?? "local data service request failed"}`);
   }
   return json as T;
 }
@@ -98,12 +100,48 @@ export async function loadCoverage(cacheDir: string): Promise<DatasetCoverage[]>
   return response.coverage;
 }
 
+export async function loadDataServiceHealth(baseUrl: string): Promise<DataServiceHealth> {
+  if (!isTauriRuntime()) {
+    return {
+      ok: true,
+      cache_path: ".astock-cache",
+      port: 9010,
+      coverage: [
+        { dataset: "daily_bars", symbols: 2, start_date: "2024-01-02", end_date: "2024-01-08", missing_rows: 0 },
+        { dataset: "capital_flow", symbols: 2, start_date: "2024-01-02", end_date: "2024-01-08", missing_rows: 0 },
+        { dataset: "market_cap", symbols: 2, start_date: "2024-01-02", end_date: "2024-01-08", missing_rows: 0 }
+      ]
+    };
+  }
+  return serviceFetch<DataServiceHealth>(baseUrl, "/health");
+}
+
+export async function loadDataServiceLogs(baseUrl: string): Promise<{ items: Array<{ level: "info" | "warning" | "error"; message: string; timestamp?: string }> }> {
+  if (!isTauriRuntime()) {
+    return { items: [{ level: "info", message: "browser preview uses mock local service" }] };
+  }
+  return serviceFetch(baseUrl, "/logs/recent");
+}
+
 export async function loadDailyBarsCoverage(
   baseUrl: string,
   symbols: string[],
   startDate: string,
   endDate: string
 ): Promise<DailyBarsCoverageResponse> {
+  if (!isTauriRuntime()) {
+    return {
+      items: symbols.map((symbol) => ({
+        symbol,
+        start_date: startDate,
+        end_date: endDate,
+        rows: 5,
+        missing_trade_dates: [],
+        missing_capital_flow_dates: [],
+        missing_market_cap_dates: []
+      }))
+    };
+  }
   return serviceFetch<DailyBarsCoverageResponse>(baseUrl, "/coverage/daily-bars", {
     symbols,
     start_date: startDate,
@@ -117,6 +155,21 @@ export async function fetchDailyBars(
   startDate: string,
   endDate: string
 ): Promise<FetchResult> {
+  if (!isTauriRuntime()) {
+    return {
+      status: "ok",
+      imported_rows: symbols.length * 5,
+      requested_symbols: symbols,
+      fetched_symbols: symbols,
+      missing_symbols: [],
+      coverage: [
+        { dataset: "daily_bars", symbols: symbols.length, start_date: startDate, end_date: endDate, missing_rows: 0 },
+        { dataset: "capital_flow", symbols: symbols.length, start_date: startDate, end_date: endDate, missing_rows: 0 },
+        { dataset: "market_cap", symbols: symbols.length, start_date: startDate, end_date: endDate, missing_rows: 0 }
+      ],
+      logs: [{ level: "info", message: `Fetched ${symbols.length * 5} daily bar rows` }]
+    };
+  }
   return serviceFetch<FetchResult>(baseUrl, "/fetch/daily-bars", {
     symbols,
     start_date: startDate,
@@ -125,7 +178,34 @@ export async function fetchDailyBars(
 }
 
 export async function importDailyBars(baseUrl: string, source: "sample" | "file", path?: string): Promise<ImportResult> {
+  if (!isTauriRuntime()) {
+    return {
+      status: "ok",
+      imported_rows: 10,
+      coverage: [
+        { dataset: "daily_bars", symbols: 2, start_date: "2024-01-02", end_date: "2024-01-08", missing_rows: 0 },
+        { dataset: "capital_flow", symbols: 2, start_date: "2024-01-02", end_date: "2024-01-08", missing_rows: 0 },
+        { dataset: "market_cap", symbols: 2, start_date: "2024-01-02", end_date: "2024-01-08", missing_rows: 0 }
+      ],
+      logs: [{ level: "info", message: `Imported daily bars from ${source}${path ? `: ${path}` : ""}` }]
+    };
+  }
   return serviceFetch<ImportResult>(baseUrl, "/import/daily-bars", { source, path });
+}
+
+export async function runBacktestWithDataService(
+  baseUrl: string,
+  strategy: StrategyConfig,
+  settings: BacktestSettingsConfig
+): Promise<BacktestResult> {
+  if (!isTauriRuntime()) {
+    return demoResult;
+  }
+  const response = await serviceFetch<{ result: BacktestResult }>(baseUrl, "/run/backtest", {
+    strategy,
+    settings
+  });
+  return response.result;
 }
 
 export async function runConfiguredBacktest(strategy: StrategyConfig, settings: BacktestSettingsConfig): Promise<BacktestResult> {

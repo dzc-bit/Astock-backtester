@@ -18,11 +18,27 @@ DailyBarsFetcher = Callable[[Sequence[str], str, str], pd.DataFrame]
 
 
 def _date_range(start_date: pd.Timestamp, end_date: pd.Timestamp) -> set[pd.Timestamp]:
-    return set(pd.date_range(start=start_date, end=end_date, freq="D"))
+    return set(pd.date_range(start=start_date, end=end_date, freq="B"))
 
 
-def build_daily_bars_coverage(cache: LocalCache) -> DailyBarsCoverageResponse:
+def build_daily_bars_coverage(
+    cache: LocalCache,
+    symbols: Sequence[str] | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> DailyBarsCoverageResponse:
     bars = cache.read_daily_bars()
+    if bars.empty:
+        return DailyBarsCoverageResponse(items=[])
+
+    if symbols:
+        selected_symbols = {str(symbol).strip() for symbol in symbols if str(symbol).strip()}
+        if selected_symbols:
+            bars = bars.loc[bars["symbol"].astype(str).isin(selected_symbols)]
+    if start_date:
+        bars = bars.loc[bars["trade_date"] >= pd.Timestamp(start_date)]
+    if end_date:
+        bars = bars.loc[bars["trade_date"] <= pd.Timestamp(end_date)]
     if bars.empty:
         return DailyBarsCoverageResponse(items=[])
 

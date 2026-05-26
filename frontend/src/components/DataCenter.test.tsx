@@ -7,6 +7,8 @@ const apiMocks = vi.hoisted(() => ({
   ensureDataService: vi.fn(),
   fetchDailyBars: vi.fn(),
   importDailyBars: vi.fn(),
+  loadDataServiceHealth: vi.fn(),
+  loadDataServiceLogs: vi.fn(),
   loadDailyBarsCoverage: vi.fn()
 }));
 
@@ -40,6 +42,13 @@ describe("DataCenter", () => {
         }
       ]
     });
+    apiMocks.loadDataServiceHealth.mockResolvedValue({
+      ok: true,
+      cache_path: "C:\\cache",
+      port: 9011,
+      coverage
+    });
+    apiMocks.loadDataServiceLogs.mockResolvedValue({ items: [] });
     apiMocks.fetchDailyBars.mockResolvedValue({
       status: "ok",
       imported_rows: 3,
@@ -58,10 +67,13 @@ describe("DataCenter", () => {
   });
 
   it("starts the managed service and refreshes daily-bar coverage", async () => {
-    render(<DataCenter cacheDir=".astock-cache" coverage={coverage} onRefresh={vi.fn()} />);
+    const onCoverageChange = vi.fn();
+    render(<DataCenter cacheDir=".astock-cache" coverage={[]} onCoverageChange={onCoverageChange} />);
 
     expect(await screen.findByText(/http:\/\/127\.0\.0\.1:9011/)).toBeInTheDocument();
     expect(apiMocks.ensureDataService).toHaveBeenCalledWith(".astock-cache");
+    expect(apiMocks.loadDataServiceHealth).toHaveBeenCalledWith("http://127.0.0.1:9011");
+    expect(onCoverageChange).toHaveBeenCalledWith(coverage);
     expect(apiMocks.loadDailyBarsCoverage).toHaveBeenCalledWith(
       "http://127.0.0.1:9011",
       ["600519"],
@@ -72,11 +84,28 @@ describe("DataCenter", () => {
     expect(screen.getByText(/2024-01-04/)).toBeInTheDocument();
   });
 
+  it("shows recent service logs when a fetch fails", async () => {
+    const user = userEvent.setup();
+    apiMocks.fetchDailyBars.mockRejectedValue(new Error("HTTP 400: request_failed - boom"));
+    apiMocks.loadDataServiceLogs.mockResolvedValue({
+      items: [
+        { level: "error", message: "Baidu daily source returned malformed kline", timestamp: "2026-05-26T05:00:00Z" }
+      ]
+    });
+
+    render(<DataCenter cacheDir=".astock-cache" coverage={coverage} onCoverageChange={vi.fn()} />);
+
+    await screen.findByText(/http:\/\/127\.0\.0\.1:9011/);
+    await user.click(screen.getByRole("button", { name: "补全缺失数据" }));
+
+    expect(await screen.findByText(/Baidu daily source returned malformed kline/)).toBeInTheDocument();
+  });
+
   it("fetches missing daily bars through the service and refreshes parent coverage", async () => {
     const user = userEvent.setup();
-    const onRefresh = vi.fn().mockResolvedValue(undefined);
+    const onCoverageChange = vi.fn();
 
-    render(<DataCenter cacheDir=".astock-cache" coverage={coverage} onRefresh={onRefresh} />);
+    render(<DataCenter cacheDir=".astock-cache" coverage={coverage} onCoverageChange={onCoverageChange} />);
 
     await screen.findByText(/http:\/\/127\.0\.0\.1:9011/);
     await user.clear(screen.getByLabelText("股票代码"));
@@ -89,7 +118,7 @@ describe("DataCenter", () => {
       "2024-01-02",
       "2024-01-08"
     ));
-    expect(onRefresh).toHaveBeenCalledTimes(1);
+    expect(onCoverageChange).toHaveBeenCalledWith(coverage);
     expect(await screen.findByText("Fetched 3 daily bar rows")).toBeInTheDocument();
   });
 });

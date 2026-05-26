@@ -1,11 +1,19 @@
 import { useEffect, useMemo, useState } from "react";
-import { ensureDataService, fetchDailyBars, importDailyBars, loadDailyBarsCoverage } from "../api";
-import type { DailyBarsCoverageItem, DataServiceStatus, DatasetCoverage } from "../types";
+import {
+  ensureDataService,
+  fetchDailyBars,
+  importDailyBars,
+  loadDailyBarsCoverage,
+  loadDataServiceHealth,
+  loadDataServiceLogs
+} from "../api";
+import type { DailyBarsCoverageItem, DataServiceStatus, DatasetCoverage, ServiceLogEntry } from "../types";
 
 type Props = {
   cacheDir: string;
   coverage: DatasetCoverage[];
-  onRefresh: () => Promise<void> | void;
+  onCoverageChange: (coverage: DatasetCoverage[]) => void;
+  onServiceReady?: (service: DataServiceStatus) => void;
 };
 
 const defaultStartDate = "2024-01-02";
@@ -25,13 +33,14 @@ function operationMessage(logs: { message: string }[]): string {
   return logs.at(-1)?.message ?? "数据操作已完成";
 }
 
-export function DataCenter({ cacheDir, coverage, onRefresh }: Props) {
+export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceReady }: Props) {
   const [service, setService] = useState<DataServiceStatus | null>(null);
   const [symbolsInput, setSymbolsInput] = useState("600519");
   const [startDate, setStartDate] = useState(defaultStartDate);
   const [endDate, setEndDate] = useState(defaultEndDate);
   const [importPath, setImportPath] = useState("");
   const [items, setItems] = useState<DailyBarsCoverageItem[]>([]);
+  const [logs, setLogs] = useState<ServiceLogEntry[]>([]);
   const [message, setMessage] = useState("正在连接本地数据服务");
   const [busy, setBusy] = useState(false);
 
@@ -63,6 +72,20 @@ export function DataCenter({ cacheDir, coverage, onRefresh }: Props) {
     setItems(response.items);
   };
 
+  const refreshServiceState = async (activeService: DataServiceStatus) => {
+    const [health, recentLogs] = await Promise.all([
+      loadDataServiceHealth(activeService.base_url),
+      loadDataServiceLogs(activeService.base_url)
+    ]);
+    onCoverageChange(health.coverage);
+    setLogs(recentLogs.items);
+  };
+
+  const refreshLogs = async (activeService: DataServiceStatus) => {
+    const recentLogs = await loadDataServiceLogs(activeService.base_url);
+    setLogs(recentLogs.items);
+  };
+
   useEffect(() => {
     let cancelled = false;
     void ensureDataService(cacheDir)
@@ -71,7 +94,9 @@ export function DataCenter({ cacheDir, coverage, onRefresh }: Props) {
           return;
         }
         setService(status);
+        onServiceReady?.(status);
         setMessage(status.message);
+        await refreshServiceState(status);
         await refreshDetails(status, ["600519"], defaultStartDate, defaultEndDate);
       })
       .catch((error: Error) => {
@@ -91,6 +116,7 @@ export function DataCenter({ cacheDir, coverage, onRefresh }: Props) {
     setBusy(true);
     try {
       await refreshDetails(service);
+      await refreshServiceState(service);
       setMessage("覆盖范围已刷新");
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "刷新覆盖范围失败");
@@ -107,10 +133,12 @@ export function DataCenter({ cacheDir, coverage, onRefresh }: Props) {
     try {
       const result = await fetchDailyBars(service.base_url, symbols, startDate, endDate);
       setMessage(operationMessage(result.logs));
-      await onRefresh();
+      onCoverageChange(result.coverage);
+      await refreshLogs(service);
       await refreshDetails(service);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "补全缺失数据失败");
+      await refreshLogs(service);
     } finally {
       setBusy(false);
     }
@@ -124,10 +152,12 @@ export function DataCenter({ cacheDir, coverage, onRefresh }: Props) {
     try {
       const result = await importDailyBars(service.base_url, "sample");
       setMessage(operationMessage(result.logs));
-      await onRefresh();
+      onCoverageChange(result.coverage);
+      await refreshLogs(service);
       await refreshDetails(service);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "导入示例数据失败");
+      await refreshLogs(service);
     } finally {
       setBusy(false);
     }
@@ -141,10 +171,12 @@ export function DataCenter({ cacheDir, coverage, onRefresh }: Props) {
     try {
       const result = await importDailyBars(service.base_url, "file", importPath.trim());
       setMessage(operationMessage(result.logs));
-      await onRefresh();
+      onCoverageChange(result.coverage);
+      await refreshLogs(service);
       await refreshDetails(service);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "导入本地文件失败");
+      await refreshLogs(service);
     } finally {
       setBusy(false);
     }
@@ -203,6 +235,15 @@ export function DataCenter({ cacheDir, coverage, onRefresh }: Props) {
         <p className="muted-code" role="status">
           {message}
         </p>
+        {logs.length > 0 ? (
+          <div className="service-log-list" aria-label="本地服务日志">
+            {logs.slice(0, 5).map((entry, index) => (
+              <span key={`${entry.timestamp ?? index}-${entry.message}`} className={`service-log ${entry.level}`}>
+                {entry.message}
+              </span>
+            ))}
+          </div>
+        ) : null}
       </div>
 
       {coverage.length === 0 ? (

@@ -18,6 +18,8 @@ from astock_backtester.data.operations import (
     fetch_daily_bars_into_cache,
     import_daily_bars_into_cache,
 )
+from astock_backtester.backtest_runner import run_configured_backtest
+from astock_backtester.models import BacktestSettings, StrategyConfig
 
 
 class DataServiceState:
@@ -80,7 +82,14 @@ class DataServiceHandler(BaseHTTPRequestHandler):
         try:
             payload = self._read_json()
             if self.path == "/coverage/daily-bars":
-                self._send_json(build_daily_bars_coverage(self.server.state.cache).model_dump(mode="json"))
+                self._send_json(
+                    build_daily_bars_coverage(
+                        self.server.state.cache,
+                        symbols=payload.get("symbols"),
+                        start_date=payload.get("start_date"),
+                        end_date=payload.get("end_date"),
+                    ).model_dump(mode="json")
+                )
                 return
             if self.path == "/import/daily-bars":
                 if payload.get("source") == "sample":
@@ -109,6 +118,15 @@ class DataServiceHandler(BaseHTTPRequestHandler):
                 for entry in result.logs:
                     self.server.state.log(entry.level, entry.message)
                 self._send_json(result.model_dump(mode="json"))
+                return
+            if self.path == "/run/backtest":
+                strategy = StrategyConfig.model_validate(payload["strategy"])
+                settings = BacktestSettings.model_validate(payload["settings"])
+                frame = self.server.state.cache.read_daily_bars()
+                if frame.empty:
+                    raise ValueError("No cached daily bars found. Import or fetch data before running a configured backtest.")
+                result = run_configured_backtest(frame, strategy, settings)
+                self._send_json({"result": result.model_dump(mode="json")})
                 return
             self._send_json({"code": "not_found", "message": self.path}, HTTPStatus.NOT_FOUND)
         except Exception as exc:

@@ -1,6 +1,6 @@
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -45,6 +45,18 @@ pub fn health_request(port: u16) -> String {
     format!("GET /health HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n")
 }
 
+fn resolve_cache_dir(cache_dir: &str) -> Result<String, String> {
+    let path = Path::new(cache_dir);
+    if path.is_absolute() || cfg!(debug_assertions) {
+        return Ok(cache_dir.to_string());
+    }
+    let exe = std::env::current_exe().map_err(|err| format!("current exe unavailable: {err}"))?;
+    let install_dir = exe
+        .parent()
+        .ok_or_else(|| "current exe parent unavailable".to_string())?;
+    Ok(install_dir.join(path).to_string_lossy().to_string())
+}
+
 fn choose_port() -> Result<u16, String> {
     let listener = TcpListener::bind("127.0.0.1:0").map_err(|err| format!("bind port failed: {err}"))?;
     let port = listener
@@ -83,6 +95,7 @@ fn packaged_service_path(app: &AppHandle) -> Result<PathBuf, String> {
 
 impl DataServiceManager {
     pub fn ensure_running(&mut self, app: &AppHandle, cache_dir: &str) -> Result<DataServiceStatus, String> {
+        let resolved_cache_dir = resolve_cache_dir(cache_dir)?;
         if let Some(existing) = self.service.as_mut() {
             if existing.child.try_wait().map_err(|err| err.to_string())?.is_none() {
                 return Ok(DataServiceStatus {
@@ -99,12 +112,12 @@ impl DataServiceManager {
         let port = choose_port()?;
         let mut command = if cfg!(debug_assertions) {
             let mut python = python_command()?;
-            python.args(build_service_args(port, cache_dir));
+            python.args(build_service_args(port, &resolved_cache_dir));
             python.env("PYTHONPATH", "backend");
             python
         } else {
             let mut packaged = Command::new(packaged_service_path(app)?);
-            packaged.args(["--host", "127.0.0.1", "--port", &port.to_string(), "--cache-dir", cache_dir]);
+            packaged.args(["--host", "127.0.0.1", "--port", &port.to_string(), "--cache-dir", &resolved_cache_dir]);
             packaged
         };
         command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped());
@@ -115,13 +128,13 @@ impl DataServiceManager {
         self.service = Some(ManagedService {
             child,
             port,
-            cache_dir: cache_dir.to_string(),
+            cache_dir: resolved_cache_dir.clone(),
         });
         Ok(DataServiceStatus {
             running: true,
             port,
             base_url: format!("http://127.0.0.1:{port}"),
-            cache_dir: cache_dir.to_string(),
+            cache_dir: resolved_cache_dir,
             message: "local data service started".to_string(),
         })
     }
@@ -129,7 +142,7 @@ impl DataServiceManager {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_service_args, health_request};
+    use super::{build_service_args, health_request, resolve_cache_dir};
 
     #[test]
     fn health_request_targets_localhost_health_endpoint() {
@@ -154,5 +167,17 @@ mod tests {
                 ".astock-cache".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn release_cache_dir_is_stable_when_input_is_relative() {
+        let resolved = resolve_cache_dir(".astock-cache").expect("cache dir should resolve");
+
+        if cfg!(debug_assertions) {
+            assert_eq!(resolved, ".astock-cache");
+        } else {
+            assert!(std::path::Path::new(&resolved).is_absolute());
+            assert!(resolved.ends_with(".astock-cache"));
+        }
     }
 }

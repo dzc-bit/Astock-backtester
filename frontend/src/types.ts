@@ -14,6 +14,13 @@ export type DataServiceStatus = {
   message: string;
 };
 
+export type DataServiceHealth = {
+  ok: boolean;
+  cache_path: string;
+  port: number | null;
+  coverage: DatasetCoverage[];
+};
+
 export type DailyBarsCoverageItem = {
   symbol: string;
   start_date: string | null;
@@ -31,6 +38,7 @@ export type DailyBarsCoverageResponse = {
 export type ServiceLogEntry = {
   level: "info" | "warning" | "error";
   message: string;
+  timestamp?: string;
 };
 
 export type FetchResult = {
