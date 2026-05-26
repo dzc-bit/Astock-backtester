@@ -1,265 +1,265 @@
-# 2015 Local Market Data Warehouse Design
+# 2015 起本地市场数据仓库设计
 
-## Goal
+## 目标
 
-Build a local-first A-share historical data warehouse starting from 2015-01-01, then make the desktop app update that warehouse through public data interfaces and run backtests only against local data.
+从 2015-01-01 开始建立一个本地优先的 A 股历史数据仓库。桌面软件通过公开接口下载和增量更新数据，但回测只读取本地数据，不在回测过程中依赖网络。
 
-## Scope
+## 范围
 
-This design covers the first complete data foundation for the backtesting app:
+本设计覆盖回测软件的第一阶段完整数据底座：
 
-- Download full-market A-share daily bars from 2015-01-01 through the current date.
-- Store the downloaded data locally in a format that supports incremental update and fast backtest reads.
-- Use `1nchaos/adata` as the primary data provider.
-- Keep the existing HTTP fetcher as a fallback provider for missing symbols or failed `adata` requests.
-- Add Data Center workflows for full-market initial download, incremental update, progress visibility, and coverage checks.
-- Make backtests read from the local warehouse instead of calling network providers during a run.
+- 下载 2015-01-01 至今的全市场 A 股日线数据。
+- 将数据保存在本地，支持断点续传、增量更新和快速回测读取。
+- 使用 `1nchaos/adata` 作为主数据源。
+- 保留现有 HTTP 数据源作为备用源，用于补齐 `adata` 请求失败或返回空的数据。
+- 在数据中心提供全市场首次下载、增量更新、进度展示、覆盖率检查和失败重试。
+- 回测统一读取本地数据仓库，不在回测执行时调用网络数据源。
 
-The user explicitly wants to start the full-market download directly. We will not gate the implementation on a small sample validation step, but the implementation must still be resumable and observable so failures do not lose progress.
+用户明确要求直接开始全市场下载，因此实现不再把小样本验证作为前置门槛。但系统必须保证可续传、可观察、可重试，避免一次失败导致已下载数据丢失。
 
-## Current Problems
+## 当前问题
 
-The current app has a working local service and cache, but it is still too thin for serious backtesting:
+当前软件已经有本地服务和缓存，但距离严肃回测还不够：
 
-- The cache currently contains only a small number of rows unless manually fetched.
-- The existing fetch path is symbol/date based and not designed for full-market historical bootstrapping.
-- Backtest settings can point at dates that are not covered by the local cache.
-- Strategy conditions exist in the engine, but the UI only exposes a small subset of parameter edits.
-- Public data sources are unstable; `adata` can return daily bars and stock lists, but some optional datasets such as capital flow can be empty for a requested range.
+- 缓存中只有少量股票和日期，数据中心看起来像示例工具。
+- 现有补数据接口按单个股票和日期范围设计，不适合全市场历史数据初始化。
+- 回测设置可以选到本地没有覆盖的日期，容易出现无数据或结果失真。
+- 策略引擎已有条件计算，但界面只暴露了少量参数，条件编辑还不完整。
+- 公开数据源不稳定。`adata` 可以获取股票列表和日线，但资金流等增强数据在部分日期范围可能为空。
 
-## Data Architecture
+## 数据架构
 
-The local data warehouse becomes the source of truth for backtesting.
+本地数据仓库成为回测的数据事实来源。
 
-### Core Datasets
+### 核心数据集
 
-`daily_bars` is required:
+`daily_bars` 是必需数据集：
 
-- `symbol`
-- `trade_date`
-- `open`
-- `high`
-- `low`
-- `close`
-- `volume`
-- `amount`
-- `change_pct`
-- `change`
-- `turnover_rate`
-- `pre_close`
-- `source`
-- `updated_at`
+- `symbol`：股票代码。
+- `trade_date`：交易日期。
+- `open`：开盘价。
+- `high`：最高价。
+- `low`：最低价。
+- `close`：收盘价。
+- `volume`：成交量。
+- `amount`：成交额。
+- `change_pct`：涨跌幅。
+- `change`：涨跌额。
+- `turnover_rate`：换手率。
+- `pre_close`：前收盘价。
+- `source`：数据来源。
+- `updated_at`：更新时间。
 
-`stock_universe` is required:
+`stock_universe` 是必需数据集：
 
-- `symbol`
-- `name`
-- `exchange`
-- `list_date`
-- `is_active`
-- `updated_at`
+- `symbol`：股票代码。
+- `name`：股票名称。
+- `exchange`：交易所。
+- `list_date`：上市日期。
+- `is_active`：是否仍在有效股票池。
+- `updated_at`：更新时间。
 
-`trade_calendar` is required:
+`trade_calendar` 是必需数据集：
 
-- `trade_date`
-- `is_trade_day`
-- `day_week`
-- `source`
-- `updated_at`
+- `trade_date`：日期。
+- `is_trade_day`：是否交易日。
+- `day_week`：星期。
+- `source`：数据来源。
+- `updated_at`：更新时间。
 
-Enhanced datasets are optional in this phase:
+第一阶段的增强数据集是可选数据：
 
-- `capital_flow`
-- `market_cap`
-- `industry`
-- `st_status`
-- `suspension_status`
+- `capital_flow`：资金流。
+- `market_cap`：市值。
+- `industry`：行业。
+- `st_status`：ST 状态。
+- `suspension_status`：停牌状态。
 
-Daily bars, stock universe, and trade calendar must be enough to run a basic full-market backtest. Enhanced datasets can improve strategy filters, but missing enhanced data must not block a strategy that does not use those fields.
+日线、股票池和交易日历必须足够支撑基础全市场回测。增强数据可以提升策略筛选能力，但缺失增强数据不能阻塞不依赖这些字段的策略。
 
-### Storage Format
+### 存储格式
 
-Use Parquet partitioned by year for daily bars:
+日线数据使用按年份分区的 Parquet：
 
 - `.astock-cache/warehouse/daily_bars/year=2015/*.parquet`
 - `.astock-cache/warehouse/daily_bars/year=2016/*.parquet`
-- continuing through the current year
+- 后续年份依次分区。
 
-Use SQLite for metadata and job state:
+元数据和任务状态使用 SQLite：
 
 - `.astock-cache/warehouse/metadata.sqlite`
 
-SQLite tables:
+SQLite 表：
 
-- `datasets`: dataset-level coverage and update timestamps.
-- `symbols`: stock universe metadata.
-- `calendar`: trading calendar metadata.
-- `sync_jobs`: current and historical import/update jobs.
-- `symbol_sync_state`: per-symbol date coverage, retry count, last error, and provider used.
+- `datasets`：数据集级别的覆盖范围和更新时间。
+- `symbols`：股票池元数据。
+- `calendar`：交易日历。
+- `sync_jobs`：当前和历史下载/更新任务。
+- `symbol_sync_state`：每只股票的日期覆盖、重试次数、最后错误和使用的数据源。
 
-The existing `LocalCache` can keep its current simple parquet path for compatibility, but the warehouse reader becomes the preferred source for service endpoints and backtest runs.
+现有 `LocalCache` 可以保留简单 parquet 文件作为兼容层，但新的仓库读取器应成为服务接口和回测执行的首选数据来源。
 
-## Provider Architecture
+## 数据源架构
 
-Add a provider interface for data sources:
+新增统一数据源接口：
 
-- `list_symbols()`
-- `trade_calendar(year)`
-- `fetch_daily_bars(symbol, start_date, end_date)`
-- optional `fetch_capital_flow(symbol, start_date, end_date)`
-- optional `fetch_market_cap(symbol, start_date, end_date)`
+- `list_symbols()`：获取股票列表。
+- `trade_calendar(year)`：获取某年交易日历。
+- `fetch_daily_bars(symbol, start_date, end_date)`：获取某只股票日线。
+- `fetch_capital_flow(symbol, start_date, end_date)`：可选，获取资金流。
+- `fetch_market_cap(symbol, start_date, end_date)`：可选，获取市值。
 
-Implement providers:
+实现三类 provider：
 
-- `ADataProvider`: primary provider using `adata`.
-- `HttpAStockProvider`: fallback provider wrapping the current HTTP fetcher.
-- `CompositeProvider`: tries `ADataProvider` first, then fallback when the primary returns empty data or raises a transient error.
+- `ADataProvider`：主数据源，调用 `adata`。
+- `HttpAStockProvider`：备用数据源，封装当前已有 HTTP fetcher。
+- `CompositeProvider`：先调用 `ADataProvider`，当主源抛出临时错误或返回空数据时，再尝试备用源。
 
-The provider layer normalizes all provider output into the app's schema before storage. Provider-specific column names must not leak into the engine or UI.
+所有 provider 的输出必须先归一化到软件内部 schema，再写入仓库。`adata` 或其他数据源的原始字段名不能泄漏到回测引擎和前端。
 
-## Full-Market Initial Download
+## 全市场首次下载
 
-The initial download starts from 2015-01-01 and targets all active A-share symbols from `adata.stock.info.all_code()`.
+首次下载从 2015-01-01 开始，目标股票池来自 `adata.stock.info.all_code()` 返回的 A 股列表。
 
-Workflow:
+流程：
 
-1. Refresh stock universe.
-2. Refresh trade calendars from 2015 through the current year.
-3. Create a `sync_jobs` row with mode `full_market_bootstrap`.
-4. For each symbol, compute the requested start date as the later of 2015-01-01 and the symbol listing date.
-5. Fetch daily bars for that symbol through the current date.
-6. Normalize rows and write them immediately to the yearly parquet partitions.
-7. Update `symbol_sync_state` after each symbol.
-8. Continue on failures and record the error instead of aborting the whole job.
+1. 刷新股票池。
+2. 刷新 2015 年至当前年份的交易日历。
+3. 创建 `sync_jobs` 记录，模式为 `full_market_bootstrap`。
+4. 对每只股票计算请求起始日期：取 2015-01-01 和该股票上市日期中更晚的一个。
+5. 拉取这只股票从起始日期到当前日期的日线。
+6. 归一化数据，立即写入对应年份的 Parquet 分区。
+7. 每完成一只股票，就更新 `symbol_sync_state`。
+8. 单只股票失败时记录错误并继续处理下一只，不中断整个全市场任务。
 
-The user asked to start full-market directly, so the UI action should begin this job without requiring a separate sample run. The implementation should still make progress durable after every symbol.
+因为用户要求直接开始全市场下载，界面上的主操作应直接启动这个任务，不要求先跑示例或小样本。实现层面仍然要做到每只股票完成后落盘和记录进度。
 
-## Incremental Updates
+## 增量更新
 
-The Data Center gets an "update to latest" workflow.
+数据中心增加“更新到最新”流程。
 
-For each active symbol:
+对每只有效股票：
 
-1. Read the latest local `trade_date`.
-2. If no data exists, start at the later of 2015-01-01 and list date.
-3. If data exists, start from the next trading day after the latest local date.
-4. Fetch only the missing range.
-5. Append or merge rows into partitioned parquet.
-6. Update coverage metadata.
+1. 读取本地最大 `trade_date`。
+2. 如果本地没有该股票数据，从 2015-01-01 和上市日期中更晚的日期开始。
+3. 如果已有数据，从本地最大交易日后的下一个交易日开始。
+4. 只拉取缺失日期范围。
+5. 追加或合并到按年份分区的 Parquet。
+6. 更新覆盖范围元数据。
 
-The update should skip symbols that are already current through the latest known trading day.
+已经覆盖到最新交易日的股票应跳过，不重复请求接口。
 
-## Data Center UI
+## 数据中心界面
 
-Data Center should expose the data warehouse, not just service health.
+数据中心应展示本地数据仓库，而不是只展示服务健康状态。
 
-Required controls:
+必需控件：
 
-- Date range, defaulting to 2015-01-01 through the current date.
-- Stock universe selector: full market, manual symbols, or imported list.
-- Primary action: `下载全市场历史数据`.
-- Secondary action: `更新到最新`.
-- Progress panel showing total symbols, completed symbols, failed symbols, imported rows, current symbol, elapsed time, and last errors.
-- Coverage table showing daily bars coverage by date range and symbol count.
-- A retry action for failed symbols.
+- 日期范围，默认 2015-01-01 到当前日期。
+- 股票池选择：全市场、手动输入股票、自定义列表。
+- 主操作：`下载全市场历史数据`。
+- 次操作：`更新到最新`。
+- 进度面板：总股票数、已完成股票数、失败股票数、已导入行数、当前股票、耗时、最近错误。
+- 覆盖率表：展示日线数据覆盖日期、股票数量和缺失情况。
+- 失败重试按钮：只重试失败股票。
 
-The UI must make it clear that backtesting uses local data and that network providers are used only during data import/update.
+界面必须明确表达：回测使用本地数据；网络接口只在数据导入和更新时使用。
 
-## Backtest Integration
+## 回测集成
 
-Backtests should read local data through the warehouse reader.
+回测从本地仓库读取数据。
 
-Before running:
+运行前预检：
 
-- Validate that the selected date range is covered by `daily_bars`.
-- Validate that selected symbols have daily bars in the requested range.
-- Validate that strategy-required fields exist.
-- If a strategy depends on optional data such as `main_net_inflow` and that data is missing, return a clear preflight issue instead of failing mid-run.
+- 检查选择的日期范围是否被 `daily_bars` 覆盖。
+- 检查选择的股票池在目标日期范围内是否有日线数据。
+- 检查策略需要的字段是否存在。
+- 如果策略依赖 `main_net_inflow` 等增强字段，但本地增强数据缺失，应返回明确预检问题，不允许在回测中途崩溃。
 
-Backtest settings date inputs should use the same date-selection style as Data Center and should default to the Data Center selected range.
+回测设置中的日期输入应使用和数据中心一致的日期选择形式，并默认继承数据中心当前选择的日期范围。
 
-## Strategy Editor Integration
+## 策略编辑器集成
 
-This data project does not need to finish the entire strategy builder, but it must stop treating conditions as cosmetic.
+这个数据项目不需要一次性完成完整策略编辑器，但必须停止让条件设置停留在表面展示。
 
-Required for this phase:
+第一阶段要求：
 
-- Keep existing engine condition evaluation.
-- Expose condition enable/disable.
-- Expose editable parameters for conditions already present in the default strategy.
-- Show when a condition requires optional data that is currently missing.
+- 保留现有回测引擎中的条件计算。
+- 支持启用/禁用已有条件。
+- 支持编辑默认策略中已有条件的参数。
+- 当某个条件依赖当前缺失的增强数据时，界面必须提示。
 
-Full drag-and-drop condition composition can be a later phase.
+拖拽式条件组合、任意新增条件、完整策略模板管理可以作为后续阶段。
 
-## Error Handling
+## 错误处理
 
-Public data interfaces can fail, return empty data, or rate limit.
+公开数据接口可能失败、返回空数据或被限流。
 
-The app should handle that by:
+系统处理方式：
 
-- Retrying transient provider failures with bounded retry count.
-- Falling back from `adata` to the existing HTTP provider for daily bars.
-- Recording per-symbol errors in `symbol_sync_state`.
-- Continuing the full-market job when one symbol fails.
-- Showing recent errors in Data Center.
-- Allowing failed symbols to be retried later.
+- 对临时错误做有限次数重试。
+- `adata` 日线失败时，自动尝试现有 HTTP 备用源。
+- 在 `symbol_sync_state` 记录每只股票的错误。
+- 单只股票失败不终止全市场任务。
+- 数据中心展示最近错误。
+- 支持稍后重试失败股票。
 
-An empty response is not always a fatal error. For a delisted or newly listed stock outside the requested date range, it can be valid. For an active stock with expected trading dates, it should be recorded as a missing-data warning.
+空响应不一定是致命错误。对已退市股票、尚未上市股票或请求日期不在上市期间的股票，空响应可能是合理结果；对正常有效股票且交易日历显示应有数据的区间，空响应应记录为缺失数据警告。
 
-## File Size And Cleanup Policy
+## 文件大小和清理策略
 
-The app should keep source code and warehouse data separate:
+源码、构建产物和市场数据必须分开管理：
 
-- Source repository must not track downloaded market data.
-- `.astock-cache/warehouse` remains local and ignored by Git.
-- Build outputs such as `src-tauri/target`, `.pyinstaller`, `dist`, `release-assets`, and `src-tauri/bin` remain ignored.
-- The desktop install may include a Python sidecar, but full-market historical data should be created in the app cache directory, not bundled into the installer.
+- Git 仓库不跟踪下载下来的市场数据。
+- `.astock-cache/warehouse` 保持本地目录，并继续被 Git 忽略。
+- `src-tauri/target`、`.pyinstaller`、`dist`、`release-assets`、`src-tauri/bin` 等构建产物保持忽略状态。
+- 桌面安装包可以包含 Python sidecar，但全市场历史数据应由软件在本地缓存目录创建，不能打进安装包。
 
-This keeps GitHub updates small while allowing the local app to own a large data warehouse.
+这样 GitHub 更新保持轻量，同时本地软件可以维护较大的历史数据仓库。
 
-## Testing Strategy
+## 测试策略
 
-Unit tests:
+单元测试：
 
-- Provider normalization from `adata` columns to app schema.
-- Composite provider fallback behavior.
-- Warehouse write/read/merge by year partition.
-- Incremental date-range calculation.
-- Coverage calculation using trading calendar.
-- Backtest preflight for missing daily bars and optional fields.
+- `adata` 字段到内部 schema 的归一化。
+- 组合 provider 的 fallback 行为。
+- 仓库按年份分区写入、读取和合并。
+- 增量更新日期范围计算。
+- 基于交易日历的覆盖率计算。
+- 回测预检对缺失日线和缺失增强字段的处理。
 
-Service tests:
+服务测试：
 
-- Start a sync job.
-- Query job status.
-- Retry failed symbols.
-- Run backtest from warehouse data.
+- 启动同步任务。
+- 查询任务状态。
+- 重试失败股票。
+- 从仓库数据运行回测。
 
-Frontend tests:
+前端测试：
 
-- Data Center shows full-market download and update actions.
-- Progress panel renders job status.
-- Backtest settings pick up Data Center date range.
-- Missing optional strategy data is shown before running.
+- 数据中心展示全市场下载和更新按钮。
+- 进度面板正确渲染任务状态。
+- 回测设置继承数据中心日期范围。
+- 缺失增强数据时，运行前能看到提示。
 
-Manual verification:
+人工验证：
 
-- Start a full-market job from 2015-01-01.
-- Confirm job persists progress after several symbols.
-- Stop and restart service.
-- Confirm the job can continue without losing completed symbols.
-- Run a backtest using only local data.
+- 从 2015-01-01 启动全市场任务。
+- 确认每完成若干股票后进度会持久化。
+- 停止并重启本地服务。
+- 确认任务可以继续，不丢失已完成股票。
+- 使用本地数据运行一次回测。
 
-## Delivery Plan
+## 交付计划
 
-This should be implemented in phases that each produce a usable improvement:
+按能够逐步交付可用能力的顺序实施：
 
-1. Warehouse storage and provider layer.
-2. Full-market bootstrap job with resumable state.
-3. Data Center progress UI and retry controls.
-4. Incremental update workflow.
-5. Backtest reader and preflight integration.
-6. Strategy parameter UI improvements for currently supported conditions.
-7. Package desktop app, replace the desktop installation, and push the updated branch to GitHub.
+1. 仓库存储和 provider 层。
+2. 可续传的全市场初始化任务。
+3. 数据中心进度面板和失败重试。
+4. 增量更新流程。
+5. 回测仓库读取和预检集成。
+6. 当前已支持条件的策略参数界面改进。
+7. 打包桌面软件，替换桌面安装目录，并推送 GitHub 分支。
 
-The first operational milestone is successful full-market daily-bar import from 2015-01-01 into local storage, even if optional enhanced datasets are still incomplete.
+第一阶段的关键里程碑是：能从 2015-01-01 起把全市场日线成功导入本地仓库，即使资金流、市值等增强数据还不完整，也能运行基础本地回测。
