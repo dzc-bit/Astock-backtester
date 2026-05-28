@@ -60,6 +60,8 @@ export function ResultsOverview({
             <span>最大回撤 {(result.metrics.max_drawdown_pct * 100).toFixed(2)}%</span>
             <span>胜率 {(result.metrics.win_rate_pct * 100).toFixed(2)}%</span>
             <span>交易次数 {result.metrics.trade_count}</span>
+            <span>平均仓位 {(result.metrics.average_position_pct * 100).toFixed(2)}%</span>
+            <span>最大仓位 {(result.metrics.max_position_pct * 100).toFixed(2)}%</span>
           </div>
           <div className="risk-strip">
             <strong>风险提示</strong>

@@ -31,7 +31,9 @@ const demoResult = {
     max_drawdown_pct: -0.018,
     win_rate_pct: 0.6,
     trade_count: 1,
-    average_trade_return_pct: 0.011
+    average_trade_return_pct: 0.011,
+    average_position_pct: 0.48,
+    max_position_pct: 0.48
   },
   equity_curve: [
     { trade_date: "2024-01-02", equity: 100000, cash: 100000, market_value: 0, drawdown_pct: 0 },
@@ -46,6 +48,11 @@ const demoResult = {
       buy_price: 12,
       sell_price: 10.2,
       shares: 4000,
+      planned_amount: 50000,
+      buy_amount: 48000,
+      sell_amount: 40800,
+      target_position_pct: 0.5,
+      actual_position_pct: 0.48,
       buy_reason: [
         "float market cap 8000000000 in [1000000000, 30000000000]",
         "3d main net inflow 6000000 >= 3000000",
@@ -653,6 +660,38 @@ describe("A 股回测工作台界面", () => {
     expect(screen.getByText("样例：3")).toBeInTheDocument();
     expect(screen.getByLabelText("初始资金").tagName).toBe("INPUT");
     expect(screen.getByLabelText("固定持仓天数").tagName).toBe("INPUT");
+  });
+
+  it("lets the user set single-stock position sizing and shows it in the trades table", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "A股策略回测工作台" });
+    await user.selectOptions(screen.getByLabelText("仓位模式"), "fixed_ratio");
+    await user.clear(screen.getByLabelText("单股仓位（%）"));
+    await user.type(screen.getByLabelText("单股仓位（%）"), "20");
+    await user.click(screen.getByRole("button", { name: "运行历史回测" }));
+
+    expect(apiMocks.runBacktestStreamWithDataService).toHaveBeenCalledWith(
+      "http://127.0.0.1:9010",
+      expect.any(Object),
+      expect.objectContaining({
+        position_sizing_mode: "fixed_ratio",
+        position_size_pct: 0.2
+      }),
+      expect.objectContaining({
+        onPhase: expect.any(Function),
+        onProgress: expect.any(Function),
+        onTrade: expect.any(Function),
+        onResult: expect.any(Function)
+      })
+    );
+    expect(await screen.findByText("仓位")).toBeInTheDocument();
+    expect(screen.getAllByText(/48\.00%/).length).toBeGreaterThanOrEqual(3);
+    expect(screen.getByText(/4\.80万/)).toBeInTheDocument();
+    expect(screen.getByText(/平均仓位 48\.00%/)).toBeInTheDocument();
+    expect(screen.getByText(/最大仓位 48\.00%/)).toBeInTheDocument();
+    expect(screen.getByText(/4000 股/)).toBeInTheDocument();
   });
 
   it("uses full-market risk alerts and realtime breadth in the top summary", async () => {

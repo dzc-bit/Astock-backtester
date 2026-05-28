@@ -31,6 +31,8 @@ REQUIRED_BASE_COLUMNS = {
     "main_net_inflow",
 }
 
+BOARD_LOT_SIZE = 100
+
 
 def _stock_pool_mask(data: pd.DataFrame, settings: BacktestSettings) -> pd.Series:
     symbols = data["symbol"].astype(str)
@@ -111,6 +113,8 @@ def _empty_result(issues: list[PreflightIssue], initial_cash: float) -> Backtest
         win_rate_pct=0.0,
         trade_count=0,
         average_trade_return_pct=0.0,
+        average_position_pct=0.0,
+        max_position_pct=0.0,
     )
     return BacktestResult(metrics=metrics, equity_curve=[], trades=[], preflight_issues=issues)
 
@@ -261,6 +265,7 @@ def _build_metrics(
     closed = [trade for trade in trades if trade.pnl_pct is not None]
     wins = [trade for trade in closed if (trade.pnl_pct or 0) > 0]
     avg_trade = sum(trade.pnl_pct or 0 for trade in closed) / len(closed) if closed else 0.0
+    position_pcts = [trade.actual_position_pct for trade in closed]
     max_drawdown = min((point.drawdown_pct for point in equity_curve), default=0.0)
     return BacktestMetrics(
         total_return_pct=total_return,
@@ -269,7 +274,30 @@ def _build_metrics(
         win_rate_pct=len(wins) / len(closed) if closed else 0.0,
         trade_count=len(closed),
         average_trade_return_pct=avg_trade,
+        average_position_pct=sum(position_pcts) / len(position_pcts) if position_pcts else 0.0,
+        max_position_pct=max(position_pcts, default=0.0),
     )
+
+
+def _mark_to_market(open_positions: list[Trade], rows_by_symbol: dict[str, object]) -> float:
+    market_value = 0.0
+    for position in open_positions:
+        row = rows_by_symbol.get(position.symbol)
+        if row is not None:
+            market_value += float(row.close) * position.shares
+    return market_value
+
+
+def _planned_entry_amount(
+    settings: BacktestSettings,
+    cash: float,
+    open_positions: list[Trade],
+    current_equity: float,
+) -> float:
+    if settings.position_sizing_mode == "fixed_ratio":
+        return min(cash, current_equity * settings.position_size_pct)
+    remaining_slots = max(1, settings.max_positions - len(open_positions))
+    return cash / remaining_slots
 
 
 def run_backtest(
@@ -349,9 +377,10 @@ def run_backtest(
                 position.sell_signal_date = pd.Timestamp(signal_date).date()
                 position.sell_date = pd.Timestamp(signal_date).date()
                 position.sell_price = sell_price
+                position.sell_amount = proceeds
                 position.sell_reason = exit_reasons
-                position.pnl = proceeds - (position.buy_price * position.shares)
-                position.pnl_pct = (sell_price / position.buy_price) - 1
+                position.pnl = proceeds - position.buy_amount
+                position.pnl_pct = (proceeds / position.buy_amount - 1) if position.buy_amount else None
                 trades.append(position)
                 if on_trade_closed is not None:
                     on_trade_closed(position)
@@ -398,6 +427,8 @@ def run_backtest(
                         ),
                     }
                 )
+            current_market_value = _mark_to_market(open_positions, today_by_symbol)
+            current_equity = cash + current_market_value
             for row, reasons in candidates[: settings.max_daily_buys]:
                 if len(open_positions) >= settings.max_positions:
                     break
@@ -405,30 +436,32 @@ def run_backtest(
                 if buy_tuple is None:
                     continue
                 buy = pd.Series(buy_tuple._asdict())
-                cash_per_position = cash / max(1, settings.max_positions - len(open_positions))
-                buy_price = float(buy["open"]) * (1 + settings.slippage_rate)
-                shares = int(cash_per_position // buy_price)
+                planned_amount = _planned_entry_amount(settings, cash, open_positions, current_equity)
+                executed_buy_price = float(buy["open"]) * (1 + settings.slippage_rate)
+                cost_per_share = executed_buy_price * (1 + settings.fee_rate)
+                shares = int(planned_amount // cost_per_share)
+                shares = (shares // BOARD_LOT_SIZE) * BOARD_LOT_SIZE
                 if shares <= 0:
                     continue
-                cost = shares * buy_price * (1 + settings.fee_rate)
-                cash -= cost
+                buy_amount = shares * cost_per_share
+                cash -= buy_amount
                 opened_trade = Trade(
                     symbol=str(row["symbol"]),
                     buy_signal_date=pd.Timestamp(signal_date).date(),
                     buy_date=pd.Timestamp(next_date).date(),
                     buy_price=float(buy["open"]),
                     shares=shares,
+                    planned_amount=planned_amount,
+                    buy_amount=buy_amount,
+                    target_position_pct=planned_amount / current_equity if current_equity else 0.0,
+                    actual_position_pct=buy_amount / current_equity if current_equity else 0.0,
                     buy_reason=reasons,
                 )
                 open_positions.append(opened_trade)
                 if on_event is not None:
                     on_event({"type": "trade_opened", "trade": opened_trade})
 
-        market_value = 0.0
-        for position in open_positions:
-            row = today_by_symbol.get(position.symbol)
-            if row is not None:
-                market_value += float(row.close) * position.shares
+        market_value = _mark_to_market(open_positions, today_by_symbol)
         equity = cash + market_value
         peak_equity = max(peak_equity, equity)
         drawdown = (equity / peak_equity) - 1 if peak_equity else 0.0

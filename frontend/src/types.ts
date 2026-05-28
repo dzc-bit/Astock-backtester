@@ -173,6 +173,8 @@ export type BacktestSettingsConfig = {
   stock_pool: "all" | "main_board" | "gem" | "star" | "beijing" | "custom";
   custom_symbols: string[];
   benchmark_symbol: string;
+  position_sizing_mode: "fixed_ratio" | "equal_slots";
+  position_size_pct: number;
   fixed_holding_days: number;
   take_profit_pct: number | null;
   stop_loss_pct: number | null;
@@ -193,6 +195,8 @@ export type BacktestMetrics = {
   win_rate_pct: number;
   trade_count: number;
   average_trade_return_pct: number;
+  average_position_pct: number;
+  max_position_pct: number;
 };
 
 export type EquityPoint = {
@@ -211,6 +215,11 @@ export type Trade = {
   buy_price: number;
   sell_price?: number | null;
   shares: number;
+  planned_amount: number;
+  buy_amount: number;
+  sell_amount?: number | null;
+  target_position_pct: number;
+  actual_position_pct: number;
   buy_reason: string[];
   sell_reason: string[];
   pnl?: number | null;

@@ -13,3 +13,4 @@ __pycache__/
 .tmp-test/
 .reference/
 backend/astock_backtester.egg-info/
+运行产物/

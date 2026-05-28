@@ -62,6 +62,8 @@ def test_backtest_settings_defaults_to_conservative_execution():
     assert settings.limit_down_blocks_sell is True
     assert settings.stock_pool == "all"
     assert settings.custom_symbols == []
+    assert settings.position_sizing_mode == "equal_slots"
+    assert settings.position_size_pct == 0.2
 
 
 def test_backtest_settings_rejects_negative_fee_rate():
@@ -122,6 +124,21 @@ def test_backtest_settings_accepts_controlled_stock_pool_and_custom_symbols():
 
     assert settings.stock_pool == "custom"
     assert settings.custom_symbols == ["600519", "000001"]
+
+
+def test_backtest_settings_accepts_position_sizing_fields():
+    settings = make_backtest_settings(position_sizing_mode="equal_slots", position_size_pct=0.25)
+
+    assert settings.position_sizing_mode == "equal_slots"
+    assert settings.position_size_pct == 0.25
+
+
+def test_backtest_settings_rejects_invalid_position_size_pct():
+    with pytest.raises(ValidationError):
+        make_backtest_settings(position_size_pct=0)
+
+    with pytest.raises(ValidationError):
+        make_backtest_settings(position_size_pct=1.2)
 
 
 def test_custom_stock_pool_requires_symbols():

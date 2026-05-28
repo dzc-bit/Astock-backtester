@@ -67,6 +67,11 @@ const stockPools = [
   { value: "custom", label: "自选代码" }
 ] as const;
 
+const positionSizingModes = [
+  { value: "fixed_ratio", label: "单股固定仓位" },
+  { value: "equal_slots", label: "按剩余仓位等分" }
+] as const;
+
 const conditionMetaById = Object.fromEntries(
   (conditionLibrary as ConditionMeta[]).map((condition) => [condition.id, condition])
 );
@@ -107,6 +112,7 @@ const exitExamples = [
 
 const numericSettingLabels: Partial<Record<keyof BacktestSettingsConfig, string>> = {
   initial_cash: "初始资金",
+  position_size_pct: "单股仓位比例",
   fixed_holding_days: "固定持仓天数",
   max_positions: "最大持仓数",
   max_daily_buys: "每日最多买入",
@@ -505,6 +511,34 @@ export function StrategyWorkbench({
               />
             </label>
             <label>
+              仓位模式
+              <span className="setting-example">固定仓位更贴近实盘</span>
+              <select
+                aria-label="仓位模式"
+                value={settings.position_sizing_mode}
+                onChange={(event) => updateSettings({ position_sizing_mode: event.target.value as BacktestSettingsConfig["position_sizing_mode"] })}
+              >
+                {positionSizingModes.map((mode) => (
+                  <option key={mode.value} value={mode.value}>
+                    {mode.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              单股仓位（%）
+              <span className="setting-example">样例：20</span>
+              <input
+                type="number"
+                aria-label="单股仓位（%）"
+                min={0.1}
+                max={100}
+                step={1}
+                value={settingValue("position_size_pct", percentValue(settings.position_size_pct, 0.2))}
+                onChange={(event) => updateNumericSetting("position_size_pct", event.target.value, (value) => value / 100)}
+              />
+            </label>
+            <label>
               最大持仓数
               <span className="setting-example">样例：5</span>
               <input
@@ -604,6 +638,9 @@ export function StrategyWorkbench({
               />
               保守撮合
             </label>
+          </div>
+          <div className="inline-actions">
+            <span className="muted-code">A股买入按 100 股整手取整，仓位按当前总权益计算。</span>
           </div>
         </div>
       </div>

@@ -27,7 +27,9 @@ const demoResult: BacktestResult = {
     max_drawdown_pct: -0.018,
     win_rate_pct: 0.6,
     trade_count: 1,
-    average_trade_return_pct: 0.011
+    average_trade_return_pct: 0.011,
+    average_position_pct: 0.48,
+    max_position_pct: 0.48
   },
   equity_curve: [
     { trade_date: "2024-01-02", equity: 100000, cash: 100000, market_value: 0, drawdown_pct: 0 },
@@ -43,6 +45,11 @@ const demoResult: BacktestResult = {
       buy_price: 12,
       sell_price: 10.2,
       shares: 4000,
+      planned_amount: 50000,
+      buy_amount: 48000,
+      sell_amount: 40800,
+      target_position_pct: 0.5,
+      actual_position_pct: 0.48,
       buy_reason: ["float market cap 8800000000 in [1000000000, 30000000000]", "3d main net inflow 6000000 >= 3000000"],
       sell_reason: ["fixed holding days reached"],
       pnl: -7200,
