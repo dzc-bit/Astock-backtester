@@ -170,6 +170,43 @@ def test_breakdown_below_n_day_low_uses_prior_lows_only():
     assert "prior 3d low" in result.reason
 
 
+def test_breakout_breakdown_and_capital_flow_use_precomputed_columns():
+    row = pd.Series(
+        {
+            "symbol": "AAA",
+            "trade_date": pd.Timestamp("2024-01-04"),
+            "close": 12.0,
+            "prior_high_2d": 11.2,
+            "prior_low_2d": 10.8,
+            "main_net_inflow_sum_3d": 9_000_000,
+        }
+    )
+    frame_without_history = pd.DataFrame([row])
+
+    breakout = evaluate_condition(
+        ConditionNode(id="breakout", condition_id="breakout_above_n_day_high", params={"window": 2}),
+        row,
+        frame_without_history,
+    )
+    breakdown = evaluate_condition(
+        ConditionNode(id="breakdown", condition_id="breakdown_below_n_day_low", params={"window": 2}),
+        row,
+        frame_without_history,
+    )
+    flow = evaluate_condition(
+        ConditionNode(id="flow", condition_id="capital_flow_n_day_sum_at_least", params={"window": 3, "min": 8_000_000}),
+        row,
+        frame_without_history,
+    )
+
+    assert breakout.passed is True
+    assert round(breakout.observed_value or 0, 6) == round(12.0 - 11.2, 6)
+    assert breakdown.passed is False
+    assert round(breakdown.observed_value or 0, 6) == round(12.0 - 10.8, 6)
+    assert flow.passed is True
+    assert flow.observed_value == 9_000_000
+
+
 def test_user_written_condition_text_is_validated_into_executable_node():
     result = validate_condition_text("收盘价站上20日均线")
 

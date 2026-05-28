@@ -749,6 +749,45 @@ describe("A 股回测工作台界面", () => {
     expect(screen.getAllByText(/半导体/).length).toBeGreaterThan(0);
   });
 
+  it("uses red for rising indexes and green for falling indexes", async () => {
+    apiMocks.loadRealtimeMarketSnapshot.mockResolvedValue({
+      status: "live",
+      source: "test",
+      updated_at: new Date("2026-05-27T10:30:00+08:00").toISOString(),
+      indexes: [
+        {
+          symbol: "sh000001",
+          name: "涓婅瘉鎸囨暟",
+          last: 3120.5,
+          previous_close: 3100,
+          change: 20.5,
+          change_pct: 0.0066129,
+          source: "test",
+          updated_at: new Date("2026-05-27T10:30:00+08:00").toISOString()
+        },
+        {
+          symbol: "sz399001",
+          name: "娣辫瘉鎴愭寚",
+          last: 9600,
+          previous_close: 9700,
+          change: -100,
+          change_pct: -0.010309,
+          source: "test",
+          updated_at: new Date("2026-05-27T10:30:00+08:00").toISOString()
+        }
+      ],
+      breadth: { up: 1200, down: 3600, flat: 200, total: 5000, source: "test" },
+      strong_sectors: [],
+      yesterday_strong_sectors: [],
+      message: "test"
+    });
+
+    render(<App />);
+
+    expect(await screen.findByText("+0.66% / 20.5")).toHaveClass("up-text");
+    expect(await screen.findByText("-1.03% / -100")).toHaveClass("down-text");
+  });
+
   it("lets the user validate and add exit rules so sell logic is not hidden", async () => {
     const user = userEvent.setup();
     apiMocks.validateConditionExpression.mockImplementation(async (_baseUrl, text) => {

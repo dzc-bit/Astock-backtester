@@ -75,6 +75,18 @@ def _capital_flow_n_day_sum_at_least(
 ) -> ConditionResult:
     window = int(node.params["window"])
     minimum = float(node.params["min"])
+    precomputed_column = f"main_net_inflow_sum_{window}d"
+    if precomputed_column in row.index:
+        value = pd.to_numeric(row[precomputed_column], errors="coerce")
+        if pd.isna(value):
+            return ConditionResult(
+                False,
+                f"{window}d main net inflow unavailable before enough history",
+                None,
+            )
+        value = float(value)
+        return ConditionResult(value >= minimum, f"{window}d main net inflow {value:.0f} >= {minimum:.0f}", value)
+
     symbol_frame = frame[
         (frame["symbol"] == row["symbol"]) & (frame["trade_date"] <= row["trade_date"])
     ].sort_values("trade_date")
@@ -157,6 +169,15 @@ def _macd_histogram_at_least(node: ConditionNode, row: pd.Series, frame: pd.Data
 
 def _breakout_above_n_day_high(node: ConditionNode, row: pd.Series, frame: pd.DataFrame) -> ConditionResult:
     window = int(node.params["window"])
+    precomputed_column = f"prior_high_{window}d"
+    if precomputed_column in row.index:
+        prior_high = pd.to_numeric(row[precomputed_column], errors="coerce")
+        if pd.isna(prior_high):
+            return ConditionResult(False, f"{window}d prior high unavailable before enough history", None)
+        prior_high = float(prior_high)
+        value = float(row["close"] - prior_high)
+        return ConditionResult(value > 0, f"close {row['close']:.2f} broke prior {window}d high {prior_high:.2f}", value)
+
     symbol_frame = frame[
         (frame["symbol"] == row["symbol"]) & (frame["trade_date"] < row["trade_date"])
     ].sort_values("trade_date")
@@ -169,6 +190,15 @@ def _breakout_above_n_day_high(node: ConditionNode, row: pd.Series, frame: pd.Da
 
 def _breakdown_below_n_day_low(node: ConditionNode, row: pd.Series, frame: pd.DataFrame) -> ConditionResult:
     window = int(node.params["window"])
+    precomputed_column = f"prior_low_{window}d"
+    if precomputed_column in row.index:
+        prior_low = pd.to_numeric(row[precomputed_column], errors="coerce")
+        if pd.isna(prior_low):
+            return ConditionResult(False, f"{window}d prior low unavailable before enough history", None)
+        prior_low = float(prior_low)
+        value = float(row["close"] - prior_low)
+        return ConditionResult(value < 0, f"close {row['close']:.2f} broke prior {window}d low {prior_low:.2f}", value)
+
     symbol_frame = frame[
         (frame["symbol"] == row["symbol"]) & (frame["trade_date"] < row["trade_date"])
     ].sort_values("trade_date")

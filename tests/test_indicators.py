@@ -1,6 +1,14 @@
 import pandas as pd
 
-from astock_backtester.indicators import add_macd, add_market_heat, add_moving_average, add_returns, add_volume_ratio
+from astock_backtester.indicators import (
+    add_capital_flow_sum,
+    add_macd,
+    add_market_heat,
+    add_moving_average,
+    add_prior_high_low,
+    add_returns,
+    add_volume_ratio,
+)
 from astock_backtester.sample_data import sample_daily_bars
 
 
@@ -74,3 +82,20 @@ def test_add_volume_ratio_uses_prior_window_only():
 
     assert pd.isna(aaa.loc[0, "volume_ratio_2d"])
     assert round(aaa.loc[2, "volume_ratio_2d"], 6) == round(2200 / ((1000 + 1500) / 2), 6)
+
+
+def test_add_prior_high_low_uses_only_previous_rows():
+    result = add_prior_high_low(sample_daily_bars(), windows=[2])
+    aaa = result[result["symbol"] == "AAA"].reset_index(drop=True)
+
+    assert pd.isna(aaa.loc[1, "prior_high_2d"])
+    assert aaa.loc[2, "prior_high_2d"] == 11.2
+    assert aaa.loc[2, "prior_low_2d"] == 9.8
+
+
+def test_add_capital_flow_sum_uses_rolling_symbol_window():
+    result = add_capital_flow_sum(sample_daily_bars(), windows=[3])
+    aaa = result[result["symbol"] == "AAA"].reset_index(drop=True)
+
+    assert pd.isna(aaa.loc[1, "main_net_inflow_sum_3d"])
+    assert aaa.loc[2, "main_net_inflow_sum_3d"] == 9_000_000

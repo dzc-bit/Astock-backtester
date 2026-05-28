@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from datetime import date
 from pathlib import Path
 from typing import Sequence
 
@@ -49,6 +50,19 @@ class Warehouse:
     def _partition_path(self, year: int) -> Path:
         return self.daily_bars_root / f"year={year}" / "daily_bars.parquet"
 
+    def _partition_paths_for_range(self, start_date: str | None, end_date: str | None) -> list[Path]:
+        paths = sorted(self.daily_bars_root.glob("year=*/daily_bars.parquet"))
+        if not paths or (start_date is None and end_date is None):
+            return paths
+
+        start_year = date.min.year if start_date is None else pd.Timestamp(start_date).year
+        end_year = date.max.year if end_date is None else pd.Timestamp(end_date).year
+        return [
+            path
+            for path in paths
+            if start_year <= int(path.parent.name.split("year=", 1)[1]) <= end_year
+        ]
+
     def write_daily_bars(self, frame: pd.DataFrame) -> None:
         normalized = normalize_daily_bars(frame)
         if normalized.empty:
@@ -76,7 +90,7 @@ class Warehouse:
         start_date: str | None = None,
         end_date: str | None = None,
     ) -> pd.DataFrame:
-        paths = sorted(self.daily_bars_root.glob("year=*/daily_bars.parquet"))
+        paths = self._partition_paths_for_range(start_date, end_date)
         if not paths:
             return pd.DataFrame()
         frames = [pd.read_parquet(path) for path in paths]

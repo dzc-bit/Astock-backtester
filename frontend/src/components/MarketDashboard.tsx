@@ -34,6 +34,13 @@ function formatTime(value: string | null | undefined): string {
   }).format(new Date(value));
 }
 
+function movementClass(value: number | null | undefined): "up-text" | "down-text" | "flat-text" {
+  if (value == null || Number.isNaN(value) || value === 0) {
+    return "flat-text";
+  }
+  return value > 0 ? "up-text" : "down-text";
+}
+
 function buildMarketCommentary(snapshot: RealtimeMarketSnapshot | null): string {
   if (!snapshot || snapshot.status === "unavailable") {
     return "行情评价：实时接口没接上时不要硬猜方向，先把数据源恢复，再谈策略。";
@@ -141,7 +148,7 @@ export function MarketDashboard({ snapshot, isLoading = false }: Props) {
             <article className="index-quote" key={quote.symbol}>
               <span>{quote.name}</span>
               <strong>{formatNumber(quote.last)}</strong>
-              <small className={(quote.change_pct ?? 0) >= 0 ? "up-text" : "down-text"}>
+              <small className={movementClass(quote.change_pct)}>
                 {formatPercent(quote.change_pct)} / {formatNumber(quote.change)}
               </small>
             </article>
@@ -177,7 +184,7 @@ export function MarketDashboard({ snapshot, isLoading = false }: Props) {
             {(snapshot?.strong_sectors ?? []).slice(0, 5).map((sector) => (
               <span key={`${sector.name}-${sector.leading_symbol ?? ""}`}>
                 {sector.name}
-                <strong>{formatPercent(sector.change_pct)}</strong>
+                <strong className={movementClass(sector.change_pct)}>{formatPercent(sector.change_pct)}</strong>
               </span>
             ))}
             {snapshot && snapshot.strong_sectors.length === 0 ? <span>暂无板块数据</span> : null}
@@ -189,7 +196,7 @@ export function MarketDashboard({ snapshot, isLoading = false }: Props) {
               {(snapshot?.yesterday_strong_sectors ?? []).slice(0, 4).map((sector) => (
                 <span key={`yesterday-${sector.name}-${sector.leading_symbol ?? ""}`}>
                   {sector.name}
-                  <strong>{formatPercent(sector.change_pct)}</strong>
+                  <strong className={movementClass(sector.change_pct)}>{formatPercent(sector.change_pct)}</strong>
                 </span>
               ))}
               {snapshot && (snapshot.yesterday_strong_sectors ?? []).length === 0 ? <span>等待昨日板块数据</span> : null}

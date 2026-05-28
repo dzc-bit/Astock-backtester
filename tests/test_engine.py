@@ -360,3 +360,62 @@ def test_extreme_chasing_strategy_can_surface_large_loss():
     assert result.metrics.total_return_pct < -0.3
     assert result.trades[0].pnl_pct is not None
     assert result.trades[0].pnl_pct < -0.3
+
+
+def test_backtest_uses_precomputed_breakout_and_breakdown_columns():
+    dates = pd.to_datetime(["2024-01-02", "2024-01-03", "2024-01-04", "2024-01-05", "2024-01-08"])
+    frame = pd.DataFrame(
+        {
+            "symbol": ["AAA"] * 5,
+            "trade_date": dates,
+            "open": [10.0, 10.2, 10.8, 10.0, 9.7],
+            "high": [10.2, 10.4, 11.0, 10.1, 9.9],
+            "low": [9.8, 10.0, 10.6, 9.5, 9.2],
+            "close": [10.0, 10.2, 10.9, 10.0, 9.4],
+            "volume": [1000, 1200, 1400, 1300, 1200],
+            "is_suspended": [False] * 5,
+            "listing_days": [500] * 5,
+            "float_market_cap": [2_000_000_000] * 5,
+            "main_net_inflow": [0.0] * 5,
+            "market_rising_ratio": [1.0] * 5,
+            "prior_high_2d": [float("nan"), float("nan"), 10.4, 11.0, 11.0],
+            "prior_low_2d": [float("nan"), float("nan"), 9.8, 10.0, 9.5],
+            "volume_ratio_2d": [float("nan"), float("nan"), 1.27, 1.0, 0.92],
+        }
+    )
+    strategy = StrategyConfig(
+        name="precomputed",
+        market_filters=[],
+        entry_groups=[
+            ConditionGroup(
+                id="entry",
+                operator=ConditionOperator.AND,
+                conditions=[
+                    ConditionNode(id="breakout", condition_id="breakout_above_n_day_high", params={"window": 2}),
+                    ConditionNode(id="volume", condition_id="volume_ratio_between", params={"window": 2, "min": 1.0, "max": 2.0}),
+                ],
+            )
+        ],
+        exit_rules=[ConditionNode(id="exit-low", condition_id="breakdown_below_n_day_low", params={"window": 2})],
+    )
+    settings = BacktestSettings(
+        start_date=dates[0].date(),
+        end_date=dates[-1].date(),
+        initial_cash=100_000,
+        fixed_holding_days=20,
+        take_profit_pct=None,
+        stop_loss_pct=None,
+        max_positions=1,
+        max_daily_buys=1,
+        min_listing_days=0,
+    )
+
+    result = run_backtest(frame, strategy, settings)
+
+    assert result.trades
+    trade = result.trades[0]
+    assert str(trade.buy_signal_date) == "2024-01-04"
+    assert str(trade.buy_date) == "2024-01-05"
+    assert any("prior 2d high" in reason for reason in trade.buy_reason)
+    assert str(trade.sell_date) == "2024-01-08"
+    assert any("prior 2d low" in reason for reason in trade.sell_reason)

@@ -135,6 +135,79 @@ def _passes_entry(strategy: StrategyConfig, row: pd.Series, frame: pd.DataFrame)
     return True, reasons
 
 
+def _filter_mask_for_node(node, data: pd.DataFrame) -> pd.Series:
+    mask = pd.Series(True, index=data.index)
+    if not node.enabled:
+        return mask
+    condition_id = node.condition_id
+    params = node.params
+    if condition_id == "market_cap_between":
+        return data["float_market_cap"].between(float(params["min"]), float(params["max"]), inclusive="both")
+    if condition_id == "capital_flow_n_day_sum_at_least":
+        window = int(params["window"])
+        column = f"main_net_inflow_sum_{window}d"
+        if column in data:
+            return data[column] >= float(params["min"])
+        return mask
+    if condition_id == "market_rising_ratio_at_least":
+        return data["market_rising_ratio"] >= float(params["min_ratio"])
+    if condition_id == "close_above_ma":
+        window = int(params["window"])
+        return data["close"] > data[f"ma_{window}"]
+    if condition_id == "close_below_ma":
+        window = int(params["window"])
+        return data["close"] < data[f"ma_{window}"]
+    if condition_id == "turnover_between":
+        return data["turnover_rate"].between(float(params["min"]), float(params["max"]), inclusive="both")
+    if condition_id == "past_return_at_most":
+        window = int(params["window"])
+        return data[f"return_{window}d"] <= float(params["max"])
+    if condition_id == "past_return_between":
+        window = int(params["window"])
+        return data[f"return_{window}d"].between(float(params["min"]), float(params["max"]), inclusive="both")
+    if condition_id == "volume_ratio_between":
+        window = int(params["window"])
+        return data[f"volume_ratio_{window}d"].between(float(params["min"]), float(params["max"]), inclusive="both")
+    if condition_id == "macd_histogram_at_least":
+        return data["macd_hist"] >= float(params["min"])
+    if condition_id == "breakout_above_n_day_high":
+        window = int(params["window"])
+        column = f"prior_high_{window}d"
+        if column in data:
+            return data["close"] > data[column]
+        return mask
+    if condition_id == "breakdown_below_n_day_low":
+        window = int(params["window"])
+        column = f"prior_low_{window}d"
+        if column in data:
+            return data["close"] < data[column]
+        return mask
+    return mask
+
+
+def _candidate_prefilter_mask(strategy: StrategyConfig, data: pd.DataFrame) -> pd.Series:
+    mask = pd.Series(True, index=data.index)
+    for node in strategy.market_filters:
+        mask &= _filter_mask_for_node(node, data)
+    for group in strategy.entry_groups:
+        operator = getattr(group.operator, "value", group.operator)
+        if operator == "score":
+            continue
+        group_masks = [_filter_mask_for_node(node, data) for node in group.conditions]
+        if not group_masks:
+            continue
+        if operator == "or":
+            group_mask = group_masks[0].copy()
+            for node_mask in group_masks[1:]:
+                group_mask |= node_mask
+        else:
+            group_mask = group_masks[0].copy()
+            for node_mask in group_masks[1:]:
+                group_mask &= node_mask
+        mask &= group_mask
+    return mask.fillna(False)
+
+
 def _next_trade_date(dates: list[pd.Timestamp], signal_date: pd.Timestamp) -> pd.Timestamp | None:
     for trade_date in dates:
         if trade_date > signal_date:
@@ -216,7 +289,13 @@ def run_backtest(
         & (data["trade_date"] <= pd.Timestamp(settings.end_date))
     ].copy()
     data = data.loc[_stock_pool_mask(data, settings)].copy()
+    data["_passes_entry_prefilter"] = _candidate_prefilter_mask(strategy, data)
     trade_dates = list(sorted(data["trade_date"].unique()))
+    rows_by_date = {trade_date: group for trade_date, group in data.groupby("trade_date", sort=False)}
+    rows_by_date_symbol = {
+        trade_date: {str(row.symbol): row for row in group.itertuples(index=False)}
+        for trade_date, group in rows_by_date.items()
+    }
     cash = settings.initial_cash
     trades: list[Trade] = []
     open_positions: list[Trade] = []
@@ -225,7 +304,8 @@ def run_backtest(
 
     total_trade_days = len(trade_dates)
     for day_index, signal_date in enumerate(trade_dates, start=1):
-        today = data[data["trade_date"] == signal_date]
+        today = rows_by_date.get(signal_date, data.iloc[0:0])
+        today_by_symbol = rows_by_date_symbol.get(signal_date, {})
         if on_event is not None:
             on_event(
                 {
@@ -246,11 +326,11 @@ def run_backtest(
                 still_open.append(position)
                 continue
             held_days = sum(position.buy_date <= item.date() <= pd.Timestamp(signal_date).date() for item in trade_dates)
-            row = today[today["symbol"] == position.symbol]
-            if row.empty:
+            current_tuple = today_by_symbol.get(position.symbol)
+            if current_tuple is None:
                 still_open.append(position)
                 continue
-            current = row.iloc[0]
+            current = pd.Series(current_tuple._asdict())
             exit_reasons: list[str] = []
             if held_days >= settings.fixed_holding_days:
                 exit_reasons.append(f"fixed holding days reached: {settings.fixed_holding_days}")
@@ -285,7 +365,8 @@ def run_backtest(
         candidate_count = 0
         if next_date is not None and len(open_positions) < settings.max_positions:
             candidates: list[tuple[pd.Series, list[str]]] = []
-            for _, row in today.iterrows():
+            candidate_rows = today[today["_passes_entry_prefilter"]]
+            for _, row in candidate_rows.iterrows():
                 if bool(row["is_suspended"]):
                     continue
                 if settings.exclude_st and "is_st" in row.index and bool(row["is_st"]):
@@ -320,10 +401,10 @@ def run_backtest(
             for row, reasons in candidates[: settings.max_daily_buys]:
                 if len(open_positions) >= settings.max_positions:
                     break
-                buy_row = data[(data["trade_date"] == next_date) & (data["symbol"] == row["symbol"])]
-                if buy_row.empty:
+                buy_tuple = rows_by_date_symbol.get(next_date, {}).get(str(row["symbol"]))
+                if buy_tuple is None:
                     continue
-                buy = buy_row.iloc[0]
+                buy = pd.Series(buy_tuple._asdict())
                 cash_per_position = cash / max(1, settings.max_positions - len(open_positions))
                 buy_price = float(buy["open"]) * (1 + settings.slippage_rate)
                 shares = int(cash_per_position // buy_price)
@@ -345,9 +426,9 @@ def run_backtest(
 
         market_value = 0.0
         for position in open_positions:
-            row = today[today["symbol"] == position.symbol]
-            if not row.empty:
-                market_value += float(row.iloc[0]["close"]) * position.shares
+            row = today_by_symbol.get(position.symbol)
+            if row is not None:
+                market_value += float(row.close) * position.shares
         equity = cash + market_value
         peak_equity = max(peak_equity, equity)
         drawdown = (equity / peak_equity) - 1 if peak_equity else 0.0

@@ -39,6 +39,26 @@ def test_warehouse_writes_year_partitions_and_reads_filtered_data(tmp_path):
     assert result["trade_date"].dt.strftime("%Y-%m-%d").tolist() == ["2016-01-04"]
 
 
+def test_warehouse_reads_only_year_partitions_overlapping_requested_dates(tmp_path, monkeypatch):
+    warehouse = Warehouse(tmp_path)
+    warehouse.write_daily_bars(_bars())
+
+    read_paths = []
+    original_read_parquet = pd.read_parquet
+
+    def tracking_read_parquet(path, *args, **kwargs):
+        read_paths.append(str(path))
+        return original_read_parquet(path, *args, **kwargs)
+
+    monkeypatch.setattr(pd, "read_parquet", tracking_read_parquet)
+
+    result = warehouse.read_daily_bars(start_date="2016-01-01", end_date="2016-12-31")
+
+    assert set(result["symbol"]) == {"000001", "600519"}
+    assert all("year=2016" in path for path in read_paths)
+    assert read_paths
+
+
 def test_warehouse_merges_rows_by_symbol_and_trade_date(tmp_path):
     warehouse = Warehouse(tmp_path)
     warehouse.write_daily_bars(_bars())

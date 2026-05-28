@@ -323,6 +323,11 @@ body {
   font-weight: 800;
 }
 
+.flat-text {
+  color: #64748b !important;
+  font-weight: 800;
+}
+
 .breadth-panel .down-text,
 .index-quote .down-text {
   color: var(--fall) !important;
@@ -353,7 +358,7 @@ body {
   font-weight: 700;
 }
 
-.sector-list strong {
+.sector-list strong:not(.up-text):not(.down-text):not(.flat-text) {
   color: var(--rise);
 }
 
