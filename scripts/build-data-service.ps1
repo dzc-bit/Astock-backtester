@@ -17,11 +17,14 @@ if (-not $Python) {
 $distDir = Join-Path $repoRoot "src-tauri\bin"
 $workDir = Join-Path $repoRoot ".pyinstaller\build"
 $specDir = Join-Path $repoRoot ".pyinstaller\spec"
+$cacheDir = Join-Path $repoRoot ".pyinstaller\cache"
 $targetExe = Join-Path $distDir "astock-data-service.exe"
+$watchlistCsv = Join-Path $repoRoot "backend\astock_backtester\data\potential_risk_watchlist.csv"
 
 New-Item -ItemType Directory -Force $distDir | Out-Null
 New-Item -ItemType Directory -Force $workDir | Out-Null
 New-Item -ItemType Directory -Force $specDir | Out-Null
+New-Item -ItemType Directory -Force $cacheDir | Out-Null
 
 $pythonCommand = Get-Command $Python -ErrorAction SilentlyContinue
 if (-not $pythonCommand) {
@@ -34,6 +37,7 @@ if (Test-Path $targetExe) {
 
 Push-Location $repoRoot
 try {
+  $env:PYINSTALLER_CONFIG_DIR = $cacheDir
   & $pythonCommand.Source -m PyInstaller `
     --noconfirm `
     --clean `
@@ -43,6 +47,7 @@ try {
     --workpath $workDir `
     --specpath $specDir `
     --paths backend `
+    --add-data "${watchlistCsv};astock_backtester\data" `
     --collect-all adata `
     --hidden-import requests `
     --hidden-import bs4 `

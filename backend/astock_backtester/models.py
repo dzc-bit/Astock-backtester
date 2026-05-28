@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from enum import Enum
 from typing import Any, Literal
 
@@ -20,6 +20,7 @@ class ConditionNode(BaseModel):
     params: dict[str, Any] = Field(default_factory=dict)
     weight: float | None = None
     data_lag_days: int = 0
+    expression: str | None = None
 
     @field_validator("data_lag_days")
     @classmethod
@@ -61,6 +62,8 @@ class BacktestSettings(BaseModel):
     start_date: date
     end_date: date
     initial_cash: float
+    stock_pool: Literal["all", "main_board", "gem", "star", "beijing", "custom"] = "all"
+    custom_symbols: list[str] = Field(default_factory=list)
     benchmark_symbol: str = "000300.SH"
     buy_price: Literal["next_open"] = "next_open"
     conservative_execution: bool = True
@@ -101,6 +104,9 @@ class BacktestSettings(BaseModel):
             raise ValueError("stop_loss_pct must be negative")
         if self.take_profit_pct is not None and self.take_profit_pct <= 0:
             raise ValueError("take_profit_pct must be positive")
+        self.custom_symbols = [str(symbol).strip() for symbol in self.custom_symbols if str(symbol).strip()]
+        if self.stock_pool == "custom" and not self.custom_symbols:
+            raise ValueError("custom stock pool requires at least one symbol")
         return self
 
 
@@ -160,6 +166,103 @@ class SyncJobStatus(BaseModel):
     start_date: date
     end_date: date
     errors: list[str] = Field(default_factory=list)
+
+
+class MarketIndexQuote(BaseModel):
+    symbol: str
+    name: str
+    last: float
+    previous_close: float | None = None
+    change: float | None = None
+    change_pct: float | None = None
+    source: str
+    updated_at: datetime | None = None
+
+
+class MarketBreadth(BaseModel):
+    up: int
+    down: int
+    flat: int
+    total: int
+    source: str
+
+
+class SectorMover(BaseModel):
+    name: str
+    change_pct: float
+    leading_symbol: str | None = None
+    source: str
+
+
+class RealtimeMarketSnapshot(BaseModel):
+    status: Literal["live", "stale", "unavailable"]
+    source: str
+    updated_at: datetime
+    indexes: list[MarketIndexQuote] = Field(default_factory=list)
+    breadth: MarketBreadth | None = None
+    strong_sectors: list[SectorMover] = Field(default_factory=list)
+    yesterday_strong_sectors: list[SectorMover] = Field(default_factory=list)
+    message: str
+
+
+class MarketNewsItem(BaseModel):
+    title: str
+    summary: str | None = None
+    source: str
+    published_at: datetime | None = None
+    url: str | None = None
+    tags: list[str] = Field(default_factory=list)
+    sentiment: Literal["positive", "neutral", "negative"] = "neutral"
+
+
+class MarketNewsResponse(BaseModel):
+    updated_at: datetime
+    source: str
+    items: list[MarketNewsItem] = Field(default_factory=list)
+
+
+class RiskAlertItem(BaseModel):
+    symbol: str
+    name: str
+    risk_type: str
+    reason: str
+    severity: Literal["high", "medium", "low"]
+    source: str
+    detected_at: datetime
+
+
+class RiskAlertsResponse(BaseModel):
+    updated_at: datetime
+    source: str
+    items: list[RiskAlertItem] = Field(default_factory=list)
+    diagnostics: list[str] = Field(default_factory=list)
+
+
+class ConditionValidationError(BaseModel):
+    code: str
+    message: str
+
+
+class ConditionValidationResult(BaseModel):
+    ok: bool
+    normalized_text: str
+    condition: ConditionNode | None = None
+    errors: list[ConditionValidationError] = Field(default_factory=list)
+    examples: list[str] = Field(default_factory=list)
+
+
+class RecommendedStrategy(BaseModel):
+    id: str
+    name: str
+    description: str
+    suitable_market: str
+    risk_note: str
+    example_conditions: list[str] = Field(default_factory=list)
+    strategy: StrategyConfig
+
+
+class RecommendedStrategiesResponse(BaseModel):
+    items: list[RecommendedStrategy]
 
 
 class PreflightIssue(BaseModel):

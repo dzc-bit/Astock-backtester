@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
+from collections.abc import Callable
 
 from astock_backtester.conditions import registered_conditions
 from astock_backtester.engine import run_backtest
@@ -48,5 +49,17 @@ def condition_definitions_json() -> list[dict[str, Any]]:
     return [condition_definition_json(item) for item in registered_conditions()]
 
 
-def run_configured_backtest(frame: Any, strategy: StrategyConfig, settings: Any) -> Any:
-    return run_backtest(enrich_for_strategy(frame, strategy), strategy, settings)
+def run_configured_backtest(
+    frame: Any,
+    strategy: StrategyConfig,
+    settings: Any,
+    on_trade_closed: Callable[[Any], None] | None = None,
+    on_event: Callable[[dict], None] | None = None,
+) -> Any:
+    return run_backtest(
+        enrich_for_strategy(frame, strategy),
+        strategy,
+        settings,
+        on_trade_closed=on_trade_closed,
+        on_event=on_event,
+    )

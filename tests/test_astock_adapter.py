@@ -81,6 +81,43 @@ def test_http_fetcher_maps_astock_data_sources_to_daily_bars():
     assert result["listing_days"].min() > 1000
 
 
+def test_http_fetcher_maps_baidu_amount_turnover_and_estimated_float_market_cap():
+    def fake_json_get(url, params, headers, timeout):
+        if "getstockquotation" in url:
+            return {
+                "Result": {
+                    "newMarketData": {
+                        "keys": [
+                            "time",
+                            "open",
+                            "close",
+                            "high",
+                            "low",
+                            "volume",
+                            "amount",
+                            "range",
+                            "ratio",
+                            "turnoverratio",
+                            "preClose",
+                        ],
+                        "marketData": "2024-01-02,10,10.5,11,9.8,1000,10500,+0.5,+5.0,2.0,10",
+                    }
+                }
+            }
+        return {}
+
+    fetcher = HttpAStockFetcher(json_get=fake_json_get)
+
+    result = fetcher.fetch_daily_bars(["600519"], "2024-01-02", "2024-01-02")
+
+    assert result.loc[0, "amount"] == 10500
+    assert result.loc[0, "change"] == 0.5
+    assert result.loc[0, "change_pct"] == 5.0
+    assert result.loc[0, "turnover_rate"] == 2.0
+    assert result.loc[0, "pre_close"] == 10
+    assert result.loc[0, "float_market_cap"] == 525000.0
+
+
 def test_http_fetcher_keeps_missing_flow_as_missing_value():
     def fake_json_get(url, params, headers, timeout):
         if "getstockquotation" in url:
@@ -126,6 +163,58 @@ def test_http_fetcher_keeps_daily_bars_when_optional_sources_fail():
     assert result.loc[0, "close"] == 10.5
     assert pd.isna(result.loc[0, "main_net_inflow"])
     assert pd.isna(result.loc[0, "float_market_cap"])
+
+
+def test_http_fetcher_keeps_daily_bars_when_optional_sources_return_unexpected_shapes():
+    def fake_json_get(url, params, headers, timeout):
+        if "getstockquotation" in url:
+            return {
+                "Result": {
+                    "newMarketData": {
+                        "keys": ["time", "open", "close", "high", "low", "volume"],
+                        "marketData": "2024-01-02,10,10.5,11,9.8,1000",
+                    }
+                }
+            }
+        return []
+
+    fetcher = HttpAStockFetcher(json_get=fake_json_get)
+
+    result = fetcher.fetch_daily_bars(["600519"], "2024-01-02", "2024-01-02")
+
+    assert len(result) == 1
+    assert result.loc[0, "close"] == 10.5
+    assert pd.isna(result.loc[0, "main_net_inflow"])
+    assert pd.isna(result.loc[0, "float_market_cap"])
+
+
+def test_http_fetcher_retries_baidu_kline_when_result_shape_is_throttled():
+    calls = 0
+
+    def fake_json_get(url, params, headers, timeout):
+        nonlocal calls
+        if "getstockquotation" in url:
+            calls += 1
+            if calls == 1:
+                return {"ResultCode": "403", "Result": []}
+            return {
+                "ResultCode": "0",
+                "Result": {
+                    "newMarketData": {
+                        "keys": ["time", "open", "close", "high", "low", "volume"],
+                        "marketData": "2024-01-02,10,10.5,11,9.8,1000",
+                    }
+                },
+            }
+        return {}
+
+    fetcher = HttpAStockFetcher(json_get=fake_json_get)
+
+    result = fetcher.fetch_daily_bars(["600519"], "2024-01-02", "2024-01-02")
+
+    assert calls == 2
+    assert len(result) == 1
+    assert result.loc[0, "close"] == 10.5
 
 
 def test_cli_fetch_daily_bars_writes_cache(monkeypatch, tmp_path):

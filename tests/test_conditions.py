@@ -1,5 +1,11 @@
 import pandas as pd
 
+from astock_backtester.condition_parser import (
+    condition_examples,
+    exit_condition_examples,
+    validate_condition_text,
+    validate_exit_condition_text,
+)
 from astock_backtester.conditions import evaluate_condition, evaluate_group, registered_conditions
 from astock_backtester.indicators import add_macd, add_market_heat, add_moving_average, add_returns, add_volume_ratio
 from astock_backtester.models import ConditionGroup, ConditionNode, ConditionOperator
@@ -25,6 +31,7 @@ def test_registry_contains_core_first_version_conditions():
     assert "volume_ratio_between" in ids
     assert "past_return_between" in ids
     assert "breakout_above_n_day_high" in ids
+    assert "breakdown_below_n_day_low" in ids
 
 
 def test_market_cap_between_uses_signal_day_value():
@@ -139,3 +146,83 @@ def test_breakout_above_n_day_high_uses_prior_highs_only():
 
     assert result.passed is True
     assert result.observed_value == 12.0 - 11.2
+
+
+def test_breakdown_below_n_day_low_uses_prior_lows_only():
+    df = pd.DataFrame(
+        {
+            "symbol": ["AAA", "AAA", "AAA", "AAA"],
+            "trade_date": pd.to_datetime(["2024-01-02", "2024-01-03", "2024-01-04", "2024-01-05"]),
+            "open": [10.0, 10.3, 10.1, 9.5],
+            "high": [10.5, 10.6, 10.4, 9.8],
+            "low": [9.8, 9.9, 10.0, 9.4],
+            "close": [10.2, 10.1, 10.2, 9.6],
+            "volume": [1000, 1000, 1000, 1000],
+        }
+    )
+    row = df[df["trade_date"] == pd.Timestamp("2024-01-05")].iloc[0]
+    node = ConditionNode(id="breakdown", condition_id="breakdown_below_n_day_low", params={"window": 3})
+
+    result = evaluate_condition(node, row, df)
+
+    assert result.passed is True
+    assert round(result.observed_value or 0, 6) == round(9.6 - 9.8, 6)
+    assert "prior 3d low" in result.reason
+
+
+def test_user_written_condition_text_is_validated_into_executable_node():
+    result = validate_condition_text("收盘价站上20日均线")
+
+    assert result.ok is True
+    assert result.condition is not None
+    assert result.condition.condition_id == "close_above_ma"
+    assert result.condition.params == {"window": 20}
+    assert result.normalized_text == "收盘价站上20日均线"
+    assert result.errors == []
+
+
+def test_user_written_exit_condition_supports_breaking_prior_low_text():
+    result = validate_exit_condition_text("突破20日最低")
+
+    assert result.ok is True
+    assert result.condition is not None
+    assert result.condition.condition_id == "breakdown_below_n_day_low"
+    assert result.condition.params == {"window": 20}
+    assert result.normalized_text == "突破20日最低"
+    assert "跌破20日低点" in result.examples
+    assert exit_condition_examples()
+
+
+def test_user_written_exit_condition_has_exit_specific_error_message():
+    result = validate_exit_condition_text("突破20日前高")
+
+    assert result.ok is False
+    assert result.condition is None
+    assert result.errors[0].code == "unrecognized_exit_condition"
+    assert "离场条件" in result.errors[0].message
+    assert "跌破N日低点" in result.errors[0].message
+
+
+def test_user_written_condition_supports_market_cap_and_percent_ranges():
+    cap = validate_condition_text("流通市值10亿到300亿")
+    turnover = validate_condition_text("换手率2%到8%")
+
+    assert cap.ok is True
+    assert cap.condition is not None
+    assert cap.condition.condition_id == "market_cap_between"
+    assert cap.condition.params == {"min": 1_000_000_000, "max": 30_000_000_000}
+    assert turnover.ok is True
+    assert turnover.condition is not None
+    assert turnover.condition.condition_id == "turnover_between"
+    assert turnover.condition.params == {"min": 0.02, "max": 0.08}
+
+
+def test_user_written_condition_reports_examples_for_unrecognized_text():
+    result = validate_condition_text("随便乱写一个无法执行的条件")
+
+    assert result.ok is False
+    assert result.condition is None
+    assert result.errors[0].code == "unrecognized_condition"
+    assert "无法识别" in result.errors[0].message
+    assert "收盘价站上20日均线" in result.examples
+    assert condition_examples()

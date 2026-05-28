@@ -10,3 +10,6 @@ src-tauri/bin/
 .pyinstaller/
 __pycache__/
 .pytest_cache/
+.tmp-test/
+.reference/
+backend/astock_backtester.egg-info/

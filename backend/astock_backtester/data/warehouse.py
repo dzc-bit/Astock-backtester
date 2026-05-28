@@ -91,6 +91,33 @@ class Warehouse:
             frame = frame[frame["trade_date"] <= pd.Timestamp(end_date)]
         return frame.sort_values(["symbol", "trade_date"]).reset_index(drop=True)
 
+    def read_latest_daily_bars(self, days: int = 2) -> pd.DataFrame:
+        paths = sorted(self.daily_bars_root.glob("year=*/daily_bars.parquet"), reverse=True)
+        if not paths:
+            return pd.DataFrame()
+
+        frames: list[pd.DataFrame] = []
+        unique_dates: set[pd.Timestamp] = set()
+        for path in paths:
+            frame = pd.read_parquet(path)
+            if frame.empty:
+                continue
+            frame["trade_date"] = pd.to_datetime(frame["trade_date"])
+            frames.append(frame)
+            unique_dates.update(pd.Timestamp(value) for value in frame["trade_date"].drop_duplicates().tolist())
+            if len(unique_dates) >= days:
+                break
+
+        if not frames:
+            return pd.DataFrame()
+        combined = pd.concat(frames, ignore_index=True)
+        latest_dates = sorted(combined["trade_date"].drop_duplicates().tolist())[-days:]
+        return (
+            combined[combined["trade_date"].isin(latest_dates)]
+            .sort_values(["symbol", "trade_date"])
+            .reset_index(drop=True)
+        )
+
     def coverage(self) -> list[DatasetCoverage]:
         bars = self.read_daily_bars()
         if bars.empty:

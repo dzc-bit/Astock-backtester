@@ -42,7 +42,7 @@ pub fn build_service_args(port: u16, cache_dir: &str) -> Vec<String> {
 }
 
 pub fn health_request(port: u16) -> String {
-    format!("GET /health HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n")
+    format!("GET /ping HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n")
 }
 
 fn resolve_cache_dir(cache_dir: &str) -> Result<String, String> {
@@ -145,9 +145,9 @@ mod tests {
     use super::{build_service_args, health_request, resolve_cache_dir};
 
     #[test]
-    fn health_request_targets_localhost_health_endpoint() {
+    fn health_request_targets_lightweight_ping_endpoint() {
         let raw = health_request(9123);
-        assert!(raw.contains("GET /health HTTP/1.1"));
+        assert!(raw.contains("GET /ping HTTP/1.1"));
         assert!(raw.contains("Host: 127.0.0.1:9123"));
     }
 

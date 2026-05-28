@@ -37,6 +37,12 @@ function translateReason(reason: string): string {
       .replace("broke prior", "突破前")
       .replace("high", "高点");
   }
+  if (reason.includes("broke prior") && reason.includes("low")) {
+    return reason
+      .replace("close", "收盘价")
+      .replace("broke prior", "跌破前")
+      .replace("low", "低点");
+  }
   if (reason.includes("fixed holding days reached")) {
     return reason.replace("fixed holding days reached", "达到固定持仓天数");
   }
@@ -65,7 +71,7 @@ export function TradesTable({ trades }: Props) {
         </div>
         <span className="status-pill compact">{trades.length} 笔</span>
       </div>
-      <div className="table-wrap">
+      <div className="table-wrap trades-scroll">
         <table>
           <thead>
             <tr>
@@ -86,9 +92,11 @@ export function TradesTable({ trades }: Props) {
                 <tr key={`${trade.symbol}-${trade.buy_date}`}>
                   <td>{trade.symbol}</td>
                   <td>{trade.buy_date} @ {trade.buy_price}</td>
-                  <td>{trade.sell_date ?? "-"}</td>
+                  <td>{trade.sell_date ?? "持仓中"}</td>
                   <td>{trade.buy_reason.map(translateReason).join("；")}</td>
-                  <td>{trade.pnl_pct == null ? "-" : `${(trade.pnl_pct * 100).toFixed(2)}%`}</td>
+                  <td className={trade.pnl_pct == null ? "" : trade.pnl_pct >= 0 ? "up-text" : "down-text"}>
+                    {trade.pnl_pct == null ? "持仓中" : `${(trade.pnl_pct * 100).toFixed(2)}%`}
+                  </td>
                 </tr>
               ))
             )}

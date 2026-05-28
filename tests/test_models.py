@@ -60,6 +60,8 @@ def test_backtest_settings_defaults_to_conservative_execution():
     assert settings.buy_price == "next_open"
     assert settings.limit_up_blocks_buy is True
     assert settings.limit_down_blocks_sell is True
+    assert settings.stock_pool == "all"
+    assert settings.custom_symbols == []
 
 
 def test_backtest_settings_rejects_negative_fee_rate():
@@ -113,3 +115,15 @@ def test_condition_operator_accepts_and_or_score():
     assert ConditionOperator.AND.value == "and"
     assert ConditionOperator.OR.value == "or"
     assert ConditionOperator.SCORE.value == "score"
+
+
+def test_backtest_settings_accepts_controlled_stock_pool_and_custom_symbols():
+    settings = make_backtest_settings(stock_pool="custom", custom_symbols=["600519", "000001"])
+
+    assert settings.stock_pool == "custom"
+    assert settings.custom_symbols == ["600519", "000001"]
+
+
+def test_custom_stock_pool_requires_symbols():
+    with pytest.raises(ValidationError):
+        make_backtest_settings(stock_pool="custom", custom_symbols=[])

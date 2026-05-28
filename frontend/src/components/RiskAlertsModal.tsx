@@ -1,0 +1,86 @@
+import { AlertTriangle, X } from "lucide-react";
+import type { RiskAlertsResponse } from "../types";
+
+type Props = {
+  open: boolean;
+  alerts: RiskAlertsResponse | null;
+  isLoading?: boolean;
+  onClose: () => void;
+  onRefresh: () => void;
+};
+
+const severityLabels = {
+  high: "高风险",
+  medium: "中风险",
+  low: "低风险"
+};
+
+export function RiskAlertsModal({ open, alerts, isLoading = false, onClose, onRefresh }: Props) {
+  if (!open) {
+    return null;
+  }
+  const items = alerts?.items ?? [];
+  const diagnostics = alerts?.diagnostics ?? [];
+  return (
+    <div className="modal-backdrop">
+      <section className="risk-modal" role="dialog" aria-modal="true" aria-label="风险股票清单">
+        <div className="modal-head">
+          <div>
+            <span className="section-kicker">ST / 退市风险</span>
+            <h2>风险股票清单</h2>
+          </div>
+          <button className="icon-button" type="button" aria-label="关闭风险清单" onClick={onClose}>
+            <X size={18} aria-hidden="true" />
+          </button>
+        </div>
+        <div className="risk-modal-toolbar">
+          <span className="status-pill compact">
+            <AlertTriangle size={15} aria-hidden="true" />
+            {items.length} 条风险
+          </span>
+          <span className="status-pill compact">来源 {alerts?.source ?? "--"}</span>
+          <button className="secondary-button" type="button" onClick={onRefresh} disabled={isLoading}>
+            {isLoading ? "刷新中" : "刷新风险"}
+          </button>
+        </div>
+        <div className="risk-modal-body">
+          {items.length === 0 ? (
+            <div className="empty-state">
+              <strong>暂无明确风险股票</strong>
+              <span>当前数据源没有识别到潜在 ST、*ST 或退市风险。</span>
+              {diagnostics.length > 0 ? (
+                <ul className="risk-diagnostics" aria-label="风险数据诊断">
+                  {diagnostics.map((message) => (
+                    <li key={message}>{message}</li>
+                  ))}
+                </ul>
+              ) : null}
+            </div>
+          ) : (
+            <>
+              {diagnostics.length > 0 ? (
+                <ul className="risk-diagnostics" aria-label="风险数据诊断">
+                  {diagnostics.map((message) => (
+                    <li key={message}>{message}</li>
+                  ))}
+                </ul>
+              ) : null}
+              <div className="risk-alert-list" aria-label="风险股票滚动列表">
+                {items.map((item) => (
+                  <article className={`risk-alert ${item.severity}`} key={`${item.symbol}-${item.risk_type}`}>
+                    <div>
+                      <strong>{item.name}</strong>
+                      <span>{item.symbol}</span>
+                    </div>
+                    <small>{item.risk_type} / {severityLabels[item.severity]}</small>
+                    <p>{item.reason}</p>
+                  </article>
+                ))}
+              </div>
+            </>
+          )}
+        </div>
+      </section>
+    </div>
+  );
+}

@@ -75,3 +75,13 @@ def test_warehouse_coverage_reports_daily_and_market_cap(tmp_path):
     assert coverage["daily_bars"].symbols == 2
     assert coverage["daily_bars"].start_date.isoformat() == "2015-01-05"
     assert coverage["market_cap"].missing_rows == 0
+
+
+def test_warehouse_reads_latest_daily_bars_from_recent_partitions(tmp_path):
+    warehouse = Warehouse(tmp_path)
+    warehouse.write_daily_bars(_bars())
+
+    latest = warehouse.read_latest_daily_bars(days=1)
+
+    assert latest["trade_date"].dt.strftime("%Y-%m-%d").tolist() == ["2016-01-04", "2016-01-04"]
+    assert set(latest["symbol"]) == {"000001", "600519"}

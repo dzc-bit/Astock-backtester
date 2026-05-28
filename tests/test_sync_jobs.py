@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import time
 import pandas as pd
+from time import sleep
 
 from astock_backtester.data.sync import SyncJobManager
 from astock_backtester.data.warehouse import Warehouse
@@ -44,3 +46,34 @@ def test_full_market_job_persists_success_and_failure(tmp_path):
     assert status.imported_rows == 2
     loaded = warehouse.read_daily_bars()
     assert sorted(loaded["symbol"].tolist()) == ["000001", "000003"]
+
+
+def test_full_market_job_can_run_asynchronously_and_report_progress(tmp_path):
+    class SlowProvider(FakeProvider):
+        def fetch_daily_bars(self, symbol, start_date, end_date):
+            sleep(0.02)
+            return super().fetch_daily_bars(symbol, start_date, end_date)
+
+    warehouse = Warehouse(tmp_path)
+    manager = SyncJobManager(warehouse=warehouse, provider=SlowProvider())
+
+    status = manager.start_full_market(
+        symbols=["000001", "000002", "000003"],
+        start_date="2015-01-01",
+        end_date="2015-01-05",
+    )
+
+    assert status.status == "running"
+    assert status.total_symbols == 3
+    eventually = None
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        eventually = manager.get_job(status.job_id)
+        if eventually and eventually.status == "completed":
+            break
+        sleep(0.02)
+
+    assert eventually is not None
+    assert eventually.status == "completed"
+    assert eventually.completed_symbols == 3
+    assert warehouse.read_daily_bars()["symbol"].nunique() == 3

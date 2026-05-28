@@ -1,6 +1,6 @@
-import { render, screen } from "@testing-library/react";
+import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "../App";
 
 const apiMocks = vi.hoisted(() => ({
@@ -10,9 +10,16 @@ const apiMocks = vi.hoisted(() => ({
   loadDataServiceHealth: vi.fn(),
   loadDataServiceLogs: vi.fn(),
   loadDailyBarsCoverage: vi.fn(),
+  loadMarketNews: vi.fn(),
+  loadRealtimeMarketSnapshot: vi.fn(),
+  loadRecommendedStrategies: vi.fn(),
+  loadRiskAlerts: vi.fn(),
+  loadSyncJob: vi.fn(),
   loadCoverage: vi.fn(),
+  runBacktestStreamWithDataService: vi.fn(),
   runBacktestWithDataService: vi.fn(),
-  runConfiguredBacktest: vi.fn()
+  runConfiguredBacktest: vi.fn(),
+  validateConditionExpression: vi.fn()
 }));
 
 vi.mock("../api", () => apiMocks);
@@ -58,6 +65,7 @@ const demoResult = {
 
 describe("A 股回测工作台界面", () => {
   beforeEach(() => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
     apiMocks.ensureDataService.mockResolvedValue({
       running: true,
       port: 9010,
@@ -77,6 +85,196 @@ describe("A 股回测工作台界面", () => {
       ]
     });
     apiMocks.loadDataServiceLogs.mockResolvedValue({ items: [] });
+    apiMocks.loadRealtimeMarketSnapshot.mockResolvedValue({
+      status: "live",
+      source: "ashare-sina",
+      updated_at: "2026-05-27T10:30:00Z",
+      indexes: [
+        {
+          symbol: "sh000001",
+          name: "上证指数",
+          last: 3120.5,
+          previous_close: 3100,
+          change: 20.5,
+          change_pct: 0.0066129,
+          source: "ashare-sina",
+          updated_at: "2026-05-27T10:30:00Z"
+        },
+        {
+          symbol: "sz399001",
+          name: "深证成指",
+          last: 9800.2,
+          previous_close: 9700,
+          change: 100.2,
+          change_pct: 0.0103298,
+          source: "ashare-sina",
+          updated_at: "2026-05-27T10:30:00Z"
+        }
+      ],
+      breadth: { up: 3200, down: 1700, flat: 200, total: 5100, source: "local-latest" },
+      strong_sectors: [
+        { name: "半导体", change_pct: 0.036, leading_symbol: "688001", source: "local-latest" },
+        { name: "电力设备", change_pct: 0.024, leading_symbol: "300750", source: "local-latest" }
+      ],
+      yesterday_strong_sectors: [
+        { name: "半导体", change_pct: 0.031, leading_symbol: "688001", source: "local-yesterday-group" },
+        { name: "机器人", change_pct: 0.022, leading_symbol: "300024", source: "local-yesterday-group" }
+      ],
+      message: "实时行情已更新"
+    });
+    apiMocks.loadMarketNews.mockResolvedValue({
+      updated_at: "2026-05-27T10:30:00Z",
+      source: "eastmoney",
+      items: [
+        {
+          title: "政策利好推动科技板块走强",
+          summary: "半导体、AI 应用方向盘中活跃。",
+          source: "东方财富",
+          published_at: "2026-05-27T10:20:00Z",
+          url: "https://example.test/news",
+          tags: ["科技", "政策"],
+          sentiment: "positive"
+        }
+      ]
+    });
+    apiMocks.loadRiskAlerts.mockResolvedValue({
+      updated_at: "2026-05-27T10:30:00Z",
+      source: "adata",
+      diagnostics: [],
+      items: [
+        {
+          symbol: "000001",
+          name: "*ST示例",
+          risk_type: "ST风险",
+          reason: "股票名称包含 *ST，存在退市风险警示。",
+          severity: "high",
+          source: "adata",
+          detected_at: "2026-05-27T10:30:00Z"
+        }
+      ]
+    });
+    apiMocks.loadRecommendedStrategies.mockResolvedValue({
+      items: [
+        {
+          id: "volume-breakout",
+          name: "放量突破",
+          description: "价格突破前高并伴随量能放大。",
+          suitable_market: "指数温和上行、题材活跃时使用。",
+          risk_note: "避免连续大涨后追高。",
+          example_conditions: ["突破20日新高", "量比2日介于1.2到2.5"],
+          strategy: {
+            name: "放量突破",
+            market_filters: [],
+            entry_groups: [
+              {
+                id: "entry",
+                operator: "and",
+                conditions: [
+                  {
+                    id: "preset-breakout",
+                    condition_id: "breakout_above_n_day_high",
+                    enabled: true,
+                    params: { window: 20 },
+                    data_lag_days: 0,
+                    expression: "突破20日新高"
+                  }
+                ]
+              }
+            ],
+            exit_rules: [],
+            score_threshold: null
+          }
+        }
+      ]
+    });
+    apiMocks.validateConditionExpression.mockImplementation(async (_baseUrl, text, mode) => {
+      if (text === "收盘价站上20日均线") {
+        return {
+          ok: true,
+          normalized_text: text,
+          errors: [],
+          examples: ["收盘价站上20日均线"],
+          condition: {
+            id: "custom-close-above-ma",
+            condition_id: "close_above_ma",
+            enabled: true,
+            params: { window: 20 },
+            data_lag_days: 0,
+            expression: text
+          }
+        };
+      }
+      if (text === "流通市值50亿到300亿") {
+        return {
+          ok: true,
+          normalized_text: text,
+          errors: [],
+          examples: ["流通市值10亿到300亿", "量比2日介于1.2到2.5"],
+          condition: {
+            id: "custom-market-cap",
+            condition_id: "market_cap_between",
+            enabled: true,
+            params: { min: 5000000000, max: 30000000000 },
+            data_lag_days: 0,
+            expression: text
+          }
+        };
+      }
+      if (text === "量比2日介于1.2到2.5") {
+        return {
+          ok: true,
+          normalized_text: text,
+          errors: [],
+          examples: ["流通市值10亿到300亿", "量比2日介于1.2到2.5"],
+          condition: {
+            id: "custom-volume-ratio",
+            condition_id: "volume_ratio_between",
+            enabled: true,
+            params: { window: 2, min: 1.2, max: 2.5 },
+            data_lag_days: 0,
+            expression: text
+          }
+        };
+      }
+      if (text === "突破20日最低" && mode === "exit") {
+        return {
+          ok: true,
+          normalized_text: text,
+          errors: [],
+          examples: ["收盘价跌破3日均线", "跌破20日低点", "突破20日最低"],
+          condition: {
+            id: "custom-breakdown-low",
+            condition_id: "breakdown_below_n_day_low",
+            enabled: true,
+            params: { window: 20 },
+            data_lag_days: 0,
+            expression: text
+          }
+        };
+      }
+      return {
+        ok: false,
+        normalized_text: text,
+        condition: null,
+        errors: [{ code: "unrecognized_condition", message: "无法识别条件，请参考样例改写。" }],
+        examples: ["收盘价站上20日均线"]
+      };
+    });
+    apiMocks.loadSyncJob.mockResolvedValue({
+      job: {
+        job_id: "preview",
+        mode: "full_market_bootstrap",
+        status: "completed",
+        total_symbols: 2,
+        completed_symbols: 2,
+        failed_symbols: 0,
+        imported_rows: 20,
+        current_symbol: null,
+        start_date: "2015-01-01",
+        end_date: "2026-05-26",
+        errors: []
+      }
+    });
     apiMocks.fetchDailyBars.mockResolvedValue({
       status: "ok",
       imported_rows: 0,
@@ -96,6 +294,13 @@ describe("A 股回测工作台界面", () => {
       { dataset: "daily_bars", symbols: 2, start_date: "2024-01-02", end_date: "2024-01-08", missing_rows: 0 }
     ]);
     apiMocks.runBacktestWithDataService.mockResolvedValue(demoResult);
+    apiMocks.runBacktestStreamWithDataService.mockImplementation(async (_baseUrl, _strategy, _settings, handlers) => {
+      handlers.onPhase("校验参数");
+      handlers.onPhase("读取本地数据");
+      handlers.onTrade(demoResult.trades[0]);
+      handlers.onResult(demoResult);
+      return demoResult;
+    });
     apiMocks.runConfiguredBacktest.mockResolvedValue(demoResult);
   });
 
@@ -113,7 +318,19 @@ describe("A 股回测工作台界面", () => {
     expect(screen.getAllByText("市场热度").length).toBeGreaterThan(0);
     expect(screen.getAllByText("资金流向").length).toBeGreaterThan(0);
     expect(screen.getAllByText("风险提示").length).toBeGreaterThan(0);
+    expect(await screen.findByText("今日实时行情")).toBeInTheDocument();
+    expect(await screen.findByText("上证指数")).toBeInTheDocument();
+    expect(screen.getByText("红 3200")).toBeInTheDocument();
+    expect(screen.getByText("绿 1700")).toBeInTheDocument();
+    expect(screen.getByText(/行情评价/)).toBeInTheDocument();
+    expect(screen.getAllByText("半导体").length).toBeGreaterThan(0);
+    expect(await screen.findByRole("heading", { name: "资讯与事件" })).toBeInTheDocument();
+    expect(screen.getByText("政策利好推动科技板块走强")).toBeInTheDocument();
     expect(await screen.findByText("日线行情")).toBeInTheDocument();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it("exposes common A-share strategy conditions in Chinese", async () => {
@@ -129,23 +346,53 @@ describe("A 股回测工作台界面", () => {
     expect(await screen.findByText("日线行情")).toBeInTheDocument();
   });
 
-  it("lets the user adjust Chinese strategy parameters before running a backtest", async () => {
+  it("lets the user write and validate Chinese strategy conditions before running a backtest", async () => {
     const user = userEvent.setup();
     render(<App />);
 
-    await user.clear(screen.getByLabelText("流通市值下限"));
-    await user.type(screen.getByLabelText("流通市值下限"), "5000000000");
-    await user.clear(screen.getByLabelText("量比下限"));
-    await user.type(screen.getByLabelText("量比下限"), "1.2");
+    await screen.findByText("日线行情");
+    await user.clear(screen.getByLabelText("新增条件表达式"));
+    await user.type(screen.getByLabelText("新增条件表达式"), "流通市值50亿到300亿");
+    await user.click(screen.getByRole("button", { name: "校验条件" }));
+    await screen.findByText(/可识别：流通市值区间/);
+    await user.click(screen.getByRole("button", { name: "添加已校验条件" }));
+    await user.clear(screen.getByLabelText("新增条件表达式"));
+    await user.type(screen.getByLabelText("新增条件表达式"), "量比2日介于1.2到2.5");
+    await user.click(screen.getByRole("button", { name: "校验条件" }));
+    await screen.findByText(/可识别：量比区间/);
+    await user.click(screen.getByRole("button", { name: "添加已校验条件" }));
     await user.clear(screen.getByLabelText("初始资金"));
     await user.type(screen.getByLabelText("初始资金"), "250000");
     await user.click(screen.getByRole("button", { name: "运行历史回测" }));
 
-    expect(apiMocks.runBacktestWithDataService).toHaveBeenCalledWith(
+    expect(apiMocks.runBacktestStreamWithDataService).toHaveBeenCalledWith(
       "http://127.0.0.1:9010",
-      expect.objectContaining({ name: "市场热度 + 小市值资金流入" }),
-      expect.objectContaining({ initial_cash: 250000 })
+      expect.objectContaining({
+        name: "市场热度 + 市值量价筛选",
+        entry_groups: [
+          expect.objectContaining({
+            conditions: expect.arrayContaining([
+              expect.objectContaining({
+                condition_id: "market_cap_between",
+                params: expect.objectContaining({ min: 5000000000, max: 30000000000 })
+              }),
+              expect.objectContaining({
+                condition_id: "volume_ratio_between",
+                params: expect.objectContaining({ window: 2, min: 1.2, max: 2.5 })
+              })
+            ])
+          })
+        ]
+      }),
+      expect.objectContaining({ initial_cash: 250000 }),
+      expect.objectContaining({
+        onPhase: expect.any(Function),
+        onProgress: expect.any(Function),
+        onTrade: expect.any(Function),
+        onResult: expect.any(Function)
+      })
     );
+    expect(apiMocks.runBacktestWithDataService).not.toHaveBeenCalled();
     expect(apiMocks.runConfiguredBacktest).not.toHaveBeenCalled();
     expect(await screen.findByText("交易次数 1")).toBeInTheDocument();
     expect(screen.getAllByText(/流通市值/).length).toBeGreaterThan(0);
@@ -158,9 +405,546 @@ describe("A 股回测工作台界面", () => {
     expect(screen.queryByText(/volume ratio|turnover|MACD histogram|return|prior high/)).not.toBeInTheDocument();
   });
 
+  it("does not add duplicate entry conditions with the same parsed parameters", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByText("日线行情");
+    await user.clear(screen.getByLabelText("新增条件表达式"));
+    await user.type(screen.getByLabelText("新增条件表达式"), "流通市值50亿到300亿");
+    await user.click(screen.getByRole("button", { name: "校验条件" }));
+    await screen.findByText(/可识别：流通市值区间/);
+    await user.click(screen.getByRole("button", { name: "添加已校验条件" }));
+    await user.click(screen.getByRole("button", { name: "添加已校验条件" }));
+
+    expect(screen.getByText("该入场条件已存在，不会重复加入。")).toBeInTheDocument();
+    const marketCapRules = screen.getAllByText(/条件：流通市值50亿到300亿/);
+    expect(marketCapRules).toHaveLength(1);
+  });
+
+  it("uses controlled selectors to build strategy and backtest settings", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByText("日线行情");
+    await user.click(screen.getByRole("button", { name: "套用数据中心日期" }));
+    await user.selectOptions(screen.getByLabelText("股票池"), "custom");
+    await user.type(screen.getByLabelText("自选代码"), "600519,000001");
+    await user.clear(screen.getByLabelText("新增条件表达式"));
+    await user.type(screen.getByLabelText("新增条件表达式"), "收盘价站上20日均线");
+    await user.click(screen.getByRole("button", { name: "校验条件" }));
+    await screen.findByText(/可识别：收盘价站上均线/);
+    await user.click(screen.getByRole("button", { name: "添加已校验条件" }));
+    await user.selectOptions(screen.getByLabelText("组合方式"), "or");
+    await user.click(screen.getByRole("button", { name: "运行历史回测" }));
+
+    expect(apiMocks.runBacktestStreamWithDataService).toHaveBeenCalledWith(
+      "http://127.0.0.1:9010",
+      expect.objectContaining({
+        entry_groups: [
+          expect.objectContaining({
+            operator: "or",
+            conditions: expect.arrayContaining([
+              expect.objectContaining({
+                condition_id: "close_above_ma",
+                params: expect.objectContaining({ window: 20 })
+              })
+            ])
+          })
+        ]
+      }),
+      expect.objectContaining({
+        start_date: "2024-01-02",
+        end_date: "2024-01-08",
+        stock_pool: "custom",
+        custom_symbols: ["600519", "000001"]
+      }),
+      expect.objectContaining({
+        onPhase: expect.any(Function),
+        onProgress: expect.any(Function),
+        onTrade: expect.any(Function),
+        onResult: expect.any(Function)
+      })
+    );
+  });
+
+  it("blocks unrecognized custom condition text before adding it to the strategy", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByText("日线行情");
+    await user.clear(screen.getByLabelText("新增条件表达式"));
+    await user.type(screen.getByLabelText("新增条件表达式"), "随便乱写条件");
+    await user.click(screen.getByRole("button", { name: "校验条件" }));
+
+    expect(await screen.findByText(/无法识别条件/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "添加已校验条件" })).toBeDisabled();
+  });
+
+  it("uses expression-only strategy conditions without parameter selectors", async () => {
+    render(<App />);
+
+    await screen.findByText("日线行情");
+
+    expect(screen.getByLabelText("新增条件表达式")).toBeInTheDocument();
+    expect(screen.queryByLabelText("新增条件")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("窗口")).not.toBeInTheDocument();
+    expect(screen.getByText("收盘价站上20日均线")).toBeInTheDocument();
+    expect(screen.getAllByText("量比2日介于1.2到2.5").length).toBeGreaterThan(0);
+  });
+
+  it("opens risk alerts from the risk prompt and shows concrete risky stocks", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByText("日线行情");
+    await user.click(screen.getByRole("button", { name: "查看风险清单" }));
+
+    expect(await screen.findByRole("dialog", { name: "风险股票清单" })).toBeInTheDocument();
+    expect(screen.getByText("*ST示例")).toBeInTheDocument();
+    expect(screen.getByText("股票名称包含 *ST，存在退市风险警示。")).toBeInTheDocument();
+    expect(screen.getByLabelText("风险股票滚动列表")).toBeInTheDocument();
+  });
+
+  it("opens risk alerts by clicking the top risk summary card", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByText("日线行情");
+    await user.click(screen.getByRole("button", { name: /查看全市场风险提示/ }));
+
+    expect(await screen.findByRole("dialog", { name: "风险股票清单" })).toBeInTheDocument();
+    expect(screen.getByText("*ST示例")).toBeInTheDocument();
+  });
+
+  it("shows risk diagnostics when no current risky stocks are returned", async () => {
+    const user = userEvent.setup();
+    apiMocks.loadRiskAlerts.mockResolvedValue({
+      updated_at: "2026-05-27T10:30:00Z",
+      source: "local",
+      diagnostics: ["东方财富风险源不可用，已使用本地 ST 字段兜底。"],
+      items: []
+    });
+    render(<App />);
+
+    await screen.findByText("日线行情");
+    await user.click(screen.getByRole("button", { name: "查看风险清单" }));
+
+    expect(await screen.findByText("暂无明确风险股票")).toBeInTheDocument();
+    expect(screen.getByText("东方财富风险源不可用，已使用本地 ST 字段兜底。")).toBeInTheDocument();
+  });
+
+  it("applies a recommended strategy before running the backtest", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByText("日线行情");
+    await user.click(await screen.findByRole("button", { name: "套用放量突破" }));
+    await user.click(screen.getByRole("button", { name: "运行历史回测" }));
+
+    expect(apiMocks.runBacktestStreamWithDataService).toHaveBeenCalledWith(
+      "http://127.0.0.1:9010",
+      expect.objectContaining({ name: "放量突破" }),
+      expect.any(Object),
+      expect.objectContaining({
+        onPhase: expect.any(Function),
+        onProgress: expect.any(Function),
+        onTrade: expect.any(Function),
+        onResult: expect.any(Function)
+      })
+    );
+  });
+
+  it("shows run progress and updates the top summary cards from the result", async () => {
+    const user = userEvent.setup();
+    let resolveBacktest: (value: typeof demoResult) => void = () => {};
+    apiMocks.runBacktestStreamWithDataService.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveBacktest = (value) => resolve(value);
+        })
+    );
+    render(<App />);
+
+    await user.click(screen.getByRole("button", { name: "运行历史回测" }));
+
+    expect(screen.getByRole("button", { name: "回测运行中" })).toBeDisabled();
+    expect(screen.getByText(/校验参数/)).toBeInTheDocument();
+    expect(screen.getByText(/读取本地数据/)).toBeInTheDocument();
+    expect(screen.queryByText("尚未运行回测")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("股票池")).toBeDisabled();
+    resolveBacktest(demoResult);
+    expect(await screen.findByText("交易次数 1")).toBeInTheDocument();
+    expect(screen.getByText("3.20%")).toBeInTheDocument();
+    expect(screen.getByText(/1 笔交易/)).toBeInTheDocument();
+  });
+
+  it("appends streamed trades before the final backtest result", async () => {
+    const user = userEvent.setup();
+    let emitTrade: (() => void) | null = null;
+    let finish: (() => void) | null = null;
+    apiMocks.runBacktestStreamWithDataService.mockImplementation(
+      (_baseUrl, _strategy, _settings, handlers) =>
+        new Promise((resolve) => {
+          handlers.onPhase("校验参数");
+          emitTrade = () => handlers.onTrade(demoResult.trades[0]);
+          finish = () => {
+            handlers.onResult(demoResult);
+            resolve(demoResult);
+          };
+        })
+    );
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "运行历史回测" }));
+
+    expect(screen.getByText("暂无交易记录")).toBeInTheDocument();
+    act(() => {
+      emitTrade?.();
+    });
+    expect(await screen.findByText("AAA")).toBeInTheDocument();
+    act(() => {
+      finish?.();
+    });
+    expect(await screen.findByText("交易次数 1")).toBeInTheDocument();
+  });
+
+  it("shows scan progress and opened trades from the stream before final result", async () => {
+    const user = userEvent.setup();
+    let emitProgress: (() => void) | null = null;
+    let emitOpened: (() => void) | null = null;
+    let finish: (() => void) | null = null;
+    const openedTrade = { ...demoResult.trades[0], sell_date: null, sell_price: null, pnl: null, pnl_pct: null };
+    apiMocks.runBacktestStreamWithDataService.mockImplementation(
+      (_baseUrl, _strategy, _settings, handlers) =>
+        new Promise((resolve) => {
+          handlers.onPhase("校验参数");
+          emitProgress = () => handlers.onProgress({ message: "扫描 2024-01-05：候选 2 只，持仓 1 只" });
+          emitOpened = () => handlers.onTrade(openedTrade);
+          finish = () => {
+            handlers.onResult(demoResult);
+            resolve(demoResult);
+          };
+        })
+    );
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "运行历史回测" }));
+
+    act(() => {
+      emitProgress?.();
+      emitOpened?.();
+    });
+    expect(await screen.findByText(/扫描 2024-01-05/)).toBeInTheDocument();
+    expect(screen.getAllByText("持仓中").length).toBeGreaterThan(0);
+    expect(screen.getByText("AAA")).toBeInTheDocument();
+    act(() => {
+      finish?.();
+    });
+    expect(await screen.findByText("交易次数 1")).toBeInTheDocument();
+  });
+
+  it("uses editable funding and matching inputs with examples instead of fixed selectors", async () => {
+    render(<App />);
+
+    await screen.findByText("日线行情");
+
+    expect(screen.getByText("样例：100000")).toBeInTheDocument();
+    expect(screen.getByText("样例：3")).toBeInTheDocument();
+    expect(screen.getByLabelText("初始资金").tagName).toBe("INPUT");
+    expect(screen.getByLabelText("固定持仓天数").tagName).toBe("INPUT");
+  });
+
+  it("uses full-market risk alerts and realtime breadth in the top summary", async () => {
+    apiMocks.loadRiskAlerts.mockResolvedValue({
+      updated_at: "2026-05-27T10:30:00Z",
+      source: "adata",
+      diagnostics: [],
+      items: Array.from({ length: 12 }, (_, index) => ({
+        symbol: `${index + 1}`.padStart(6, "0"),
+        name: `*ST风险${index + 1}`,
+        risk_type: "ST风险",
+        reason: "股票名称包含 ST，存在风险警示。",
+        severity: "high",
+        source: "adata",
+        detected_at: "2026-05-27T10:30:00Z"
+      }))
+    });
+
+    render(<App />);
+
+    await screen.findByText("日线行情");
+
+    expect(await screen.findByText("62.75%")).toBeInTheDocument();
+    expect(screen.getAllByText(/3200/).length).toBeGreaterThan(0);
+    expect(screen.getByText("12项")).toBeInTheDocument();
+  });
+
+  it("shows a deterministic closing sector review after market close", async () => {
+    apiMocks.loadRealtimeMarketSnapshot.mockResolvedValue({
+      status: "live",
+      source: "ashare-sina+local+eastmoney-sector",
+      updated_at: "2026-05-27T07:30:00Z",
+      indexes: [
+        {
+          symbol: "sh000001",
+          name: "上证指数",
+          last: 3120.5,
+          previous_close: 3100,
+          change: 20.5,
+          change_pct: 0.0066129,
+          source: "ashare-sina",
+          updated_at: "2026-05-27T07:30:00Z"
+        }
+      ],
+      breadth: { up: 3200, down: 1700, flat: 200, total: 5100, source: "local-latest" },
+      strong_sectors: [
+        { name: "半导体", change_pct: 0.036, leading_symbol: "688001", source: "eastmoney-sector" },
+        { name: "电力设备", change_pct: 0.024, leading_symbol: "300750", source: "eastmoney-sector" }
+      ],
+      yesterday_strong_sectors: [],
+      message: "实时行情已更新"
+    });
+
+    render(<App />);
+
+    expect(await screen.findByText(/收盘后板块解读/)).toBeInTheDocument();
+    expect(screen.getByText(/半导体\+3\.60%/)).toBeInTheDocument();
+  });
+
+  it("tracks yesterday's strong sectors in the market panel and commentary", async () => {
+    apiMocks.loadRealtimeMarketSnapshot.mockResolvedValue({
+      status: "live",
+      source: "ashare-sina+local+eastmoney-sector+local-yesterday-group",
+      updated_at: "2026-05-27T02:30:00Z",
+      indexes: [
+        {
+          symbol: "sh000001",
+          name: "上证指数",
+          last: 3120.5,
+          previous_close: 3100,
+          change: 20.5,
+          change_pct: 0.0066129,
+          source: "ashare-sina",
+          updated_at: "2026-05-27T02:30:00Z"
+        }
+      ],
+      breadth: { up: 3200, down: 1700, flat: 200, total: 5100, source: "local-latest" },
+      strong_sectors: [
+        { name: "半导体", change_pct: 0.036, leading_symbol: "688001", source: "eastmoney-sector" },
+        { name: "电力设备", change_pct: 0.024, leading_symbol: "300750", source: "eastmoney-sector" }
+      ],
+      yesterday_strong_sectors: [
+        { name: "机器人", change_pct: 0.041, leading_symbol: "300024", source: "local-yesterday-group" },
+        { name: "半导体", change_pct: 0.031, leading_symbol: "688001", source: "local-yesterday-group" }
+      ],
+      message: "实时行情已更新；昨日强势板块追踪来自本地历史。"
+    });
+
+    render(<App />);
+
+    expect(await screen.findByText("昨日强势追踪")).toBeInTheDocument();
+    expect(await screen.findByText(/机器人/)).toBeInTheDocument();
+    expect(await screen.findByText(/昨日强势延续/)).toBeInTheDocument();
+    expect(screen.getAllByText(/半导体/).length).toBeGreaterThan(0);
+  });
+
+  it("lets the user validate and add exit rules so sell logic is not hidden", async () => {
+    const user = userEvent.setup();
+    apiMocks.validateConditionExpression.mockImplementation(async (_baseUrl, text) => {
+      if (text === "收盘价跌破3日均线") {
+        return {
+          ok: true,
+          normalized_text: text,
+          errors: [],
+          examples: ["收盘价跌破3日均线"],
+          condition: {
+            id: "custom-close-below-ma",
+            condition_id: "close_below_ma",
+            enabled: true,
+            params: { window: 3 },
+            data_lag_days: 0,
+            expression: text
+          }
+        };
+      }
+      return {
+        ok: false,
+        normalized_text: text,
+        condition: null,
+        errors: [{ code: "unrecognized_condition", message: "无法识别条件，请参考样例改写。" }],
+        examples: ["收盘价跌破3日均线"]
+      };
+    });
+    render(<App />);
+
+    await screen.findByText("日线行情");
+    expect(screen.getByRole("heading", { name: "离场规则" })).toBeInTheDocument();
+    expect(screen.getByText(/固定持仓 3 天/)).toBeInTheDocument();
+    await user.clear(screen.getByLabelText("新增离场条件表达式"));
+    await user.type(screen.getByLabelText("新增离场条件表达式"), "收盘价跌破3日均线");
+    await user.click(screen.getByRole("button", { name: "校验离场条件" }));
+    await screen.findByText(/离场可识别/);
+    await user.click(screen.getByRole("button", { name: "添加离场条件" }));
+    await user.click(screen.getByRole("button", { name: "运行历史回测" }));
+
+    expect(apiMocks.runBacktestStreamWithDataService).toHaveBeenCalledWith(
+      "http://127.0.0.1:9010",
+      expect.objectContaining({
+        exit_rules: expect.arrayContaining([
+          expect.objectContaining({
+            condition_id: "close_below_ma",
+            params: expect.objectContaining({ window: 3 }),
+            expression: "收盘价跌破3日均线"
+          })
+        ])
+      }),
+      expect.any(Object),
+      expect.objectContaining({
+        onPhase: expect.any(Function),
+        onProgress: expect.any(Function),
+        onTrade: expect.any(Function),
+        onResult: expect.any(Function)
+      })
+    );
+  });
+
+  it("validates exit rules with exit-specific low-break conditions before running", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByText("日线行情");
+    await user.clear(screen.getByLabelText("新增离场条件表达式"));
+    await user.type(screen.getByLabelText("新增离场条件表达式"), "突破20日最低");
+    await user.click(screen.getByRole("button", { name: "校验离场条件" }));
+    await screen.findByText(/离场可识别：跌破前低离场/);
+    await user.click(screen.getByRole("button", { name: "添加离场条件" }));
+    await user.click(screen.getByRole("button", { name: "运行历史回测" }));
+
+    expect(apiMocks.validateConditionExpression).toHaveBeenCalledWith(
+      "http://127.0.0.1:9010",
+      "突破20日最低",
+      "exit"
+    );
+    expect(apiMocks.runBacktestStreamWithDataService).toHaveBeenCalledWith(
+      "http://127.0.0.1:9010",
+      expect.objectContaining({
+        exit_rules: expect.arrayContaining([
+          expect.objectContaining({
+            condition_id: "breakdown_below_n_day_low",
+            params: expect.objectContaining({ window: 20 }),
+            expression: "突破20日最低"
+          })
+        ])
+      }),
+      expect.any(Object),
+      expect.objectContaining({
+        onPhase: expect.any(Function),
+        onProgress: expect.any(Function),
+        onTrade: expect.any(Function),
+        onResult: expect.any(Function)
+      })
+    );
+  });
+
+  it("blocks invalid backtest parameters before calling the backend", async () => {
+    const user = userEvent.setup();
+    apiMocks.runBacktestStreamWithDataService.mockClear();
+    apiMocks.runConfiguredBacktest.mockClear();
+    render(<App />);
+
+    await screen.findByText("日线行情");
+    await user.clear(screen.getByLabelText("初始资金"));
+    await user.click(screen.getByRole("button", { name: "运行历史回测" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("初始资金不能为空");
+    expect(apiMocks.runBacktestStreamWithDataService).not.toHaveBeenCalled();
+    expect(apiMocks.runConfiguredBacktest).not.toHaveBeenCalled();
+  });
+
+  it("explains invalid stop loss and date ranges before running", async () => {
+    const user = userEvent.setup();
+    apiMocks.runBacktestStreamWithDataService.mockClear();
+    apiMocks.runConfiguredBacktest.mockClear();
+    render(<App />);
+
+    await screen.findByText("日线行情");
+    await user.clear(screen.getByLabelText("止损比例"));
+    await user.type(screen.getByLabelText("止损比例"), "5");
+    await user.click(screen.getByRole("button", { name: "运行历史回测" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("止损比例必须为负数");
+    expect(apiMocks.runBacktestStreamWithDataService).not.toHaveBeenCalled();
+
+    await user.clear(screen.getByLabelText("止损比例"));
+    await user.type(screen.getByLabelText("止损比例"), "-5");
+    const strategyStartDateInput = screen.getAllByLabelText("开始日期")[0];
+    await user.clear(strategyStartDateInput);
+    await user.type(strategyStartDateInput, "2024-01-09");
+    await user.click(screen.getByRole("button", { name: "运行历史回测" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("开始日期不能晚于结束日期");
+    expect(apiMocks.runBacktestStreamWithDataService).not.toHaveBeenCalled();
+  });
+
+  it("does not add duplicate exit rules with the same parsed parameters", async () => {
+    const user = userEvent.setup();
+    apiMocks.validateConditionExpression.mockImplementation(async (_baseUrl, text) => {
+      if (text === "收盘价跌破3日均线") {
+        return {
+          ok: true,
+          normalized_text: text,
+          errors: [],
+          examples: ["收盘价跌破3日均线"],
+          condition: {
+            id: "custom-close-below-ma",
+            condition_id: "close_below_ma",
+            enabled: true,
+            params: { window: 3 },
+            data_lag_days: 0,
+            expression: text
+          }
+        };
+      }
+      return {
+        ok: false,
+        normalized_text: text,
+        condition: null,
+        errors: [{ code: "unrecognized_condition", message: "无法识别条件，请参考样例改写。" }],
+        examples: ["收盘价跌破3日均线"]
+      };
+    });
+    render(<App />);
+
+    await screen.findByText("日线行情");
+    await user.clear(screen.getByLabelText("新增离场条件表达式"));
+    await user.type(screen.getByLabelText("新增离场条件表达式"), "收盘价跌破3日均线");
+    await user.click(screen.getByRole("button", { name: "校验离场条件" }));
+    await screen.findByText(/离场可识别/);
+    await user.click(screen.getByRole("button", { name: "添加离场条件" }));
+
+    expect(screen.getByText("该离场条件已存在，不会重复加入。")).toBeInTheDocument();
+    const exitRules = screen.getByRole("heading", { name: "离场规则" }).closest(".exit-rules-panel");
+    expect(exitRules).not.toBeNull();
+    expect(exitRules?.textContent?.match(/卖出触发：收盘价跌破3日均线/g) ?? []).toHaveLength(1);
+  });
+
+  it("shows exit rules as readable sell rules without backend parser fields", async () => {
+    render(<App />);
+
+    await screen.findByText("日线行情");
+
+    const exitRules = screen.getByRole("heading", { name: "离场规则" }).closest(".exit-rules-panel");
+    expect(exitRules).not.toBeNull();
+    expect(exitRules).toHaveTextContent("卖出触发：收盘价跌破3日均线");
+    expect(exitRules).toHaveTextContent("均线周期: 3日");
+    expect(exitRules).not.toHaveTextContent("close_below_ma");
+    expect(exitRules).not.toHaveTextContent("解析参数");
+    expect(exitRules).not.toHaveTextContent("window");
+  });
+
   it("shows backend errors without dropping the page", async () => {
     const user = userEvent.setup();
-    apiMocks.runBacktestWithDataService.mockRejectedValue(new Error("No cached daily bars found."));
+    apiMocks.runBacktestStreamWithDataService.mockRejectedValue(new Error("No cached daily bars found."));
     render(<App />);
 
     await user.click(screen.getByRole("button", { name: "运行历史回测" }));
@@ -171,7 +955,7 @@ describe("A 股回测工作台界面", () => {
 
   it("uses a Chinese fallback for unrecognized backend errors", async () => {
     const user = userEvent.setup();
-    apiMocks.runBacktestWithDataService.mockRejectedValue(new Error("initial_cash must be > 0"));
+    apiMocks.runBacktestStreamWithDataService.mockRejectedValue(new Error("initial_cash must be > 0"));
     render(<App />);
 
     await user.click(screen.getByRole("button", { name: "运行历史回测" }));

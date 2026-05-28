@@ -72,6 +72,76 @@ export type SyncJobStatus = {
   errors: string[];
 };
 
+export type MarketIndexQuote = {
+  symbol: string;
+  name: string;
+  last: number;
+  previous_close?: number | null;
+  change?: number | null;
+  change_pct?: number | null;
+  source: string;
+  updated_at?: string | null;
+};
+
+export type MarketBreadth = {
+  up: number;
+  down: number;
+  flat: number;
+  total: number;
+  source: string;
+};
+
+export type SectorMover = {
+  name: string;
+  change_pct: number;
+  leading_symbol?: string | null;
+  source: string;
+};
+
+export type RealtimeMarketSnapshot = {
+  status: "live" | "stale" | "unavailable";
+  source: string;
+  updated_at: string;
+  indexes: MarketIndexQuote[];
+  breadth?: MarketBreadth | null;
+  strong_sectors: SectorMover[];
+  yesterday_strong_sectors?: SectorMover[];
+  message: string;
+};
+
+export type MarketNewsItem = {
+  title: string;
+  summary?: string | null;
+  source: string;
+  published_at?: string | null;
+  url?: string | null;
+  tags: string[];
+  sentiment: "positive" | "neutral" | "negative";
+};
+
+export type MarketNewsResponse = {
+  updated_at: string;
+  source: string;
+  items: MarketNewsItem[];
+};
+
+export type RiskAlertItem = {
+  symbol: string;
+  name: string;
+  risk_type: string;
+  reason: string;
+  severity: "high" | "medium" | "low";
+  source: string;
+  detected_at: string;
+};
+
+export type RiskAlertsResponse = {
+  updated_at: string;
+  source: string;
+  items: RiskAlertItem[];
+  diagnostics: string[];
+};
+
 export type ConditionNode = {
   id: string;
   condition_id: string;
@@ -79,6 +149,7 @@ export type ConditionNode = {
   params: Record<string, number | string | boolean>;
   weight?: number | null;
   data_lag_days: number;
+  expression?: string | null;
 };
 
 export type ConditionGroup = {
@@ -99,6 +170,8 @@ export type BacktestSettingsConfig = {
   start_date: string;
   end_date: string;
   initial_cash: number;
+  stock_pool: "all" | "main_board" | "gem" | "star" | "beijing" | "custom";
+  custom_symbols: string[];
   benchmark_symbol: string;
   fixed_holding_days: number;
   take_profit_pct: number | null;
@@ -149,4 +222,44 @@ export type BacktestResult = {
   equity_curve: EquityPoint[];
   trades: Trade[];
   preflight_issues: Array<{ code: string; message: string; severity: "warning" | "error"; dataset?: string | null }>;
+};
+
+export type BacktestProgressEvent = {
+  type?: "progress";
+  trade_date?: string;
+  scanned_days?: number;
+  total_days?: number;
+  open_positions?: number;
+  closed_trades?: number;
+  candidates?: number;
+  message: string;
+};
+
+export type BacktestStreamHandlers = {
+  onPhase?: (phase: string) => void;
+  onProgress?: (event: BacktestProgressEvent) => void;
+  onTrade?: (trade: Trade) => void;
+  onResult?: (result: BacktestResult) => void;
+};
+
+export type ConditionValidationResult = {
+  ok: boolean;
+  normalized_text: string;
+  condition: ConditionNode | null;
+  errors: Array<{ code: string; message: string }>;
+  examples: string[];
+};
+
+export type RecommendedStrategy = {
+  id: string;
+  name: string;
+  description: string;
+  suitable_market: string;
+  risk_note: string;
+  example_conditions: string[];
+  strategy: StrategyConfig;
+};
+
+export type RecommendedStrategiesResponse = {
+  items: RecommendedStrategy[];
 };

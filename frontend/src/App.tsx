@@ -1,14 +1,36 @@
 import { useEffect, useState } from "react";
 import { Activity, Database, Flame, ShieldAlert, TrendingUp } from "lucide-react";
-import { loadCoverage, runBacktestWithDataService, runConfiguredBacktest } from "./api";
-import { BacktestSettings } from "./components/BacktestSettings";
+import {
+  loadCoverage,
+  loadMarketNews,
+  loadRealtimeMarketSnapshot,
+  loadRecommendedStrategies,
+  loadRiskAlerts,
+  runBacktestStreamWithDataService,
+  runConfiguredBacktest,
+  validateConditionExpression
+} from "./api";
 import { DataCenter } from "./components/DataCenter";
+import { MarketDashboard } from "./components/MarketDashboard";
+import { NewsPanel } from "./components/NewsPanel";
 import { ResultsOverview } from "./components/ResultsOverview";
-import { StrategyEditor } from "./components/StrategyEditor";
+import { RiskAlertsModal } from "./components/RiskAlertsModal";
+import { StrategyWorkbench } from "./components/StrategyWorkbench";
 import { TradesTable } from "./components/TradesTable";
 import { UpdatePanel } from "./components/UpdatePanel";
 import { defaultSettings, defaultStrategy } from "./strategyDefaults";
-import type { BacktestResult, BacktestSettingsConfig, DataServiceStatus, DatasetCoverage, StrategyConfig } from "./types";
+import type {
+  BacktestResult,
+  BacktestSettingsConfig,
+  DataServiceStatus,
+  DatasetCoverage,
+  ConditionValidationResult,
+  MarketNewsResponse,
+  RealtimeMarketSnapshot,
+  RecommendedStrategy,
+  RiskAlertsResponse,
+  StrategyConfig
+} from "./types";
 
 function formatPercent(value: number | null | undefined): string {
   return value == null ? "--" : `${(value * 100).toFixed(2)}%`;
@@ -42,28 +64,128 @@ function translateError(message: string): string {
   return "回测运行失败，请检查数据中心覆盖范围和策略参数。";
 }
 
+function validateBacktestSettings(settings: BacktestSettingsConfig, draftErrors: string[]): string[] {
+  const errors = [...draftErrors];
+  if (!settings.start_date) {
+    errors.push("开始日期不能为空。");
+  }
+  if (!settings.end_date) {
+    errors.push("结束日期不能为空。");
+  }
+  if (settings.start_date && settings.end_date && settings.start_date > settings.end_date) {
+    errors.push("开始日期不能晚于结束日期。");
+  }
+  if (!Number.isFinite(settings.initial_cash) || settings.initial_cash <= 0) {
+    errors.push("初始资金必须大于0。");
+  }
+  if (!Number.isInteger(settings.fixed_holding_days) || settings.fixed_holding_days < 1) {
+    errors.push("固定持仓天数必须至少为1天。");
+  }
+  if (!Number.isInteger(settings.max_positions) || settings.max_positions < 1) {
+    errors.push("最大持仓数必须至少为1。");
+  }
+  if (!Number.isInteger(settings.max_daily_buys) || settings.max_daily_buys < 1) {
+    errors.push("每日最多买入必须至少为1。");
+  }
+  if (settings.take_profit_pct != null && (!Number.isFinite(settings.take_profit_pct) || settings.take_profit_pct <= 0)) {
+    errors.push("止盈比例必须为正数。");
+  }
+  if (settings.stop_loss_pct != null && (!Number.isFinite(settings.stop_loss_pct) || settings.stop_loss_pct >= 0)) {
+    errors.push("止损比例必须为负数。");
+  }
+  if (!Number.isFinite(settings.slippage_rate) || settings.slippage_rate < 0) {
+    errors.push("滑点比例不能小于0。");
+  }
+  if (!Number.isFinite(settings.fee_rate) || settings.fee_rate < 0) {
+    errors.push("手续费率不能小于0。");
+  }
+  if (!Number.isFinite(settings.stamp_tax_rate) || settings.stamp_tax_rate < 0) {
+    errors.push("印花税率不能小于0。");
+  }
+  if (!Number.isInteger(settings.min_listing_days) || settings.min_listing_days < 0) {
+    errors.push("最少上市天数不能小于0。");
+  }
+  if (settings.stock_pool === "custom" && settings.custom_symbols.length === 0) {
+    errors.push("股票池为自选代码时，至少需要填写一个股票代码。");
+  }
+  return [...new Set(errors)];
+}
+
 export function App() {
   const [coverage, setCoverage] = useState<DatasetCoverage[]>([]);
   const [result, setResult] = useState<BacktestResult | null>(null);
+  const [streamedTrades, setStreamedTrades] = useState<BacktestResult["trades"]>([]);
   const [strategy, setStrategy] = useState<StrategyConfig>(defaultStrategy);
   const [settings, setSettings] = useState<BacktestSettingsConfig>(defaultSettings);
   const [error, setError] = useState<string | null>(null);
   const [dataService, setDataService] = useState<DataServiceStatus | null>(null);
+  const [isRunningBacktest, setIsRunningBacktest] = useState(false);
+  const [runPhases, setRunPhases] = useState<string[]>([]);
+  const [runProgressMessage, setRunProgressMessage] = useState<string | null>(null);
+  const [marketSnapshot, setMarketSnapshot] = useState<RealtimeMarketSnapshot | null>(null);
+  const [isLoadingMarket, setIsLoadingMarket] = useState(false);
+  const [marketNews, setMarketNews] = useState<MarketNewsResponse | null>(null);
+  const [isLoadingNews, setIsLoadingNews] = useState(false);
+  const [riskAlerts, setRiskAlerts] = useState<RiskAlertsResponse | null>(null);
+  const [isLoadingRiskAlerts, setIsLoadingRiskAlerts] = useState(false);
+  const [riskModalOpen, setRiskModalOpen] = useState(false);
+  const [recommendedStrategies, setRecommendedStrategies] = useState<RecommendedStrategy[]>([]);
+  const [conditionValidation, setConditionValidation] = useState<ConditionValidationResult | null>(null);
+  const [isValidatingCondition, setIsValidatingCondition] = useState(false);
+  const [settingsDraftErrors, setSettingsDraftErrors] = useState<string[]>([]);
 
   const refreshCoverage = async () => {
     setCoverage(await loadCoverage(".astock-cache"));
   };
 
   const runBacktest = async () => {
+    const validationErrors = validateBacktestSettings(settings, settingsDraftErrors);
+    if (validationErrors.length > 0) {
+      setError(validationErrors.join(" "));
+      setRunProgressMessage(null);
+      setRunPhases([]);
+      return;
+    }
     try {
       setError(null);
-      setResult(
-        dataService
-          ? await runBacktestWithDataService(dataService.base_url, strategy, settings)
-          : await runConfiguredBacktest(strategy, settings)
-      );
+      setResult(null);
+      setStreamedTrades([]);
+      setIsRunningBacktest(true);
+      setRunProgressMessage("正在准备历史数据与策略条件。");
+      setRunPhases(["校验参数", "读取本地数据"]);
+      window.setTimeout(() => setRunPhases((current) => (current.length < 3 ? [...current, "计算指标"] : current)), 120);
+      window.setTimeout(() => setRunPhases((current) => (current.length < 4 ? [...current, "撮合交易"] : current)), 260);
+      const nextResult = dataService
+        ? await runBacktestStreamWithDataService(dataService.base_url, strategy, settings, {
+            onPhase: (phase) =>
+              setRunPhases((current) => (current.includes(phase) ? current : [...current, phase])),
+            onProgress: (event) => setRunProgressMessage(event.message),
+            onTrade: (trade) =>
+              setStreamedTrades((current) =>
+                current.some((item) => item.symbol === trade.symbol && item.buy_date === trade.buy_date)
+                  ? current.map((item) =>
+                      item.symbol === trade.symbol && item.buy_date === trade.buy_date
+                        ? { ...item, ...trade }
+                        : item
+                    )
+                  : [trade, ...current]
+              ),
+            onResult: (completed) => {
+              setResult(completed);
+              setStreamedTrades(completed.trades);
+              setRunProgressMessage("回测完成，已生成收益曲线和交易明细。");
+            }
+          })
+        : await runConfiguredBacktest(strategy, settings);
+      setResult(nextResult);
+      setStreamedTrades(nextResult.trades);
+      setRunProgressMessage(null);
+      setRunPhases(["校验参数", "读取本地数据", "计算指标", "撮合交易", "生成结果"]);
     } catch (caught) {
       setError(caught instanceof Error ? translateError(caught.message) : "回测运行失败。");
+      setRunProgressMessage(null);
+    } finally {
+      setIsRunningBacktest(false);
     }
   };
 
@@ -71,11 +193,150 @@ export function App() {
     void refreshCoverage();
   }, []);
 
+  useEffect(() => {
+    if (!dataService) {
+      return;
+    }
+    let cancelled = false;
+    const refreshMarket = async () => {
+      setIsLoadingMarket(true);
+      try {
+        const snapshot = await loadRealtimeMarketSnapshot(dataService.base_url);
+        if (!cancelled) {
+          setMarketSnapshot(snapshot);
+        }
+      } catch {
+        if (!cancelled) {
+          setMarketSnapshot({
+            status: "unavailable",
+            source: "local-service",
+            updated_at: new Date().toISOString(),
+            indexes: [],
+            breadth: null,
+            strong_sectors: [],
+            yesterday_strong_sectors: [],
+            message: "实时行情接口暂不可用，请确认本地数据服务已启动。"
+          });
+        }
+      } finally {
+        if (!cancelled) {
+          setIsLoadingMarket(false);
+        }
+      }
+    };
+    void refreshMarket();
+    const timer = window.setInterval(refreshMarket, 60_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [dataService]);
+
+  const refreshNews = async () => {
+    if (!dataService) {
+      return;
+    }
+    setIsLoadingNews(true);
+    try {
+      setMarketNews(await loadMarketNews(dataService.base_url));
+    } finally {
+      setIsLoadingNews(false);
+    }
+  };
+
+  const refreshRiskAlerts = async () => {
+    if (!dataService) {
+      return;
+    }
+    setIsLoadingRiskAlerts(true);
+    try {
+      setRiskAlerts(await loadRiskAlerts(dataService.base_url));
+    } finally {
+      setIsLoadingRiskAlerts(false);
+    }
+  };
+
+  const validateConditionText = async (text: string, mode: "entry" | "exit" = "entry"): Promise<ConditionValidationResult> => {
+    if (!dataService) {
+      return {
+        ok: false,
+        normalized_text: text.trim(),
+        condition: null,
+        errors: [{ code: "service_unavailable", message: "本地数据服务未连接，暂时无法校验条件。" }],
+        examples: mode === "exit" ? ["收盘价跌破3日均线", "跌破20日低点"] : ["收盘价站上20日均线", "量比2日介于1.2到2.5"]
+      };
+    }
+    return validateConditionExpression(dataService.base_url, text, mode);
+  };
+
+  const handleValidateCondition = async (text: string) => {
+    setIsValidatingCondition(true);
+    try {
+      setConditionValidation(await validateConditionText(text));
+    } catch (caught) {
+      setConditionValidation({
+        ok: false,
+        normalized_text: text.trim(),
+        condition: null,
+        errors: [{ code: "request_failed", message: caught instanceof Error ? caught.message : "条件校验失败。" }],
+        examples: ["收盘价站上20日均线", "量比2日介于1.2到2.5"]
+      });
+    } finally {
+      setIsValidatingCondition(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!dataService) {
+      return;
+    }
+    let cancelled = false;
+    const loadAuxiliaryData = async () => {
+      const [newsResult, riskResult, recommendedResult] = await Promise.allSettled([
+        loadMarketNews(dataService.base_url),
+        loadRiskAlerts(dataService.base_url),
+        loadRecommendedStrategies(dataService.base_url)
+      ]);
+      if (cancelled) {
+        return;
+      }
+      if (newsResult.status === "fulfilled") {
+        setMarketNews(newsResult.value);
+      }
+      if (riskResult.status === "fulfilled") {
+        setRiskAlerts(riskResult.value);
+      }
+      if (recommendedResult.status === "fulfilled") {
+        setRecommendedStrategies(recommendedResult.value.items);
+      }
+    };
+    void loadAuxiliaryData();
+    const timer = window.setInterval(() => {
+      void refreshNews();
+      void refreshRiskAlerts();
+    }, 120_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [dataService]);
+
   const coverageSymbols = coverage.reduce((sum, item) => sum + item.symbols, 0);
-  const heatFilter = strategy.market_filters.find((node) => node.condition_id === "market_rising_ratio_at_least");
-  const heatThreshold = typeof heatFilter?.params.min_ratio === "number" ? heatFilter.params.min_ratio : 0.5;
+  const liveHeatRatio = marketSnapshot?.breadth && marketSnapshot.breadth.total > 0
+    ? marketSnapshot.breadth.up / marketSnapshot.breadth.total
+    : null;
   const hasCapitalFlow = coverage.some((item) => item.dataset === "capital_flow" && item.symbols > 0);
   const issueCount = result?.preflight_issues.length ?? 0;
+  const riskAlertCount = riskAlerts?.items.length ?? 0;
+  const closedTrades = result?.metrics.trade_count ?? 0;
+  const poolLabel = {
+    all: "全A",
+    main_board: "沪深主板",
+    gem: "创业板",
+    star: "科创板",
+    beijing: "北交所",
+    custom: settings.custom_symbols.length > 0 ? `自选 ${settings.custom_symbols.length} 只` : "自选代码"
+  }[settings.stock_pool];
 
   return (
     <main className="app-shell">
@@ -91,14 +352,22 @@ export function App() {
           <span className="status-pill"><Database size={16} aria-hidden="true" /> 本地缓存</span>
         </div>
       </header>
+      <div className="market-news-layout">
+        <MarketDashboard snapshot={marketSnapshot} isLoading={isLoadingMarket} />
+        <NewsPanel news={marketNews} isLoading={isLoadingNews} onRefresh={refreshNews} />
+      </div>
       <section className="summary-band" aria-label="工作台概览">
         <article className="summary-card heat-card">
           <div>
             <span>市场热度</span>
-            <strong>{formatPercent(heatThreshold)}</strong>
+            <strong>{formatPercent(liveHeatRatio)}</strong>
           </div>
           <Flame size={24} aria-hidden="true" />
-          <small>入场前要求上涨家数占比达到阈值</small>
+          <small>
+            {marketSnapshot?.breadth
+              ? `今日实时红盘 ${marketSnapshot.breadth.up} / 全市场 ${marketSnapshot.breadth.total}`
+              : `${poolLabel} / 等待实时行情`}
+          </small>
         </article>
         <article className="summary-card">
           <div>
@@ -114,30 +383,65 @@ export function App() {
             <strong>{formatPercent(result?.metrics.total_return_pct)}</strong>
           </div>
           <Activity size={24} aria-hidden="true" />
-          <small>最大回撤 {formatPercent(result?.metrics.max_drawdown_pct)}</small>
+          <small>最大回撤 {formatPercent(result?.metrics.max_drawdown_pct)} / {closedTrades} 笔交易</small>
         </article>
-        <article className="summary-card">
+        <button
+          className="summary-card summary-card-button"
+          type="button"
+          aria-label={`查看全市场风险提示，当前 ${riskAlertCount > 0 ? riskAlertCount : issueCount} 项`}
+          onClick={() => setRiskModalOpen(true)}
+        >
           <div>
             <span>风险提示</span>
-            <strong>{issueCount === 0 ? "0项" : `${issueCount}项`}</strong>
+            <strong>{riskAlertCount > 0 ? `${riskAlertCount}项` : issueCount === 0 ? "0项" : `${issueCount}项`}</strong>
           </div>
           <ShieldAlert size={24} aria-hidden="true" />
-          <small>当前覆盖股票数 {formatCompact(coverageSymbols)}</small>
-        </article>
+          <small>{riskAlertCount > 0 ? "全市场 ST / 退市风险清单" : `当前覆盖股票数 ${formatCompact(coverageSymbols)}`}</small>
+        </button>
       </section>
       <div className="workspace">
+        <StrategyWorkbench
+          coverage={coverage}
+          settings={settings}
+          strategy={strategy}
+          onSettingsChange={setSettings}
+          onStrategyChange={setStrategy}
+          disabled={isRunningBacktest}
+          conditionValidation={conditionValidation}
+          isValidatingCondition={isValidatingCondition}
+          validationExamples={conditionValidation?.examples ?? []}
+          recommendedStrategies={recommendedStrategies}
+          onValidateCondition={handleValidateCondition}
+          validateConditionText={validateConditionText}
+          onSettingsDraftErrorsChange={setSettingsDraftErrors}
+        />
+        {error ? <div className="error-banner" role="alert">{error}</div> : null}
+        <div className="results-trades-grid">
+          <ResultsOverview
+            result={result}
+            isRunning={isRunningBacktest}
+            phases={runPhases}
+            progressMessage={runProgressMessage}
+            onRun={runBacktest}
+            riskAlertCount={riskAlertCount}
+            onOpenRiskAlerts={() => setRiskModalOpen(true)}
+          />
+          <TradesTable trades={isRunningBacktest ? streamedTrades : result?.trades ?? streamedTrades} />
+        </div>
         <DataCenter
           cacheDir=".astock-cache"
           coverage={coverage}
           onCoverageChange={setCoverage}
           onServiceReady={setDataService}
         />
-        <BacktestSettings settings={settings} onSettingsChange={setSettings} />
-        <StrategyEditor strategy={strategy} onStrategyChange={setStrategy} />
-        {error ? <div className="error-banner" role="alert">{error}</div> : null}
-        <ResultsOverview result={result} onRun={runBacktest} />
-        <TradesTable trades={result?.trades ?? []} />
       </div>
+      <RiskAlertsModal
+        open={riskModalOpen}
+        alerts={riskAlerts}
+        isLoading={isLoadingRiskAlerts}
+        onClose={() => setRiskModalOpen(false)}
+        onRefresh={refreshRiskAlerts}
+      />
     </main>
   );
 }

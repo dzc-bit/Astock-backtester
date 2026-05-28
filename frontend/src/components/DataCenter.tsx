@@ -6,6 +6,7 @@ import {
   loadDailyBarsCoverage,
   loadDataServiceHealth,
   loadDataServiceLogs,
+  loadSyncJob,
   startFullMarketSync
 } from "../api";
 import type { DailyBarsCoverageItem, DataServiceStatus, DatasetCoverage, ServiceLogEntry, SyncJobStatus } from "../types";
@@ -16,6 +17,8 @@ type Props = {
   onCoverageChange: (coverage: DatasetCoverage[]) => void;
   onServiceReady?: (service: DataServiceStatus) => void;
 };
+
+type BusyAction = "refresh" | "fetch" | "sample" | "file" | "sync" | null;
 
 const defaultStartDate = "2024-01-02";
 const defaultEndDate = "2024-01-08";
@@ -34,6 +37,10 @@ function operationMessage(logs: { message: string }[]): string {
   return logs.at(-1)?.message ?? "数据操作已完成";
 }
 
+function isSyncRunning(job: SyncJobStatus | null): boolean {
+  return job?.status === "running";
+}
+
 export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceReady }: Props) {
   const [service, setService] = useState<DataServiceStatus | null>(null);
   const [symbolsInput, setSymbolsInput] = useState("600519");
@@ -44,7 +51,9 @@ export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceRead
   const [logs, setLogs] = useState<ServiceLogEntry[]>([]);
   const [syncJob, setSyncJob] = useState<SyncJobStatus | null>(null);
   const [message, setMessage] = useState("正在连接本地数据服务");
-  const [busy, setBusy] = useState(false);
+  const [busyAction, setBusyAction] = useState<BusyAction>(null);
+  const syncRunning = isSyncRunning(syncJob);
+  const busy = busyAction !== null || syncRunning;
 
   const symbols = useMemo(
     () =>
@@ -111,11 +120,45 @@ export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceRead
     };
   }, [cacheDir]);
 
+  useEffect(() => {
+    if (!service || !isSyncRunning(syncJob)) {
+      return;
+    }
+    let cancelled = false;
+    const timer = window.setInterval(() => {
+      void loadSyncJob(service.base_url, syncJob.job_id)
+        .then(async (result) => {
+          if (cancelled) {
+            return;
+          }
+          setSyncJob(result.job);
+          setMessage(
+            result.job.status === "running"
+              ? `正在下载全市场历史数据，已完成 ${result.job.completed_symbols}/${result.job.total_symbols}`
+              : `全市场下载完成，导入 ${result.job.imported_rows} 行`
+          );
+          if (result.job.status !== "running") {
+            await refreshServiceState(service);
+          }
+        })
+        .catch((error: Error) => {
+          if (!cancelled) {
+            setMessage(error.message);
+          }
+        });
+    }, 1000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [service, syncJob?.job_id, syncJob?.status]);
+
   const handleRefreshDetails = async () => {
     if (!service) {
       return;
     }
-    setBusy(true);
+    setBusyAction("refresh");
+    setMessage("正在刷新覆盖范围");
     try {
       await refreshDetails(service);
       await refreshServiceState(service);
@@ -123,7 +166,7 @@ export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceRead
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "刷新覆盖范围失败");
     } finally {
-      setBusy(false);
+      setBusyAction(null);
     }
   };
 
@@ -131,7 +174,8 @@ export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceRead
     if (!service || symbols.length === 0) {
       return;
     }
-    setBusy(true);
+    setBusyAction("fetch");
+    setMessage("正在补全缺失数据");
     try {
       const result = await fetchDailyBars(service.base_url, symbols, startDate, endDate);
       setMessage(operationMessage(result.logs));
@@ -142,7 +186,7 @@ export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceRead
       setMessage(error instanceof Error ? error.message : "补全缺失数据失败");
       await refreshLogs(service);
     } finally {
-      setBusy(false);
+      setBusyAction(null);
     }
   };
 
@@ -150,7 +194,8 @@ export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceRead
     if (!service) {
       return;
     }
-    setBusy(true);
+    setBusyAction("sample");
+    setMessage("正在导入示例数据");
     try {
       const result = await importDailyBars(service.base_url, "sample");
       setMessage(operationMessage(result.logs));
@@ -161,7 +206,7 @@ export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceRead
       setMessage(error instanceof Error ? error.message : "导入示例数据失败");
       await refreshLogs(service);
     } finally {
-      setBusy(false);
+      setBusyAction(null);
     }
   };
 
@@ -169,7 +214,8 @@ export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceRead
     if (!service || !importPath.trim()) {
       return;
     }
-    setBusy(true);
+    setBusyAction("file");
+    setMessage("正在导入本地文件");
     try {
       const result = await importDailyBars(service.base_url, "file", importPath.trim());
       setMessage(operationMessage(result.logs));
@@ -180,7 +226,7 @@ export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceRead
       setMessage(error instanceof Error ? error.message : "导入本地文件失败");
       await refreshLogs(service);
     } finally {
-      setBusy(false);
+      setBusyAction(null);
     }
   };
 
@@ -188,17 +234,22 @@ export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceRead
     if (!service) {
       return;
     }
-    setBusy(true);
+    setBusyAction("sync");
+    setMessage("正在下载全市场历史数据");
     try {
       const result = await startFullMarketSync(service.base_url, startDate, endDate);
       setSyncJob(result.job);
-      setMessage(`全市场下载完成，导入 ${result.job.imported_rows} 行`);
-      await refreshServiceState(service);
+      if (result.job.status === "running") {
+        setMessage(`正在下载全市场历史数据，已完成 ${result.job.completed_symbols}/${result.job.total_symbols}`);
+      } else {
+        setMessage(`全市场下载完成，导入 ${result.job.imported_rows} 行`);
+        await refreshServiceState(service);
+      }
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "全市场下载失败");
       await refreshLogs(service);
     } finally {
-      setBusy(false);
+      setBusyAction(null);
     }
   };
 
@@ -210,7 +261,7 @@ export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceRead
           <h2>数据中心</h2>
         </div>
         <button className="secondary-button" type="button" onClick={handleRefreshDetails} disabled={!service || busy}>
-          刷新覆盖范围
+          {busyAction === "refresh" ? "正在刷新覆盖范围" : "刷新覆盖范围"}
         </button>
       </div>
 
@@ -243,25 +294,27 @@ export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceRead
         </div>
         <div className="service-actions">
           <button className="primary-button" type="button" onClick={handleFullMarketSync} disabled={!service || busy}>
-            下载全市场历史数据
+            {busyAction === "sync" ? "正在下载全市场历史数据" : "下载全市场历史数据"}
           </button>
           <button className="primary-button" type="button" onClick={handleFetch} disabled={!service || busy || symbols.length === 0}>
-            补全缺失数据
+            {busyAction === "fetch" ? "正在补全缺失数据" : "补全缺失数据"}
           </button>
           <button className="secondary-button" type="button" onClick={handleImportSample} disabled={!service || busy}>
-            导入示例数据
+            {busyAction === "sample" ? "正在导入示例数据" : "导入示例数据"}
           </button>
           <button className="secondary-button" type="button" onClick={handleImportFile} disabled={!service || busy || !importPath.trim()}>
-            导入本地文件
+            {busyAction === "file" ? "正在导入本地文件" : "导入本地文件"}
           </button>
         </div>
-        <p className="muted-code" role="status">
+        <p className={`operation-status ${busy ? "is-busy" : ""}`} role="status" aria-label="数据中心状态">
           {message}
         </p>
         {syncJob ? (
           <div className="sync-progress" role="status">
             <strong>已完成 {syncJob.completed_symbols}/{syncJob.total_symbols}</strong>
             <span>失败 {syncJob.failed_symbols}，导入 {syncJob.imported_rows} 行</span>
+            {syncJob.current_symbol ? <span>当前 {syncJob.current_symbol}</span> : null}
+            <progress value={syncJob.completed_symbols + syncJob.failed_symbols} max={syncJob.total_symbols || 1} />
           </div>
         ) : null}
         {logs.length > 0 ? (

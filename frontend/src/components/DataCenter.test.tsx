@@ -1,6 +1,6 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DataCenter } from "./DataCenter";
 
 const apiMocks = vi.hoisted(() => ({
@@ -10,6 +10,7 @@ const apiMocks = vi.hoisted(() => ({
   loadDataServiceHealth: vi.fn(),
   loadDataServiceLogs: vi.fn(),
   loadDailyBarsCoverage: vi.fn(),
+  loadSyncJob: vi.fn(),
   startFullMarketSync: vi.fn()
 }));
 
@@ -22,6 +23,7 @@ const coverage = [
 
 describe("DataCenter", () => {
   beforeEach(() => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
     apiMocks.ensureDataService.mockResolvedValue({
       running: true,
       port: 9011,
@@ -64,6 +66,21 @@ describe("DataCenter", () => {
       imported_rows: 2,
       coverage,
       logs: [{ level: "info", message: "Imported daily bars from sample" }]
+    });
+    apiMocks.loadSyncJob.mockResolvedValue({
+      job: {
+        job_id: "job-1",
+        mode: "full_market_bootstrap",
+        status: "completed",
+        total_symbols: 2,
+        completed_symbols: 2,
+        failed_symbols: 0,
+        imported_rows: 20,
+        current_symbol: null,
+        start_date: "2015-01-01",
+        end_date: "2026-05-26",
+        errors: []
+      }
     });
   });
 
@@ -123,18 +140,52 @@ describe("DataCenter", () => {
     expect(await screen.findByText("Fetched 3 daily bar rows")).toBeInTheDocument();
   });
 
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("shows immediate busy feedback for data operations", async () => {
+    const user = userEvent.setup();
+    let resolveFetch: (value: Awaited<ReturnType<typeof apiMocks.fetchDailyBars>>) => void = () => {};
+    apiMocks.fetchDailyBars.mockReturnValue(
+      new Promise((resolve) => {
+        resolveFetch = resolve;
+      })
+    );
+
+    render(<DataCenter cacheDir=".astock-cache" coverage={coverage} onCoverageChange={vi.fn()} />);
+
+    await screen.findByText(/http:\/\/127\.0\.0\.1:9011/);
+    await user.click(screen.getByRole("button", { name: "补全缺失数据" }));
+
+    expect(screen.getByRole("button", { name: "正在补全缺失数据" })).toBeDisabled();
+    expect(screen.getByRole("status", { name: "数据中心状态" })).toHaveTextContent("正在补全缺失数据");
+
+    resolveFetch({
+      status: "ok",
+      imported_rows: 3,
+      requested_symbols: ["600519"],
+      fetched_symbols: ["600519"],
+      missing_symbols: [],
+      coverage,
+      logs: [{ level: "info", message: "Fetched 3 daily bar rows" }]
+    });
+
+    expect(await screen.findByText("Fetched 3 daily bar rows")).toBeInTheDocument();
+  });
+
   it("starts a full-market sync job and shows progress", async () => {
     const user = userEvent.setup();
     apiMocks.startFullMarketSync.mockResolvedValue({
       job: {
         job_id: "job-1",
         mode: "full_market_bootstrap",
-        status: "completed",
+        status: "running",
         total_symbols: 2,
-        completed_symbols: 2,
+        completed_symbols: 1,
         failed_symbols: 0,
-        imported_rows: 20,
-        current_symbol: null,
+        imported_rows: 10,
+        current_symbol: "000002",
         start_date: "2015-01-01",
         end_date: "2026-05-26",
         errors: []
@@ -146,6 +197,11 @@ describe("DataCenter", () => {
     await screen.findByText(/http:\/\/127\.0\.0\.1:9011/);
     await user.click(screen.getByRole("button", { name: "下载全市场历史数据" }));
 
+    expect(screen.getByText(/当前 000002/)).toBeInTheDocument();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1100);
+    });
+    await waitFor(() => expect(apiMocks.loadSyncJob).toHaveBeenCalledWith("http://127.0.0.1:9011", "job-1"));
     expect(await screen.findByText(/已完成 2\/2/)).toBeInTheDocument();
     expect(screen.getAllByText(/导入 20 行/).length).toBeGreaterThan(0);
   });

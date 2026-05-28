@@ -3,11 +3,11 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from datetime import date, datetime
 import json
+import time
 from typing import Any
-from urllib.parse import urlencode
-from urllib.request import Request, urlopen
 
 import pandas as pd
+import requests
 
 from astock_backtester.data.importer import normalize_daily_bars
 
@@ -37,9 +37,9 @@ def _market_code(code: str) -> int:
 
 
 def _to_float(value: Any, default: float = 0.0) -> float:
-    if value in (None, "", "-"):
+    if value in (None, "", "-", "--"):
         return default
-    return float(value)
+    return float(str(value).replace("+", "").replace("%", ""))
 
 
 def _parse_date(value: Any) -> date | None:
@@ -53,11 +53,9 @@ def _parse_date(value: Any) -> date | None:
 
 
 def _default_json_get(url: str, params: dict[str, str], headers: dict[str, str], timeout: int) -> dict[str, Any]:
-    query = urlencode(params)
-    request = Request(f"{url}?{query}", headers=headers)
-    with urlopen(request, timeout=timeout) as response:
-        charset = response.headers.get_content_charset() or "utf-8"
-        return json.loads(response.read().decode(charset, "ignore"))
+    response = requests.get(url, params=params, headers=headers, timeout=timeout, proxies={})
+    response.raise_for_status()
+    return json.loads(response.text)
 
 
 class HttpAStockFetcher:
@@ -71,7 +69,7 @@ class HttpAStockFetcher:
         rows = [frame for frame in frames if not frame.empty]
         if not rows:
             return pd.DataFrame()
-        return normalize_daily_bars(pd.concat(rows, ignore_index=True))
+        return pd.concat(rows, ignore_index=True)
 
     def _fetch_one(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
         code = _normalize_code(symbol)
@@ -82,7 +80,9 @@ class HttpAStockFetcher:
         info = self._try_fetch_eastmoney_stock_info(code)
         flow_by_date = {item["date"]: item["main_net"] for item in self._try_fetch_eastmoney_fund_flow_120d(code)}
         bars["main_net_inflow"] = bars["trade_date"].dt.strftime("%Y-%m-%d").map(flow_by_date)
-        bars["float_market_cap"] = _to_float(info.get("float_mcap"), float("nan"))
+        float_market_cap = _to_float(info.get("float_mcap"), float("nan"))
+        if float_market_cap > 0:
+            bars["float_market_cap"] = float_market_cap
         list_date = _parse_date(info.get("list_date"))
         if list_date is None:
             bars["listing_days"] = 9999
@@ -93,41 +93,50 @@ class HttpAStockFetcher:
     def _try_fetch_eastmoney_fund_flow_120d(self, code: str) -> list[dict[str, Any]]:
         try:
             return self._fetch_eastmoney_fund_flow_120d(code)
-        except OSError:
+        except Exception:
             return []
 
     def _try_fetch_eastmoney_stock_info(self, code: str) -> dict[str, Any]:
         try:
             return self._fetch_eastmoney_stock_info(code)
-        except OSError:
+        except Exception:
             return {}
 
     def _fetch_baidu_kline(self, code: str, start_date: str, end_date: str) -> pd.DataFrame:
-        payload = self._json_get(
-            "https://finance.pae.baidu.com/selfselect/getstockquotation",
-            {
-                "all": "1",
-                "isIndex": "false",
-                "isBk": "false",
-                "isBlock": "false",
-                "isFutures": "false",
-                "isStock": "true",
-                "newFormat": "1",
-                "group": "quotation_kline_ab",
-                "finClientType": "pc",
-                "code": code,
-                "start_time": start_date,
-                "ktype": "1",
-            },
-            {
-                "User-Agent": UA,
-                "Accept": "application/vnd.finance-web.v1+json",
-                "Origin": "https://gushitong.baidu.com",
-                "Referer": "https://gushitong.baidu.com/",
-            },
-            10,
-        )
-        market_data = payload.get("Result", {}).get("newMarketData", {})
+        market_data: dict[str, Any] = {}
+        for attempt in range(3):
+            payload = self._json_get(
+                "https://finance.pae.baidu.com/selfselect/getstockquotation",
+                {
+                    "all": "1",
+                    "isIndex": "false",
+                    "isBk": "false",
+                    "isBlock": "false",
+                    "isFutures": "false",
+                    "isStock": "true",
+                    "newFormat": "1",
+                    "group": "quotation_kline_ab",
+                    "finClientType": "pc",
+                    "code": code,
+                    "start_time": start_date,
+                    "ktype": "1",
+                },
+                {
+                    "User-Agent": UA,
+                    "Accept": "application/vnd.finance-web.v1+json",
+                    "Origin": "https://gushitong.baidu.com",
+                    "Referer": "https://gushitong.baidu.com/",
+                },
+                20,
+            )
+            result = payload.get("Result") if isinstance(payload, dict) else None
+            if isinstance(result, dict):
+                market_data = result.get("newMarketData", {}) or {}
+                break
+            if attempt < 2:
+                time.sleep(1.5 * (attempt + 1))
+        if not market_data:
+            return pd.DataFrame()
         keys = list(market_data.get("keys") or [])
         rows = []
         for raw_row in str(market_data.get("marketData") or "").split(";"):
@@ -147,9 +156,22 @@ class HttpAStockFetcher:
                     "low": _to_float(item.get("low")),
                     "close": _to_float(item.get("close")),
                     "volume": _to_float(item.get("volume")),
+                    "amount": _to_float(item.get("amount")),
+                    "change": _to_float(item.get("range")),
+                    "change_pct": _to_float(item.get("ratio")),
+                    "turnover_rate": _to_float(item.get("turnoverratio")),
+                    "pre_close": _to_float(item.get("preClose"), float("nan")),
                 }
             )
-        return normalize_daily_bars(pd.DataFrame(rows)) if rows else pd.DataFrame()
+        if not rows:
+            return pd.DataFrame()
+        frame = pd.DataFrame(rows)
+        turnover = pd.to_numeric(frame["turnover_rate"], errors="coerce")
+        volume = pd.to_numeric(frame["volume"], errors="coerce")
+        close = pd.to_numeric(frame["close"], errors="coerce")
+        frame["float_market_cap"] = (volume / (turnover / 100.0)) * close
+        frame.loc[turnover <= 0, "float_market_cap"] = float("nan")
+        return normalize_daily_bars(frame)
 
     def _fetch_eastmoney_fund_flow_120d(self, code: str) -> list[dict[str, Any]]:
         payload = self._json_get(
@@ -214,4 +236,5 @@ class AStockDataAdapter:
                 "a-stock-data fetcher is not configured. Configure a fetcher that returns daily OHLCV, "
                 "market cap, turnover, and capital-flow columns."
             )
-        return normalize_daily_bars(self.fetcher(symbols, start_date, end_date))
+        frame = self.fetcher(symbols, start_date, end_date)
+        return frame if frame.empty else normalize_daily_bars(frame)

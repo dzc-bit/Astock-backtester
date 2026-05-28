@@ -56,6 +56,7 @@ def registered_conditions() -> list[ConditionDefinition]:
         ConditionDefinition("volume_ratio_between", "Volume ratio range", "volume", ()),
         ConditionDefinition("macd_histogram_at_least", "MACD histogram floor", "technical", ("macd_hist",)),
         ConditionDefinition("breakout_above_n_day_high", "Breakout above prior high", "pattern", ()),
+        ConditionDefinition("breakdown_below_n_day_low", "Breakdown below prior low", "exit_pattern", ()),
     ]
 
 
@@ -166,6 +167,18 @@ def _breakout_above_n_day_high(node: ConditionNode, row: pd.Series, frame: pd.Da
     return ConditionResult(value > 0, f"close {row['close']:.2f} broke prior {window}d high {prior_high:.2f}", value)
 
 
+def _breakdown_below_n_day_low(node: ConditionNode, row: pd.Series, frame: pd.DataFrame) -> ConditionResult:
+    window = int(node.params["window"])
+    symbol_frame = frame[
+        (frame["symbol"] == row["symbol"]) & (frame["trade_date"] < row["trade_date"])
+    ].sort_values("trade_date")
+    if len(symbol_frame) < window:
+        return ConditionResult(False, f"{window}d prior low unavailable before enough history", None)
+    prior_low = float(symbol_frame.tail(window)["low"].min())
+    value = float(row["close"] - prior_low)
+    return ConditionResult(value < 0, f"close {row['close']:.2f} broke prior {window}d low {prior_low:.2f}", value)
+
+
 EVALUATORS: dict[str, Evaluator] = {
     "market_cap_between": _market_cap_between,
     "capital_flow_n_day_sum_at_least": _capital_flow_n_day_sum_at_least,
@@ -178,6 +191,7 @@ EVALUATORS: dict[str, Evaluator] = {
     "volume_ratio_between": _volume_ratio_between,
     "macd_histogram_at_least": _macd_histogram_at_least,
     "breakout_above_n_day_high": _breakout_above_n_day_high,
+    "breakdown_below_n_day_low": _breakdown_below_n_day_low,
 }
 
 

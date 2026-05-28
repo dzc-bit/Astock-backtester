@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import hashlib
+from typing import Callable
+
 import pandas as pd
 
 from astock_backtester.conditions import evaluate_condition, evaluate_group
@@ -27,6 +30,24 @@ REQUIRED_BASE_COLUMNS = {
     "float_market_cap",
     "main_net_inflow",
 }
+
+
+def _stock_pool_mask(data: pd.DataFrame, settings: BacktestSettings) -> pd.Series:
+    symbols = data["symbol"].astype(str)
+    if settings.stock_pool == "all":
+        return pd.Series(True, index=data.index)
+    if settings.stock_pool == "custom":
+        selected = {str(symbol).strip() for symbol in settings.custom_symbols if str(symbol).strip()}
+        return symbols.isin(selected)
+    if settings.stock_pool == "main_board":
+        return symbols.str.startswith(("000", "001", "002", "003", "600", "601", "603", "605"))
+    if settings.stock_pool == "gem":
+        return symbols.str.startswith("300")
+    if settings.stock_pool == "star":
+        return symbols.str.startswith("688")
+    if settings.stock_pool == "beijing":
+        return symbols.str.startswith(("43", "83", "87", "88", "92"))
+    return pd.Series(True, index=data.index)
 
 
 def _preflight(frame: pd.DataFrame, strategy: StrategyConfig) -> list[PreflightIssue]:
@@ -121,6 +142,42 @@ def _next_trade_date(dates: list[pd.Timestamp], signal_date: pd.Timestamp) -> pd
     return None
 
 
+def _numeric_value(row: pd.Series, column: str) -> float:
+    if column not in row.index:
+        return 0.0
+    value = pd.to_numeric(row[column], errors="coerce")
+    if pd.isna(value):
+        return 0.0
+    return float(value)
+
+
+def _max_numeric_prefix(row: pd.Series, prefix: str) -> float:
+    values = [
+        _numeric_value(row, column)
+        for column in row.index
+        if isinstance(column, str) and column.startswith(prefix)
+    ]
+    return max(values, default=0.0)
+
+
+def _stable_symbol_tiebreaker(row: pd.Series) -> float:
+    key = f"{row.get('trade_date', '')}-{row.get('symbol', '')}".encode("utf-8")
+    digest = hashlib.blake2b(key, digest_size=8).digest()
+    return int.from_bytes(digest, "big") / float(2**64 - 1)
+
+
+def _candidate_rank(row: pd.Series) -> tuple[float, float, float, float, float, float, float]:
+    return (
+        _max_numeric_prefix(row, "volume_ratio_"),
+        _max_numeric_prefix(row, "return_"),
+        _numeric_value(row, "turnover_rate"),
+        _numeric_value(row, "volume"),
+        _numeric_value(row, "main_net_inflow"),
+        _numeric_value(row, "float_market_cap"),
+        _stable_symbol_tiebreaker(row),
+    )
+
+
 def _build_metrics(
     initial_cash: float,
     final_equity: float,
@@ -142,7 +199,13 @@ def _build_metrics(
     )
 
 
-def run_backtest(frame: pd.DataFrame, strategy: StrategyConfig, settings: BacktestSettings) -> BacktestResult:
+def run_backtest(
+    frame: pd.DataFrame,
+    strategy: StrategyConfig,
+    settings: BacktestSettings,
+    on_trade_closed: Callable[[Trade], None] | None = None,
+    on_event: Callable[[dict], None] | None = None,
+) -> BacktestResult:
     issues = _preflight(frame, strategy)
     if any(issue.severity == "error" for issue in issues):
         return _empty_result(issues, settings.initial_cash)
@@ -152,6 +215,7 @@ def run_backtest(frame: pd.DataFrame, strategy: StrategyConfig, settings: Backte
         (data["trade_date"] >= pd.Timestamp(settings.start_date))
         & (data["trade_date"] <= pd.Timestamp(settings.end_date))
     ].copy()
+    data = data.loc[_stock_pool_mask(data, settings)].copy()
     trade_dates = list(sorted(data["trade_date"].unique()))
     cash = settings.initial_cash
     trades: list[Trade] = []
@@ -159,11 +223,28 @@ def run_backtest(frame: pd.DataFrame, strategy: StrategyConfig, settings: Backte
     equity_curve: list[EquityPoint] = []
     peak_equity = settings.initial_cash
 
-    for signal_date in trade_dates:
+    total_trade_days = len(trade_dates)
+    for day_index, signal_date in enumerate(trade_dates, start=1):
         today = data[data["trade_date"] == signal_date]
+        if on_event is not None:
+            on_event(
+                {
+                    "type": "progress",
+                    "trade_date": pd.Timestamp(signal_date).date(),
+                    "scanned_days": day_index,
+                    "total_days": total_trade_days,
+                    "open_positions": len(open_positions),
+                    "closed_trades": len(trades),
+                    "candidates": 0,
+                    "message": f"扫描 {pd.Timestamp(signal_date).date()}：持仓 {len(open_positions)} 只，已平仓 {len(trades)} 笔",
+                }
+            )
 
         still_open: list[Trade] = []
         for position in open_positions:
+            if pd.Timestamp(signal_date).date() <= position.buy_date:
+                still_open.append(position)
+                continue
             held_days = sum(position.buy_date <= item.date() <= pd.Timestamp(signal_date).date() for item in trade_dates)
             row = today[today["symbol"] == position.symbol]
             if row.empty:
@@ -192,15 +273,22 @@ def run_backtest(frame: pd.DataFrame, strategy: StrategyConfig, settings: Backte
                 position.pnl = proceeds - (position.buy_price * position.shares)
                 position.pnl_pct = (sell_price / position.buy_price) - 1
                 trades.append(position)
+                if on_trade_closed is not None:
+                    on_trade_closed(position)
+                if on_event is not None:
+                    on_event({"type": "trade_closed", "trade": position})
             else:
                 still_open.append(position)
         open_positions = still_open
 
         next_date = _next_trade_date(trade_dates, signal_date)
+        candidate_count = 0
         if next_date is not None and len(open_positions) < settings.max_positions:
             candidates: list[tuple[pd.Series, list[str]]] = []
             for _, row in today.iterrows():
                 if bool(row["is_suspended"]):
+                    continue
+                if settings.exclude_st and "is_st" in row.index and bool(row["is_st"]):
                     continue
                 if int(row["listing_days"]) < settings.min_listing_days:
                     continue
@@ -211,6 +299,24 @@ def run_backtest(frame: pd.DataFrame, strategy: StrategyConfig, settings: Backte
                 if entry_ok:
                     candidates.append((row, market_reasons + entry_reasons))
 
+            candidates.sort(key=lambda candidate: _candidate_rank(candidate[0]), reverse=True)
+            candidate_count = len(candidates)
+            if on_event is not None:
+                on_event(
+                    {
+                        "type": "progress",
+                        "trade_date": pd.Timestamp(signal_date).date(),
+                        "scanned_days": day_index,
+                        "total_days": total_trade_days,
+                        "open_positions": len(open_positions),
+                        "closed_trades": len(trades),
+                        "candidates": candidate_count,
+                        "message": (
+                            f"扫描 {pd.Timestamp(signal_date).date()}：候选 {candidate_count} 只，"
+                            f"持仓 {len(open_positions)} 只"
+                        ),
+                    }
+                )
             for row, reasons in candidates[: settings.max_daily_buys]:
                 if len(open_positions) >= settings.max_positions:
                     break
@@ -225,16 +331,17 @@ def run_backtest(frame: pd.DataFrame, strategy: StrategyConfig, settings: Backte
                     continue
                 cost = shares * buy_price * (1 + settings.fee_rate)
                 cash -= cost
-                open_positions.append(
-                    Trade(
-                        symbol=str(row["symbol"]),
-                        buy_signal_date=pd.Timestamp(signal_date).date(),
-                        buy_date=pd.Timestamp(next_date).date(),
-                        buy_price=float(buy["open"]),
-                        shares=shares,
-                        buy_reason=reasons,
-                    )
+                opened_trade = Trade(
+                    symbol=str(row["symbol"]),
+                    buy_signal_date=pd.Timestamp(signal_date).date(),
+                    buy_date=pd.Timestamp(next_date).date(),
+                    buy_price=float(buy["open"]),
+                    shares=shares,
+                    buy_reason=reasons,
                 )
+                open_positions.append(opened_trade)
+                if on_event is not None:
+                    on_event({"type": "trade_opened", "trade": opened_trade})
 
         market_value = 0.0
         for position in open_positions:

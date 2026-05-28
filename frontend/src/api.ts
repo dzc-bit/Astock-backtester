@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   BacktestResult,
+  BacktestStreamHandlers,
   BacktestSettingsConfig,
   DataServiceHealth,
   DataServiceStatus,
@@ -8,6 +9,11 @@ import type {
   DailyBarsCoverageResponse,
   FetchResult,
   ImportResult,
+  ConditionValidationResult,
+  MarketNewsResponse,
+  RealtimeMarketSnapshot,
+  RecommendedStrategiesResponse,
+  RiskAlertsResponse,
   StrategyConfig,
   SyncJobStatus
 } from "./types";
@@ -124,6 +130,228 @@ export async function loadDataServiceLogs(baseUrl: string): Promise<{ items: Arr
   return serviceFetch(baseUrl, "/logs/recent");
 }
 
+export async function loadRealtimeMarketSnapshot(baseUrl: string): Promise<RealtimeMarketSnapshot> {
+  if (!isTauriRuntime()) {
+    return {
+      status: "live",
+      source: "browser-preview",
+      updated_at: new Date("2026-05-27T10:30:00+08:00").toISOString(),
+      indexes: [
+        {
+          symbol: "sh000001",
+          name: "上证指数",
+          last: 3120.5,
+          previous_close: 3100,
+          change: 20.5,
+          change_pct: 0.0066,
+          source: "browser-preview",
+          updated_at: new Date("2026-05-27T10:30:00+08:00").toISOString()
+        },
+        {
+          symbol: "sz399001",
+          name: "深证成指",
+          last: 9800.2,
+          previous_close: 9700,
+          change: 100.2,
+          change_pct: 0.0103,
+          source: "browser-preview",
+          updated_at: new Date("2026-05-27T10:30:00+08:00").toISOString()
+        }
+      ],
+      breadth: { up: 3200, down: 1700, flat: 200, total: 5100, source: "browser-preview" },
+      strong_sectors: [
+        { name: "半导体", change_pct: 0.036, leading_symbol: "688001", source: "browser-preview" },
+        { name: "电力设备", change_pct: 0.024, leading_symbol: "300750", source: "browser-preview" }
+      ],
+      yesterday_strong_sectors: [
+        { name: "半导体", change_pct: 0.031, leading_symbol: "688001", source: "browser-preview" },
+        { name: "机器人", change_pct: 0.022, leading_symbol: "300024", source: "browser-preview" }
+      ],
+      message: "浏览器预览实时行情"
+    };
+  }
+  return serviceFetch<RealtimeMarketSnapshot>(baseUrl, "/realtime/market-snapshot");
+}
+
+export async function loadMarketNews(baseUrl: string): Promise<MarketNewsResponse> {
+  if (!isTauriRuntime()) {
+    return {
+      updated_at: new Date("2026-05-27T10:30:00+08:00").toISOString(),
+      source: "browser-preview",
+      diagnostics: [],
+      items: [
+        {
+          title: "政策利好推动科技板块走强",
+          summary: "半导体、AI 应用方向盘中活跃。",
+          source: "东方财富",
+          published_at: new Date("2026-05-27T10:20:00+08:00").toISOString(),
+          url: "https://example.test/news",
+          tags: ["科技", "政策"],
+          sentiment: "positive"
+        }
+      ]
+    };
+  }
+  return serviceFetch<MarketNewsResponse>(baseUrl, "/market/news");
+}
+
+export async function loadRiskAlerts(baseUrl: string): Promise<RiskAlertsResponse> {
+  if (!isTauriRuntime()) {
+    return {
+      updated_at: new Date("2026-05-27T10:30:00+08:00").toISOString(),
+      source: "browser-preview",
+      items: [
+        {
+          symbol: "000001",
+          name: "*ST示例",
+          risk_type: "ST风险",
+          reason: "股票名称包含 *ST，存在退市风险警示。",
+          severity: "high",
+          source: "browser-preview",
+          detected_at: new Date("2026-05-27T10:30:00+08:00").toISOString()
+        }
+      ]
+    };
+  }
+  return serviceFetch<RiskAlertsResponse>(baseUrl, "/risk/alerts");
+}
+
+export async function validateConditionExpression(
+  baseUrl: string,
+  text: string,
+  mode: "entry" | "exit" = "entry"
+): Promise<ConditionValidationResult> {
+  if (!isTauriRuntime()) {
+    if (text.trim() === "收盘价站上20日均线") {
+      return {
+        ok: true,
+        normalized_text: text.trim(),
+        condition: {
+          id: "expr-close-above-ma",
+          condition_id: "close_above_ma",
+          enabled: true,
+          params: { window: 20 },
+          data_lag_days: 0,
+          expression: text.trim()
+        },
+        errors: [],
+        examples: ["收盘价站上20日均线", "量比2日介于1.2到2.5"]
+      };
+    }
+    if (mode === "exit" && ["突破20日最低", "跌破20日低点"].includes(text.trim())) {
+      return {
+        ok: true,
+        normalized_text: text.trim(),
+        condition: {
+          id: "expr-breakdown-below-low",
+          condition_id: "breakdown_below_n_day_low",
+          enabled: true,
+          params: { window: 20 },
+          data_lag_days: 0,
+          expression: text.trim()
+        },
+        errors: [],
+        examples: ["收盘价跌破3日均线", "跌破20日低点", "突破20日最低"]
+      };
+    }
+    return {
+      ok: false,
+      normalized_text: text.trim(),
+      condition: null,
+      errors: [{ code: "unrecognized_condition", message: mode === "exit" ? "无法识别离场条件，请参考样例改写。" : "无法识别条件，请参考样例改写。" }],
+      examples: mode === "exit" ? ["收盘价跌破3日均线", "跌破20日低点"] : ["收盘价站上20日均线", "量比2日介于1.2到2.5"]
+    };
+  }
+  return serviceFetch<ConditionValidationResult>(baseUrl, "/strategy/conditions/validate", { text, mode });
+}
+
+export async function loadRecommendedStrategies(baseUrl: string): Promise<RecommendedStrategiesResponse> {
+  if (!isTauriRuntime()) {
+    return {
+      items: [
+        {
+          id: "volume-breakout",
+          name: "放量突破",
+          description: "价格突破前高并伴随量能放大。",
+          suitable_market: "指数温和上行、题材活跃时使用。",
+          risk_note: "避免连续大涨后追高。",
+          example_conditions: ["突破20日新高", "量比2日介于1.2到2.5"],
+          strategy: {
+            name: "放量突破",
+            market_filters: [],
+            entry_groups: [
+              {
+                id: "entry",
+                operator: "and",
+                conditions: [
+                  {
+                    id: "preset-breakout",
+                    condition_id: "breakout_above_n_day_high",
+                    enabled: true,
+                    params: { window: 20 },
+                    data_lag_days: 0,
+                    expression: "突破20日新高"
+                  }
+                ]
+              }
+            ],
+            exit_rules: [],
+            score_threshold: null
+          }
+        },
+        {
+          id: "extreme-chasing-stress-test",
+          name: "极端追高压力测试",
+          description: "故意追放量突破后的高位票，用来验证回测能暴露大幅亏损。",
+          suitable_market: "仅用于压力测试回测链路。",
+          risk_note: "高位放量后隔日低开会放大亏损，不作为实盘建议。",
+          example_conditions: ["突破2日新高", "量比2日介于2到5", "跌破2日低点离场"],
+          strategy: {
+            name: "极端追高压力测试",
+            market_filters: [],
+            entry_groups: [
+              {
+                id: "entry",
+                operator: "and",
+                conditions: [
+                  {
+                    id: "stress-breakout",
+                    condition_id: "breakout_above_n_day_high",
+                    enabled: true,
+                    params: { window: 2 },
+                    data_lag_days: 0,
+                    expression: "突破2日新高"
+                  },
+                  {
+                    id: "stress-volume",
+                    condition_id: "volume_ratio_between",
+                    enabled: true,
+                    params: { window: 2, min: 2.0, max: 5.0 },
+                    data_lag_days: 0,
+                    expression: "量比2日介于2到5"
+                  }
+                ]
+              }
+            ],
+            exit_rules: [
+              {
+                id: "stress-exit-low",
+                condition_id: "breakdown_below_n_day_low",
+                enabled: true,
+                params: { window: 2 },
+                data_lag_days: 0,
+                expression: "跌破2日低点"
+              }
+            ],
+            score_threshold: null
+          }
+        }
+      ]
+    };
+  }
+  return serviceFetch<RecommendedStrategiesResponse>(baseUrl, "/strategy/recommended");
+}
+
 export async function loadDailyBarsCoverage(
   baseUrl: string,
   symbols: string[],
@@ -225,6 +453,27 @@ export async function startFullMarketSync(
   });
 }
 
+export async function loadSyncJob(baseUrl: string, jobId: string): Promise<{ job: SyncJobStatus }> {
+  if (!isTauriRuntime()) {
+    return {
+      job: {
+        job_id: jobId,
+        mode: "full_market_bootstrap",
+        status: "completed",
+        total_symbols: 2,
+        completed_symbols: 2,
+        failed_symbols: 0,
+        imported_rows: 20,
+        current_symbol: null,
+        start_date: "2015-01-01",
+        end_date: "2026-05-26",
+        errors: []
+      }
+    };
+  }
+  return serviceFetch<{ job: SyncJobStatus }>(baseUrl, `/sync/jobs/${jobId}`);
+}
+
 export async function runBacktestWithDataService(
   baseUrl: string,
   strategy: StrategyConfig,
@@ -238,6 +487,85 @@ export async function runBacktestWithDataService(
     settings
   });
   return response.result;
+}
+
+export async function runBacktestStreamWithDataService(
+  baseUrl: string,
+  strategy: StrategyConfig,
+  settings: BacktestSettingsConfig,
+  handlers: BacktestStreamHandlers = {}
+): Promise<BacktestResult> {
+  if (!isTauriRuntime()) {
+    handlers.onPhase?.("校验参数");
+    handlers.onPhase?.("读取本地数据");
+    handlers.onProgress?.({ message: "扫描 2024-01-05：候选 1 只，持仓 0 只" });
+    handlers.onTrade?.(demoResult.trades[0]);
+    handlers.onResult?.(demoResult);
+    return demoResult;
+  }
+
+  const response = await fetch(`${baseUrl}/run/backtest/stream`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ strategy, settings })
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`HTTP ${response.status}: ${text || "local data service request failed"}`);
+  }
+  if (!response.body) {
+    throw new Error("Backtest stream is not available in this browser.");
+  }
+
+  const decoder = new TextDecoder();
+  const reader = response.body.getReader();
+  let buffer = "";
+  let finalResult: BacktestResult | null = null;
+
+  const handleLine = (line: string) => {
+    if (!line.trim()) {
+      return;
+    }
+    const event = JSON.parse(line) as
+      | { type: "phase"; phase: string }
+      | { type: "progress"; message: string; trade_date?: string; scanned_days?: number; total_days?: number; open_positions?: number; closed_trades?: number; candidates?: number }
+      | { type: "trade_opened"; trade: BacktestResult["trades"][number] }
+      | { type: "trade_closed"; trade: BacktestResult["trades"][number] }
+      | { type: "result"; result: BacktestResult }
+      | { type: "error"; message?: string };
+    if (event.type === "phase") {
+      handlers.onPhase?.(event.phase);
+    } else if (event.type === "progress") {
+      handlers.onProgress?.(event);
+    } else if (event.type === "trade_opened" || event.type === "trade_closed") {
+      handlers.onTrade?.(event.trade);
+    } else if (event.type === "result") {
+      finalResult = event.result;
+      handlers.onResult?.(event.result);
+    } else if (event.type === "error") {
+      throw new Error(event.message ?? "Backtest stream failed.");
+    }
+  };
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) {
+      break;
+    }
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split(/\r?\n/);
+    buffer = lines.pop() ?? "";
+    for (const line of lines) {
+      handleLine(line);
+    }
+  }
+  buffer += decoder.decode();
+  handleLine(buffer);
+
+  if (!finalResult) {
+    throw new Error("Backtest stream ended before a final result was produced.");
+  }
+  return finalResult;
 }
 
 export async function runConfiguredBacktest(strategy: StrategyConfig, settings: BacktestSettingsConfig): Promise<BacktestResult> {
