@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use tauri::{AppHandle, Manager};
 
-use crate::python_runtime::python_command;
+use crate::python_runtime::{backend_dir, project_root, python_command};
 
 #[derive(Clone, serde::Serialize)]
 pub struct DataServiceStatus {
@@ -111,9 +111,12 @@ impl DataServiceManager {
 
         let port = choose_port()?;
         let mut command = if cfg!(debug_assertions) {
+            let root = project_root()?;
+            let backend_path = backend_dir(&root);
             let mut python = python_command()?;
             python.args(build_service_args(port, &resolved_cache_dir));
-            python.env("PYTHONPATH", "backend");
+            python.current_dir(&root);
+            python.env("PYTHONPATH", backend_path);
             python
         } else {
             let mut packaged = Command::new(packaged_service_path(app)?);

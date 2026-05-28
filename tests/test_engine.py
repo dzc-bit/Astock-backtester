@@ -41,6 +41,8 @@ def test_backtest_reports_metrics_and_equity_curve(basic_strategy, basic_setting
     assert result.metrics.trade_count >= 1
     assert result.equity_curve
     assert result.metrics.max_drawdown_pct <= 0
+    assert result.metrics.average_position_pct > 0
+    assert result.metrics.max_position_pct >= result.metrics.average_position_pct
 
 
 def test_preflight_reports_missing_capital_flow_when_required(basic_strategy, basic_settings):
@@ -208,6 +210,28 @@ def test_backtest_never_sells_on_the_buy_date_under_t_plus_one(basic_strategy, b
         if trade.sell_date is not None and trade.sell_date <= trade.buy_date
     ]
     assert same_day_exits == []
+
+
+def test_backtest_applies_single_position_ratio_and_board_lot_rounding(basic_strategy, basic_settings):
+    settings = basic_settings.model_copy(
+        update={
+            "position_sizing_mode": "fixed_ratio",
+            "position_size_pct": 0.15,
+            "slippage_rate": 0,
+            "fee_rate": 0,
+            "stamp_tax_rate": 0,
+        }
+    )
+
+    result = run_backtest(enriched_data(), basic_strategy, settings)
+
+    assert result.trades
+    trade = result.trades[0]
+    assert trade.shares == 1200
+    assert trade.planned_amount == 15000
+    assert trade.buy_amount == 14400
+    assert trade.target_position_pct == 0.15
+    assert trade.actual_position_pct == 0.144
 
 
 def test_exit_rule_can_sell_when_price_breaks_prior_low():

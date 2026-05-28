@@ -72,6 +72,8 @@ class BacktestSettings(BaseModel):
     fee_rate: float = 0.0003
     stamp_tax_rate: float = 0.0005
     slippage_rate: float = 0.0005
+    position_sizing_mode: Literal["fixed_ratio", "equal_slots"] = "equal_slots"
+    position_size_pct: float = 0.2
     fixed_holding_days: int = 5
     take_profit_pct: float | None = None
     stop_loss_pct: float | None = None
@@ -92,6 +94,8 @@ class BacktestSettings(BaseModel):
             raise ValueError("stamp_tax_rate must be >= 0")
         if self.slippage_rate < 0:
             raise ValueError("slippage_rate must be >= 0")
+        if self.position_size_pct <= 0 or self.position_size_pct > 1:
+            raise ValueError("position_size_pct must be > 0 and <= 1")
         if self.fixed_holding_days < 1:
             raise ValueError("fixed_holding_days must be >= 1")
         if self.max_positions < 1:
@@ -281,6 +285,11 @@ class Trade(BaseModel):
     buy_price: float
     sell_price: float | None = None
     shares: int
+    planned_amount: float
+    buy_amount: float
+    sell_amount: float | None = None
+    target_position_pct: float
+    actual_position_pct: float
     buy_reason: list[str]
     sell_reason: list[str] = Field(default_factory=list)
     blocked_reason: str | None = None
@@ -303,6 +312,8 @@ class BacktestMetrics(BaseModel):
     win_rate_pct: float
     trade_count: int
     average_trade_return_pct: float
+    average_position_pct: float
+    max_position_pct: float
 
 
 class BacktestResult(BaseModel):

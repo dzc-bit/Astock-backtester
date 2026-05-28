@@ -4,11 +4,23 @@ type Props = {
   trades: Trade[];
 };
 
+function formatPercent(value: number): string {
+  return `${(value * 100).toFixed(2)}%`;
+}
+
+function formatCompactMoney(value: number | null | undefined): string {
+  if (value == null) {
+    return "--";
+  }
+  if (Math.abs(value) >= 10000) {
+    return `${(value / 10000).toFixed(2)}万`;
+  }
+  return value.toFixed(2);
+}
+
 function translateReason(reason: string): string {
   if (reason.includes("float market cap")) {
-    return reason
-      .replace("float market cap", "流通市值")
-      .replace("in", "位于区间");
+    return reason.replace("float market cap", "流通市值").replace("in", "位于区间");
   }
   if (reason.includes("main net inflow")) {
     return reason.replace("main net inflow", "主力净流入");
@@ -32,16 +44,10 @@ function translateReason(reason: string): string {
     return reason.replace("close", "收盘价").replace("below", "低于");
   }
   if (reason.includes("broke prior") && reason.includes("high")) {
-    return reason
-      .replace("close", "收盘价")
-      .replace("broke prior", "突破前")
-      .replace("high", "高点");
+    return reason.replace("close", "收盘价").replace("broke prior", "突破前").replace("high", "高点");
   }
   if (reason.includes("broke prior") && reason.includes("low")) {
-    return reason
-      .replace("close", "收盘价")
-      .replace("broke prior", "跌破前")
-      .replace("low", "低点");
+    return reason.replace("close", "收盘价").replace("broke prior", "跌破前").replace("low", "低点");
   }
   if (reason.includes("fixed holding days reached")) {
     return reason.replace("fixed holding days reached", "达到固定持仓天数");
@@ -78,6 +84,7 @@ export function TradesTable({ trades }: Props) {
               <th>股票</th>
               <th>买入</th>
               <th>卖出</th>
+              <th>仓位</th>
               <th>触发原因</th>
               <th>收益</th>
             </tr>
@@ -85,14 +92,23 @@ export function TradesTable({ trades }: Props) {
           <tbody>
             {trades.length === 0 ? (
               <tr>
-                <td colSpan={5}>暂无交易记录</td>
+                <td colSpan={6}>暂无交易记录</td>
               </tr>
             ) : (
               trades.map((trade) => (
                 <tr key={`${trade.symbol}-${trade.buy_date}`}>
                   <td>{trade.symbol}</td>
-                  <td>{trade.buy_date} @ {trade.buy_price}</td>
+                  <td>
+                    <strong>{trade.buy_date}</strong> @ {trade.buy_price}
+                    <div>{trade.shares} 股</div>
+                  </td>
                   <td>{trade.sell_date ?? "持仓中"}</td>
+                  <td>
+                    <strong>{formatPercent(trade.actual_position_pct)}</strong>
+                    <div>
+                      成交 {formatCompactMoney(trade.buy_amount)} / 计划 {formatCompactMoney(trade.planned_amount)}
+                    </div>
+                  </td>
                   <td>{trade.buy_reason.map(translateReason).join("；")}</td>
                   <td className={trade.pnl_pct == null ? "" : trade.pnl_pct >= 0 ? "up-text" : "down-text"}>
                     {trade.pnl_pct == null ? "持仓中" : `${(trade.pnl_pct * 100).toFixed(2)}%`}

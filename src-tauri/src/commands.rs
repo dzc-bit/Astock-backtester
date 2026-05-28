@@ -4,7 +4,7 @@ use std::process::Stdio;
 use std::sync::Mutex;
 use tauri::{AppHandle, State};
 
-use crate::python_runtime::python_command;
+use crate::python_runtime::{backend_dir, project_root, python_command};
 use crate::service_manager::{DataServiceManager, DataServiceStatus};
 
 #[tauri::command]
@@ -21,10 +21,13 @@ pub fn ensure_data_service(
 
 #[tauri::command]
 pub fn backend_command(payload: Value) -> Result<Value, String> {
+    let root = project_root()?;
+    let backend_path = backend_dir(&root);
     let mut command = python_command()?;
     let mut child = command
         .args(["-m", "astock_backtester.cli"])
-        .env("PYTHONPATH", "backend")
+        .current_dir(&root)
+        .env("PYTHONPATH", backend_path)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

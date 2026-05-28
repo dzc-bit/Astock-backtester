@@ -145,6 +145,8 @@ export const defaultSettings: BacktestSettingsConfig = {
   stock_pool: "all",
   custom_symbols: [],
   benchmark_symbol: "000300.SH",
+  position_sizing_mode: "fixed_ratio",
+  position_size_pct: 0.5,
   fixed_holding_days: 3,
   take_profit_pct: 0.08,
   stop_loss_pct: -0.05,
