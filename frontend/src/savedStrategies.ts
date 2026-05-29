@@ -1,0 +1,113 @@
+import type { ConditionGroup, ConditionNode, SavedStrategyPreset, StrategyConfig } from "./types";
+
+const STORAGE_KEY = "astock-saved-strategies";
+
+function sortParams(params: ConditionNode["params"]): ConditionNode["params"] {
+  return Object.fromEntries(Object.entries(params).sort(([left], [right]) => left.localeCompare(right)));
+}
+
+function normalizeCondition(condition: ConditionNode) {
+  return {
+    condition_id: condition.condition_id,
+    enabled: condition.enabled,
+    params: sortParams(condition.params),
+    data_lag_days: condition.data_lag_days,
+    expression: condition.expression ?? null,
+    weight: condition.weight ?? null
+  };
+}
+
+function normalizeGroup(group: ConditionGroup) {
+  return {
+    operator: group.operator,
+    conditions: group.conditions.map(normalizeCondition)
+  };
+}
+
+function uniqueSavedStrategyName(baseName: string, existingNames: string[]): string {
+  const normalizedBase = baseName.trim() || "自定义策略";
+  if (!existingNames.includes(normalizedBase)) {
+    return normalizedBase;
+  }
+  let index = 2;
+  while (existingNames.includes(`${normalizedBase}（${index}）`)) {
+    index += 1;
+  }
+  return `${normalizedBase}（${index}）`;
+}
+
+export function cloneStrategyConfig(strategy: StrategyConfig): StrategyConfig {
+  return JSON.parse(JSON.stringify(strategy)) as StrategyConfig;
+}
+
+export function strategySignature(strategy: StrategyConfig): string {
+  return JSON.stringify({
+    name: strategy.name.trim(),
+    market_filters: strategy.market_filters.map(normalizeCondition),
+    entry_groups: strategy.entry_groups.map(normalizeGroup),
+    exit_rules: strategy.exit_rules.map(normalizeCondition),
+    score_threshold: strategy.score_threshold ?? null
+  });
+}
+
+export function hasSavableRules(strategy: StrategyConfig): boolean {
+  return strategy.entry_groups.some((group) => group.conditions.length > 0) && strategy.exit_rules.length > 0;
+}
+
+export function loadSavedStrategies(): SavedStrategyPreset[] {
+  if (typeof window === "undefined") {
+    return [];
+  }
+  try {
+    const raw = window.localStorage.getItem(STORAGE_KEY);
+    if (!raw) {
+      return [];
+    }
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+    return parsed.flatMap((item) => {
+      if (
+        !item ||
+        typeof item !== "object" ||
+        typeof item.id !== "string" ||
+        typeof item.name !== "string" ||
+        typeof item.saved_at !== "string" ||
+        !item.strategy
+      ) {
+        return [];
+      }
+      return [
+        {
+          id: item.id,
+          name: item.name,
+          saved_at: item.saved_at,
+          strategy: cloneStrategyConfig(item.strategy as StrategyConfig)
+        }
+      ];
+    });
+  } catch {
+    return [];
+  }
+}
+
+export function persistSavedStrategies(items: SavedStrategyPreset[]): void {
+  if (typeof window === "undefined") {
+    return;
+  }
+  window.localStorage.setItem(STORAGE_KEY, JSON.stringify(items));
+}
+
+export function createSavedStrategyPreset(strategy: StrategyConfig, existing: SavedStrategyPreset[]): SavedStrategyPreset {
+  const nextName = uniqueSavedStrategyName(strategy.name, existing.map((item) => item.name));
+  return {
+    id: `saved-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    name: nextName,
+    saved_at: new Date().toISOString(),
+    strategy: cloneStrategyConfig({
+      ...strategy,
+      name: nextName
+    })
+  };
+}

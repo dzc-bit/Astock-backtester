@@ -7,6 +7,7 @@ import type {
   ConditionValidationResult,
   DatasetCoverage,
   RecommendedStrategy,
+  SavedStrategyPreset,
   StrategyConfig
 } from "../types";
 import { RecommendedStrategies } from "./RecommendedStrategies";
@@ -22,8 +23,12 @@ type Props = {
   isValidatingCondition?: boolean;
   validationExamples: string[];
   recommendedStrategies: RecommendedStrategy[];
+  savedStrategies: SavedStrategyPreset[];
+  strategySaveMessage?: string | null;
   onValidateCondition: (text: string) => void;
   validateConditionText: (text: string, mode?: "entry" | "exit") => Promise<ConditionValidationResult>;
+  onApplySavedStrategy: (preset: SavedStrategyPreset) => void;
+  onDeleteSavedStrategy: (presetId: string) => void;
   onSettingsDraftErrorsChange?: (errors: string[]) => void;
 };
 
@@ -103,12 +108,25 @@ const defaultExamples = [
   "突破20日新高"
 ];
 
+const entryTemplates = [
+  "收盘价站上N日均线",
+  "量比N日介于A到B",
+  "流通市值X亿到Y亿",
+  "换手率A%到B%",
+  "近N日涨幅小于X%",
+  "近N日主力净流入大于X万/亿",
+  "突破N日新高",
+  "MACD柱线大于X"
+];
+
 const exitExamples = [
   "收盘价跌破3日均线",
   "跌破20日低点",
   "突破20日最低",
   "创20日新低"
 ];
+
+const exitTemplates = ["收盘价跌破N日均线", "跌破N日低点", "创N日新低"];
 
 const numericSettingLabels: Partial<Record<keyof BacktestSettingsConfig, string>> = {
   initial_cash: "初始资金",
@@ -233,6 +251,19 @@ function validateDrafts(drafts: Record<string, string>): string[] {
   });
 }
 
+function formatSavedTime(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+  return new Intl.DateTimeFormat("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit"
+  }).format(date);
+}
+
 export function StrategyWorkbench({
   coverage,
   settings,
@@ -244,8 +275,12 @@ export function StrategyWorkbench({
   isValidatingCondition = false,
   validationExamples,
   recommendedStrategies,
+  savedStrategies,
+  strategySaveMessage = null,
   onValidateCondition,
   validateConditionText,
+  onApplySavedStrategy,
+  onDeleteSavedStrategy,
   onSettingsDraftErrorsChange
 }: Props) {
   const dateRange = settingDateRange(coverage);
@@ -414,6 +449,72 @@ export function StrategyWorkbench({
         <h3>回测设置</h3>
         <h3>策略条件</h3>
       </div>
+      {strategySaveMessage ? <div className="strategy-save-banner">{strategySaveMessage}</div> : null}
+
+      <section className="saved-strategies-panel" aria-label="已保存策略">
+        <div className="saved-strategies-head">
+          <div>
+            <span className="section-kicker">运行完成后可保存到这里</span>
+            <h3>已保存策略</h3>
+          </div>
+          <span className="status-pill compact">{savedStrategies.length} 个</span>
+        </div>
+        {savedStrategies.length === 0 ? (
+          <div className="saved-strategy-empty">
+            完成入场规则、离场规则并运行回测后，可选择把当前策略保存到这里，后续可以一键再次套用。
+          </div>
+        ) : (
+          <div className="saved-strategy-grid">
+            {savedStrategies.map((preset) => {
+              const presetGroup = firstGroup(preset.strategy);
+              return (
+                <article className="saved-strategy-card" key={preset.id}>
+                  <div className="saved-strategy-copy">
+                    <strong>{preset.name}</strong>
+                    <small>保存于 {formatSavedTime(preset.saved_at)}</small>
+                    <p>
+                      入场 {presetGroup.conditions.length} 条 / 离场 {preset.strategy.exit_rules.length} 条
+                    </p>
+                  </div>
+                  <div className="strategy-chip-row">
+                    {presetGroup.conditions.slice(0, 2).map((condition) => {
+                      const meta = conditionMetaById[condition.condition_id] as ConditionMeta | undefined;
+                      return <span key={condition.id}>{readableConditionText(condition, meta)}</span>;
+                    })}
+                    {preset.strategy.exit_rules[0] ? (
+                      <span>
+                        离场：
+                        {readableConditionText(
+                          preset.strategy.exit_rules[0],
+                          conditionMetaById[preset.strategy.exit_rules[0].condition_id] as ConditionMeta | undefined
+                        )}
+                      </span>
+                    ) : null}
+                  </div>
+                  <div className="saved-strategy-actions">
+                    <button
+                      className="primary-button"
+                      type="button"
+                      onClick={() => onApplySavedStrategy(preset)}
+                      aria-label={`套用已保存策略${preset.name}`}
+                    >
+                      套用已保存策略
+                    </button>
+                    <button
+                      className="secondary-button"
+                      type="button"
+                      onClick={() => onDeleteSavedStrategy(preset.id)}
+                      aria-label={`删除已保存策略${preset.name}`}
+                    >
+                      删除
+                    </button>
+                  </div>
+                </article>
+              );
+            })}
+          </div>
+        )}
+      </section>
 
       <RecommendedStrategies
         items={recommendedStrategies}
@@ -648,10 +749,38 @@ export function StrategyWorkbench({
       <div className="strategy-grid">
         <div className="condition-library">
           <h3>写入条件</h3>
-          <div className="condition-expression-box">
+          <section aria-label="条件写法帮助" className="condition-help-grid">
+            <article className="condition-expression-box condition-help-card">
+              <div className="condition-help-copy">
+                <h4 className="condition-help-title">入场条件写法模板</h4>
+                <p className="condition-help-text">写不出来时，先照着模板替换数字，再点校验条件。</p>
+              </div>
+              <div className="condition-examples">
+                {entryTemplates.map((template) => (
+                  <span key={template} className="template-chip">
+                    {template}
+                  </span>
+                ))}
+              </div>
+            </article>
+            <article className="condition-expression-box condition-help-card">
+              <div className="condition-help-copy">
+                <h4 className="condition-help-title">离场条件写法模板</h4>
+                <p className="condition-help-text">离场尽量写成明确触发句，避免“感觉走弱”这类无法回测的描述。</p>
+              </div>
+              <div className="condition-examples">
+                {exitTemplates.map((template) => (
+                  <span key={template} className="template-chip">
+                    {template}
+                  </span>
+                ))}
+              </div>
+            </article>
+          </section>
+          <div className="condition-expression-box exit-expression-box entry-expression-box">
             <span className="condition-example-label">样例：{examples[0]}</span>
             <label>
-              新增条件表达式
+              新增入场条件表达式
               <input
                 aria-label="新增条件表达式"
                 value={conditionText}
@@ -660,18 +789,24 @@ export function StrategyWorkbench({
               />
             </label>
             <div className="inline-actions">
-              <button className="secondary-button" type="button" onClick={() => onValidateCondition(conditionText)}>
+              <button
+                className="secondary-button"
+                type="button"
+                aria-label="校验条件"
+                onClick={() => onValidateCondition(conditionText)}
+              >
                 <CheckCircle2 size={16} aria-hidden="true" />
-                {isValidatingCondition ? "校验中" : "校验条件"}
+                {isValidatingCondition ? "校验中" : "校验入场条件"}
               </button>
               <button
                 className="primary-button"
                 type="button"
+                aria-label="添加已校验条件"
                 onClick={addValidatedCondition}
                 disabled={!conditionValidation?.ok || !conditionValidation.condition}
               >
                 <Plus size={16} aria-hidden="true" />
-                添加已校验条件
+                添加入场条件
               </button>
             </div>
             <div className={`condition-validation ${conditionValidation?.ok ? "ok" : conditionValidation ? "bad" : ""}`}>
@@ -682,7 +817,7 @@ export function StrategyWorkbench({
               ) : conditionValidation ? (
                 <span>{conditionValidation.errors[0]?.message ?? "无法识别条件，请参考样例改写。"}</span>
               ) : (
-                <span>先写条件并校验，识别成功后才能加入策略。</span>
+                <span>入场条件校验成功后，会直接写入策略并参与回测买入判断。</span>
               )}
             </div>
             {entryAddMessage ? <div className="condition-validation ok">{entryAddMessage}</div> : null}

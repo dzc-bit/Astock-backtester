@@ -337,6 +337,8 @@ describe("A 股回测工作台界面", () => {
   });
 
   afterEach(() => {
+    window.localStorage.clear();
+    vi.restoreAllMocks();
     vi.useRealTimers();
   });
 
@@ -885,6 +887,73 @@ describe("A 股回测工作台界面", () => {
         onResult: expect.any(Function)
       })
     );
+  });
+
+  it("asks to save the strategy after entry and exit rules run successfully, then stores it in 策略配置", async () => {
+    const user = userEvent.setup();
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const savedName = "市场热度 + 市值量价筛选";
+    render(<App />);
+
+    await screen.findByText("日线行情");
+    await user.clear(screen.getByLabelText("新增条件表达式"));
+    await user.type(screen.getByLabelText("新增条件表达式"), "收盘价站上20日均线");
+    await user.click(screen.getByRole("button", { name: "校验条件" }));
+    await screen.findByText(/可识别：收盘价站上均线/);
+    await user.click(screen.getByRole("button", { name: "添加已校验条件" }));
+
+    await user.clear(screen.getByLabelText("新增离场条件表达式"));
+    await user.type(screen.getByLabelText("新增离场条件表达式"), "突破20日最低");
+    await user.click(screen.getByRole("button", { name: "校验离场条件" }));
+    await screen.findByText(/离场可识别：跌破前低离场/);
+    await user.click(screen.getByRole("button", { name: "添加离场条件" }));
+
+    await user.click(screen.getByRole("button", { name: "运行历史回测" }));
+
+    expect(confirmSpy).toHaveBeenCalledWith("当前入场规则和离场规则已成功运行回测，是否保存到策略配置？");
+    expect(await screen.findByText(`已保存策略：${savedName}`)).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "已保存策略" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: `套用已保存策略${savedName}` })).toBeInTheDocument();
+    expect(screen.getByText(savedName)).toBeInTheDocument();
+
+    const savedRaw = window.localStorage.getItem("astock-saved-strategies");
+    expect(savedRaw).not.toBeNull();
+    const savedStrategies = JSON.parse(savedRaw ?? "[]") as Array<{ name: string }>;
+    expect(savedStrategies).toHaveLength(1);
+    expect(savedStrategies[0]?.name).toBe(savedName);
+
+    await user.click(screen.getByRole("button", { name: "套用放量突破" }));
+    await user.click(screen.getByRole("button", { name: `套用已保存策略${savedName}` }));
+    expect(await screen.findByText(`已套用已保存策略：${savedName}`)).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: `删除已保存策略${savedName}` }));
+    expect(await screen.findByText(`已删除已保存策略：${savedName}`)).toBeInTheDocument();
+  });
+
+  it("does not store the strategy when the user declines the save prompt", async () => {
+    const user = userEvent.setup();
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+    render(<App />);
+
+    await screen.findByText("日线行情");
+    await user.clear(screen.getByLabelText("新增条件表达式"));
+    await user.type(screen.getByLabelText("新增条件表达式"), "收盘价站上20日均线");
+    await user.click(screen.getByRole("button", { name: "校验条件" }));
+    await screen.findByText(/可识别：收盘价站上均线/);
+    await user.click(screen.getByRole("button", { name: "添加已校验条件" }));
+
+    await user.clear(screen.getByLabelText("新增离场条件表达式"));
+    await user.type(screen.getByLabelText("新增离场条件表达式"), "突破20日最低");
+    await user.click(screen.getByRole("button", { name: "校验离场条件" }));
+    await screen.findByText(/离场可识别：跌破前低离场/);
+    await user.click(screen.getByRole("button", { name: "添加离场条件" }));
+
+    await user.click(screen.getByRole("button", { name: "运行历史回测" }));
+
+    expect(confirmSpy).toHaveBeenCalledWith("当前入场规则和离场规则已成功运行回测，是否保存到策略配置？");
+    expect(await screen.findByText("本次未保存策略，你可以继续调整后再次运行。")).toBeInTheDocument();
+    expect(window.localStorage.getItem("astock-saved-strategies")).toBeNull();
+    expect(screen.getByText(/完成入场规则、离场规则并运行回测后/)).toBeInTheDocument();
   });
 
   it("validates exit rules with exit-specific low-break conditions before running", async () => {
