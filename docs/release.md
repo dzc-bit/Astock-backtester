@@ -3,7 +3,7 @@
 Windows 桌面版使用 Tauri updater 和 GitHub Releases 发布更新。应用内“检查更新”读取：
 
 ```text
-https://github.com/dzc-bit/A_stock_receiver/releases/latest/download/latest.json
+https://github.com/dzc-bit/Astock-backtester/releases/latest/download/latest.json
 ```
 
 ## 首次迁移
@@ -38,6 +38,8 @@ npm run tauri -- signer generate -w "$env:USERPROFILE\.tauri\a-stock-receiver.ke
 
 如果私钥丢失，已经安装的带更新器版本无法校验新密钥签出的更新包。除非有计划地做一次迁移发布，否则不要轮换密钥。
 
+本次 `v0.1.7` 就属于一次计划内迁移发布：旧私钥已不可用，因此 `v0.1.6` 用户需要手动安装 `v0.1.7`。从 `v0.1.7` 开始，后续版本恢复为正常的应用内更新流程。
+
 ## 版本号
 
 发布前把这些版本号保持一致：
@@ -60,7 +62,7 @@ v0.1.1
 3. Build the signed NSIS installer.
 4. Generate `release-assets/latest.json` with `scripts/write-latest-json.ps1`.
 5. Create the GitHub Release and upload the installer plus `latest.json`.
-6. Verify `https://github.com/dzc-bit/A_stock_receiver/releases/latest/download/latest.json` returns the new version.
+6. Verify `https://github.com/dzc-bit/Astock-backtester/releases/latest/download/latest.json` returns the new version.
 
 `latest.json` must be generated from the real `.sig` file produced next to the installer. Do not hand-edit a future version into `release-assets/latest.json` before the installer and signature exist, because the app updater verifies that signature.
 
@@ -99,7 +101,7 @@ Remove-Item Env:\TAURI_SIGNING_PRIVATE_KEY
 
 ## GitHub Release 资产
 
-在 `dzc-bit/A_stock_receiver` 创建 GitHub Release，并上传：
+在 `dzc-bit/Astock-backtester` 创建 GitHub Release，并上传：
 
 - NSIS 安装包 `.exe`
 - `latest.json`

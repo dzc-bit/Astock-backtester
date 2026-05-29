@@ -26,7 +26,7 @@ $latest = @{
   platforms = @{
     "windows-x86_64" = @{
       signature = $signature
-      url = "https://github.com/dzc-bit/A_stock_receiver/releases/download/$Tag/$AssetName"
+      url = "https://github.com/dzc-bit/Astock-backtester/releases/download/$Tag/$AssetName"
     }
   }
 }

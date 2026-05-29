@@ -12,6 +12,7 @@ from astock_backtester.data.operations import (
     fetch_daily_bars_into_cache,
     import_daily_bars_into_cache,
 )
+from astock_backtester.data.warehouse import Warehouse
 
 
 def _bars(rows: list[tuple[object, ...]]) -> pd.DataFrame:
@@ -171,6 +172,7 @@ def test_fetch_result_reports_partial_success(tmp_path):
 
 def test_health_payload_includes_cache_path_and_port(tmp_path):
     cache = LocalCache(tmp_path)
+    warehouse = Warehouse(tmp_path)
     result = import_daily_bars_into_cache(
         cache=cache,
         frame=_bars(
@@ -181,9 +183,29 @@ def test_health_payload_includes_cache_path_and_port(tmp_path):
         source="unit-test",
     )
 
-    health = build_service_health(cache=cache, port=8765)
+    health = build_service_health(cache=cache, warehouse=warehouse, port=8765)
 
     assert result.imported_rows == 1
     assert health.port == 8765
     assert health.cache_path == str(cache.root.resolve())
     assert [item.dataset for item in health.coverage] == ["daily_bars", "capital_flow", "market_cap"]
+
+
+def test_health_prefers_warehouse_coverage_when_available(tmp_path):
+    cache = LocalCache(tmp_path)
+    warehouse = Warehouse(tmp_path)
+    warehouse.write_daily_bars(
+        _bars(
+            [
+                ("AAA", "2024-01-02", 10.0, 11.0, 9.0, 10.5, 1000, 0.1, 9_000_000_000.0, float("nan"), False, False, 90),
+                ("AAA", "2024-01-03", 10.5, 11.5, 10.0, 11.0, 1200, 0.1, 9_100_000_000.0, 1_500_000.0, False, False, 91),
+            ]
+        )
+    )
+
+    health = build_service_health(cache=cache, warehouse=warehouse, port=8765)
+    datasets = {item.dataset: item for item in health.coverage}
+
+    assert datasets["daily_bars"].symbols == 1
+    assert datasets["market_cap"].missing_rows == 0
+    assert datasets["capital_flow"].missing_rows == 1

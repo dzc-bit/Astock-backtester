@@ -45,16 +45,22 @@ pub fn health_request(port: u16) -> String {
     format!("GET /ping HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n")
 }
 
-fn resolve_cache_dir(cache_dir: &str) -> Result<String, String> {
+fn resolve_packaged_cache_dir(app_local_data_dir: &Path, cache_dir: &str) -> PathBuf {
+    app_local_data_dir.join(cache_dir)
+}
+
+fn resolve_cache_dir(app: &AppHandle, cache_dir: &str) -> Result<String, String> {
     let path = Path::new(cache_dir);
     if path.is_absolute() || cfg!(debug_assertions) {
         return Ok(cache_dir.to_string());
     }
-    let exe = std::env::current_exe().map_err(|err| format!("current exe unavailable: {err}"))?;
-    let install_dir = exe
-        .parent()
-        .ok_or_else(|| "current exe parent unavailable".to_string())?;
-    Ok(install_dir.join(path).to_string_lossy().to_string())
+    let app_local_data_dir = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|err| format!("app local data dir unavailable: {err}"))?;
+    Ok(resolve_packaged_cache_dir(&app_local_data_dir, cache_dir)
+        .to_string_lossy()
+        .to_string())
 }
 
 fn choose_port() -> Result<u16, String> {
@@ -85,17 +91,25 @@ fn wait_for_health(port: u16) -> Result<(), String> {
     Err(format!("localhost data service did not become healthy on port {port}"))
 }
 
+fn packaged_service_relative_path() -> PathBuf {
+    PathBuf::from("bin").join("astock-data-service.exe")
+}
+
 fn packaged_service_path(app: &AppHandle) -> Result<PathBuf, String> {
     let resource_dir = app
         .path()
         .resource_dir()
         .map_err(|err| format!("resource dir unavailable: {err}"))?;
-    Ok(resource_dir.join("bin").join("astock-data-service.exe"))
+    Ok(resource_dir.join(packaged_service_relative_path()))
+}
+
+fn should_use_packaged_service(packaged_service_exists: bool) -> bool {
+    packaged_service_exists
 }
 
 impl DataServiceManager {
     pub fn ensure_running(&mut self, app: &AppHandle, cache_dir: &str) -> Result<DataServiceStatus, String> {
-        let resolved_cache_dir = resolve_cache_dir(cache_dir)?;
+        let resolved_cache_dir = resolve_cache_dir(app, cache_dir)?;
         if let Some(existing) = self.service.as_mut() {
             if existing.child.try_wait().map_err(|err| err.to_string())?.is_none() {
                 return Ok(DataServiceStatus {
@@ -110,7 +124,12 @@ impl DataServiceManager {
         }
 
         let port = choose_port()?;
-        let mut command = if cfg!(debug_assertions) {
+        let packaged_service = packaged_service_path(app)?;
+        let mut command = if should_use_packaged_service(packaged_service.exists()) {
+            let mut packaged = Command::new(packaged_service);
+            packaged.args(["--host", "127.0.0.1", "--port", &port.to_string(), "--cache-dir", &resolved_cache_dir]);
+            packaged
+        } else if cfg!(debug_assertions) {
             let root = project_root()?;
             let backend_path = backend_dir(&root);
             let mut python = python_command()?;
@@ -119,9 +138,7 @@ impl DataServiceManager {
             python.env("PYTHONPATH", backend_path);
             python
         } else {
-            let mut packaged = Command::new(packaged_service_path(app)?);
-            packaged.args(["--host", "127.0.0.1", "--port", &port.to_string(), "--cache-dir", &resolved_cache_dir]);
-            packaged
+            return Err("packaged localhost data service was not found".to_string());
         };
         command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped());
         let child = command
@@ -145,7 +162,10 @@ impl DataServiceManager {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_service_args, health_request, resolve_cache_dir};
+    use super::{
+        build_service_args, health_request, packaged_service_relative_path, resolve_packaged_cache_dir,
+        should_use_packaged_service,
+    };
 
     #[test]
     fn health_request_targets_lightweight_ping_endpoint() {
@@ -173,14 +193,22 @@ mod tests {
     }
 
     #[test]
-    fn release_cache_dir_is_stable_when_input_is_relative() {
-        let resolved = resolve_cache_dir(".astock-cache").expect("cache dir should resolve");
+    fn packaged_cache_dir_stays_under_app_local_data_dir() {
+        let app_local_data_dir = std::path::Path::new(r"C:\Users\tester\AppData\Local\local.astock.backtester");
+        let resolved = resolve_packaged_cache_dir(app_local_data_dir, ".astock-cache");
 
-        if cfg!(debug_assertions) {
-            assert_eq!(resolved, ".astock-cache");
-        } else {
-            assert!(std::path::Path::new(&resolved).is_absolute());
-            assert!(resolved.ends_with(".astock-cache"));
-        }
+        assert_eq!(resolved, app_local_data_dir.join(".astock-cache"));
+    }
+
+    #[test]
+    fn packaged_service_relative_path_targets_bundled_sidecar() {
+        let path = packaged_service_relative_path();
+        assert_eq!(path, std::path::PathBuf::from("bin").join("astock-data-service.exe"));
+    }
+
+    #[test]
+    fn packaged_service_is_preferred_whenever_the_bundled_binary_exists() {
+        assert!(should_use_packaged_service(true));
+        assert!(!should_use_packaged_service(false));
     }
 }

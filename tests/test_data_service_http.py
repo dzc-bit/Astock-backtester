@@ -474,7 +474,7 @@ def test_service_realtime_market_snapshot_tracks_yesterday_strong_sectors_from_l
         assert response["yesterday_strong_sectors"]
         assert response["yesterday_strong_sectors"][0]["name"] == "创业板"
         assert response["yesterday_strong_sectors"][0]["source"] == "local-yesterday-group"
-        assert "昨日强势板块追踪" in response["message"]
+        assert response["message"].endswith("昨日强势板块追踪来自本地历史。")
     finally:
         server.shutdown()
         thread.join(timeout=5)
@@ -638,7 +638,25 @@ def test_service_validates_user_written_exit_condition_with_mode(tmp_path):
 
 
 def test_service_returns_recommended_strategies(tmp_path):
+    import pandas as pd
+
     server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
+    server.state.warehouse.write_daily_bars(
+        pd.DataFrame(
+            {
+                "symbol": ["AAA", "AAA"],
+                "trade_date": pd.to_datetime(["2024-01-02", "2024-01-03"]),
+                "open": [10.0, 10.2],
+                "high": [10.3, 10.4],
+                "low": [9.9, 10.0],
+                "close": [10.1, 10.3],
+                "volume": [1000, 1200],
+                "float_market_cap": [1_000_000_000.0, 1_020_000_000.0],
+                "total_market_cap": [1_200_000_000.0, 1_220_000_000.0],
+                "main_net_inflow": [float("nan"), float("nan")],
+            }
+        )
+    )
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -647,9 +665,47 @@ def test_service_returns_recommended_strategies(tmp_path):
 
         names = [item["name"] for item in response["items"]]
         assert "放量突破" in names
-        assert "极端追高压力测试" in names
+        assert "市值量价均衡" in names
+        assert "资金趋势跟随" not in names
+        assert "极端追高压力测试" not in names
         assert response["items"][0]["strategy"]["entry_groups"][0]["conditions"]
         assert response["items"][0]["example_conditions"]
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_service_health_reports_warehouse_market_cap_and_capital_flow_coverage(tmp_path):
+    import pandas as pd
+
+    server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
+    server.state.warehouse.write_daily_bars(
+        pd.DataFrame(
+            {
+                "symbol": ["AAA", "AAA"],
+                "trade_date": pd.to_datetime(["2024-01-02", "2024-01-03"]),
+                "open": [10.0, 10.2],
+                "high": [10.3, 10.4],
+                "low": [9.9, 10.0],
+                "close": [10.1, 10.3],
+                "volume": [1000, 1200],
+                "float_market_cap": [1_000_000_000.0, 1_020_000_000.0],
+                "total_market_cap": [1_200_000_000.0, 1_220_000_000.0],
+                "main_net_inflow": [float("nan"), 2_000_000.0],
+            }
+        )
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        health = _request_json("GET", f"http://127.0.0.1:{port}/health")
+
+        datasets = {item["dataset"]: item for item in health["coverage"]}
+        assert datasets["market_cap"]["symbols"] == 1
+        assert datasets["market_cap"]["missing_rows"] == 0
+        assert datasets["capital_flow"]["symbols"] == 1
+        assert datasets["capital_flow"]["missing_rows"] == 1
     finally:
         server.shutdown()
         thread.join(timeout=5)

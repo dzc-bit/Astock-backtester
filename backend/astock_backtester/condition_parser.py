@@ -11,10 +11,12 @@ from astock_backtester.models import (
 
 
 EXAMPLES = [
+    "市场上涨家数占比大于55%",
     "收盘价站上20日均线",
     "量比2日介于1.2到2.5",
     "流通市值10亿到300亿",
     "换手率2%到8%",
+    "近5日涨幅0%到12%",
     "近5日涨幅小于12%",
     "近3日主力净流入大于300万",
     "突破20日新高",
@@ -28,6 +30,23 @@ EXIT_EXAMPLES = [
     "创20日新低",
 ]
 
+ENTRY_TEMPLATES = [
+    "收盘价站上N日均线",
+    "量比N日介于A到B",
+    "流通市值X亿到Y亿",
+    "换手率A%到B%",
+    "近N日涨幅小于X%",
+    "近N日主力净流入大于X万/亿",
+    "突破N日新高",
+    "MACD柱线大于X",
+]
+
+EXIT_TEMPLATES = [
+    "收盘价跌破N日均线",
+    "跌破N日低点",
+    "创N日新低",
+]
+
 
 def condition_examples() -> list[str]:
     return list(EXAMPLES)
@@ -35,6 +54,11 @@ def condition_examples() -> list[str]:
 
 def exit_condition_examples() -> list[str]:
     return list(EXIT_EXAMPLES)
+
+
+def _template_message(prefix: str, templates: list[str]) -> str:
+    rendered = "、".join(f"“{template}”" for template in templates)
+    return f"{prefix}，请改写成类似{rendered}的模板。"
 
 
 def _normalize_text(text: str) -> str:
@@ -252,7 +276,10 @@ def validate_condition_text(text: str) -> ConditionValidationResult:
         condition_examples(),
         "条件不能为空，请参考样例输入可执行条件。",
         "unrecognized_condition",
-        "无法识别条件，请参考样例改写。支持均线、量比、市值、换手率、涨幅、资金流、突破前高和 MACD。",
+        _template_message(
+            "无法识别条件",
+            ENTRY_TEMPLATES,
+        ),
     )
 
 
@@ -263,5 +290,8 @@ def validate_exit_condition_text(text: str) -> ConditionValidationResult:
         exit_condition_examples(),
         "离场条件不能为空，请参考样例输入可执行卖出条件。",
         "unrecognized_exit_condition",
-        "无法识别离场条件，请参考样例改写。支持跌破均线、跌破N日低点/最低、创N日新低。",
+        _template_message(
+            "无法识别离场条件",
+            EXIT_TEMPLATES,
+        ),
     )
