@@ -1,5 +1,6 @@
 ﻿import { CheckCircle2, Plus, RotateCcw, Trash2 } from "lucide-react";
 import { useState } from "react";
+import { isBuiltInStrategyPreset } from "../savedStrategies";
 import { conditionLibrary, defaultStrategy } from "../strategyDefaults";
 import type {
   BacktestSettingsConfig,
@@ -252,6 +253,9 @@ function validateDrafts(drafts: Record<string, string>): string[] {
 }
 
 function formatSavedTime(value: string): string {
+  if (value === "builtin") {
+    return "内置基础策略";
+  }
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) {
     return value;
@@ -500,14 +504,16 @@ export function StrategyWorkbench({
                     >
                       套用已保存策略
                     </button>
-                    <button
-                      className="secondary-button"
-                      type="button"
-                      onClick={() => onDeleteSavedStrategy(preset.id)}
-                      aria-label={`删除已保存策略${preset.name}`}
-                    >
-                      删除
-                    </button>
+                    {isBuiltInStrategyPreset(preset.id) ? null : (
+                      <button
+                        className="secondary-button"
+                        type="button"
+                        onClick={() => onDeleteSavedStrategy(preset.id)}
+                        aria-label={`删除已保存策略${preset.name}`}
+                      >
+                        删除
+                      </button>
+                    )}
                   </div>
                 </article>
               );
@@ -777,51 +783,6 @@ export function StrategyWorkbench({
               </div>
             </article>
           </section>
-          <div className="condition-expression-box exit-expression-box entry-expression-box">
-            <span className="condition-example-label">样例：{examples[0]}</span>
-            <label>
-              新增入场条件表达式
-              <input
-                aria-label="新增条件表达式"
-                value={conditionText}
-                onChange={(event) => setConditionText(event.target.value)}
-                placeholder="例：收盘价站上20日均线"
-              />
-            </label>
-            <div className="inline-actions">
-              <button
-                className="secondary-button"
-                type="button"
-                aria-label="校验条件"
-                onClick={() => onValidateCondition(conditionText)}
-              >
-                <CheckCircle2 size={16} aria-hidden="true" />
-                {isValidatingCondition ? "校验中" : "校验入场条件"}
-              </button>
-              <button
-                className="primary-button"
-                type="button"
-                aria-label="添加已校验条件"
-                onClick={addValidatedCondition}
-                disabled={!conditionValidation?.ok || !conditionValidation.condition}
-              >
-                <Plus size={16} aria-hidden="true" />
-                添加入场条件
-              </button>
-            </div>
-            <div className={`condition-validation ${conditionValidation?.ok ? "ok" : conditionValidation ? "bad" : ""}`}>
-              {conditionValidation?.ok && conditionValidation.condition ? (
-                <span>
-                  可识别：{conditionMetaById[conditionValidation.condition.condition_id]?.label ?? conditionValidation.condition.condition_id}
-                </span>
-              ) : conditionValidation ? (
-                <span>{conditionValidation.errors[0]?.message ?? "无法识别条件，请参考样例改写。"}</span>
-              ) : (
-                <span>入场条件校验成功后，会直接写入策略并参与回测买入判断。</span>
-              )}
-            </div>
-            {entryAddMessage ? <div className="condition-validation ok">{entryAddMessage}</div> : null}
-          </div>
           <div className="condition-examples" aria-label="条件样例">
             {examples.slice(0, 8).map((example) => (
               <button className="example-chip" type="button" key={example} onClick={() => setConditionText(example)}>
@@ -859,6 +820,57 @@ export function StrategyWorkbench({
             </label>
           </div>
           <span className="status-pill compact">{operatorLabels[group.operator]}</span>
+          <div className="entry-rules-panel">
+            <div className="active-strategy-head">
+              <h3>入场规则</h3>
+              <span className="status-pill compact">校验通过后直接写入回测买入判断</span>
+            </div>
+            <div className="condition-expression-box exit-expression-box entry-expression-box">
+              <span className="condition-example-label">样例：{examples[0]}</span>
+              <label>
+                新增入场条件表达式
+                <input
+                  aria-label="新增条件表达式"
+                  value={conditionText}
+                  onChange={(event) => setConditionText(event.target.value)}
+                  placeholder="例：收盘价站上20日均线"
+                />
+              </label>
+              <div className="inline-actions">
+                <button
+                  className="secondary-button"
+                  type="button"
+                  aria-label="校验条件"
+                  onClick={() => onValidateCondition(conditionText)}
+                >
+                  <CheckCircle2 size={16} aria-hidden="true" />
+                  {isValidatingCondition ? "校验中" : "校验入场条件"}
+                </button>
+                <button
+                  className="primary-button"
+                  type="button"
+                  aria-label="添加已校验条件"
+                  onClick={addValidatedCondition}
+                  disabled={!conditionValidation?.ok || !conditionValidation.condition}
+                >
+                  <Plus size={16} aria-hidden="true" />
+                  添加入场条件
+                </button>
+              </div>
+              <div className={`condition-validation ${conditionValidation?.ok ? "ok" : conditionValidation ? "bad" : ""}`}>
+                {conditionValidation?.ok && conditionValidation.condition ? (
+                  <span>
+                    可识别：{conditionMetaById[conditionValidation.condition.condition_id]?.label ?? conditionValidation.condition.condition_id}
+                  </span>
+                ) : conditionValidation ? (
+                  <span>{conditionValidation.errors[0]?.message ?? "无法识别条件，请参考样例改写。"}</span>
+                ) : (
+                  <span>入场条件校验成功后，会直接写入策略并参与回测买入判断。</span>
+                )}
+              </div>
+              {entryAddMessage ? <div className="condition-validation ok">{entryAddMessage}</div> : null}
+            </div>
+          </div>
           <div className="condition-config-list">
             {group.conditions.map((condition) => {
               const meta = conditionMetaById[condition.condition_id] as ConditionMeta | undefined;

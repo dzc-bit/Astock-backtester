@@ -91,6 +91,10 @@ fn wait_for_health(port: u16) -> Result<(), String> {
     Err(format!("localhost data service did not become healthy on port {port}"))
 }
 
+fn is_healthy(port: u16) -> bool {
+    wait_for_health(port).is_ok()
+}
+
 fn packaged_service_relative_path() -> PathBuf {
     PathBuf::from("bin").join("astock-data-service.exe")
 }
@@ -104,14 +108,14 @@ fn packaged_service_path(app: &AppHandle) -> Result<PathBuf, String> {
 }
 
 fn should_use_packaged_service(packaged_service_exists: bool) -> bool {
-    packaged_service_exists
+    packaged_service_exists && !cfg!(debug_assertions)
 }
 
 impl DataServiceManager {
     pub fn ensure_running(&mut self, app: &AppHandle, cache_dir: &str) -> Result<DataServiceStatus, String> {
         let resolved_cache_dir = resolve_cache_dir(app, cache_dir)?;
         if let Some(existing) = self.service.as_mut() {
-            if existing.child.try_wait().map_err(|err| err.to_string())?.is_none() {
+            if existing.child.try_wait().map_err(|err| err.to_string())?.is_none() && is_healthy(existing.port) {
                 return Ok(DataServiceStatus {
                     running: true,
                     port: existing.port,
@@ -120,6 +124,7 @@ impl DataServiceManager {
                     message: "local data service already running".to_string(),
                 });
             }
+            let _ = existing.child.kill();
             self.service = None;
         }
 
@@ -207,8 +212,8 @@ mod tests {
     }
 
     #[test]
-    fn packaged_service_is_preferred_whenever_the_bundled_binary_exists() {
-        assert!(should_use_packaged_service(true));
+    fn packaged_service_preference_matches_build_mode() {
+        assert_eq!(should_use_packaged_service(true), !cfg!(debug_assertions));
         assert!(!should_use_packaged_service(false));
     }
 }

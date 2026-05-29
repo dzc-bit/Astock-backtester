@@ -64,6 +64,14 @@ export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceRead
     [symbolsInput]
   );
 
+  const reconnectService = async () => {
+    const status = await ensureDataService(cacheDir);
+    setService(status);
+    onServiceReady?.(status);
+    await refreshServiceState(status);
+    return status;
+  };
+
   const refreshDetails = async (
     activeService: DataServiceStatus,
     selectedSymbols = symbols,
@@ -184,7 +192,13 @@ export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceRead
       await refreshDetails(service);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "补全缺失数据失败");
-      await refreshLogs(service);
+      let activeService = service;
+      try {
+        activeService = await reconnectService();
+      } catch {
+        // Keep the original operation error visible if reconnect also fails.
+      }
+      await refreshLogs(activeService);
     } finally {
       setBusyAction(null);
     }
@@ -204,7 +218,13 @@ export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceRead
       await refreshDetails(service);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "导入示例数据失败");
-      await refreshLogs(service);
+      let activeService = service;
+      try {
+        activeService = await reconnectService();
+      } catch {
+        // Keep the original operation error visible if reconnect also fails.
+      }
+      await refreshLogs(activeService);
     } finally {
       setBusyAction(null);
     }
@@ -224,7 +244,13 @@ export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceRead
       await refreshDetails(service);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "导入本地文件失败");
-      await refreshLogs(service);
+      let activeService = service;
+      try {
+        activeService = await reconnectService();
+      } catch {
+        // Keep the original operation error visible if reconnect also fails.
+      }
+      await refreshLogs(activeService);
     } finally {
       setBusyAction(null);
     }

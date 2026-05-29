@@ -1089,6 +1089,33 @@ describe("A 股回测工作台界面", () => {
     expect(exitRules).not.toHaveTextContent("window");
   });
 
+  it("renders the entry rule editor inside the same panel layout as exit rules", async () => {
+    render(<App />);
+
+    const entryHeading = await screen.findByRole("heading", { name: "入场规则" });
+
+    const entryEditor = screen.getByLabelText("新增条件表达式").closest(".entry-rules-panel");
+    expect(entryEditor).not.toBeNull();
+    expect(entryEditor).toContainElement(entryHeading);
+    expect(entryEditor).toHaveTextContent("入场规则");
+    expect(entryEditor).toHaveTextContent("新增入场条件表达式");
+    expect(entryEditor).toHaveTextContent("校验入场条件");
+    expect(entryEditor).toHaveTextContent("添加入场条件");
+  });
+
+  it("keeps built-in local strategies visible without delete actions", async () => {
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "已保存策略" });
+
+    expect(screen.getByText("基础均衡策略")).toBeInTheDocument();
+    expect(screen.getByText("放量突破策略")).toBeInTheDocument();
+    expect(screen.getByText("回踩均线策略")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "删除已保存策略基础均衡策略" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "删除已保存策略放量突破策略" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "删除已保存策略回踩均线策略" })).not.toBeInTheDocument();
+  });
+
   it("shows backend errors without dropping the page", async () => {
     const user = userEvent.setup();
     apiMocks.runBacktestStreamWithDataService.mockRejectedValue(new Error("No cached daily bars found."));

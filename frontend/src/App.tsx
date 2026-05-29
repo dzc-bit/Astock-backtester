@@ -18,6 +18,7 @@ import {
   cloneStrategyConfig,
   createSavedStrategyPreset,
   hasSavableRules,
+  isBuiltInStrategyPreset,
   loadSavedStrategies,
   persistSavedStrategies,
   strategySignature
@@ -379,6 +380,10 @@ export function App() {
   };
 
   const deleteSavedStrategy = (presetId: string) => {
+    if (isBuiltInStrategyPreset(presetId)) {
+      setStrategySaveMessage("内置基础策略会一直保留，不能删除。");
+      return;
+    }
     const target = savedStrategies.find((item) => item.id === presetId);
     const nextSavedStrategies = savedStrategies.filter((item) => item.id !== presetId);
     persistSavedStrategies(nextSavedStrategies);

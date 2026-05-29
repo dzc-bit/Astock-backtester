@@ -82,12 +82,38 @@ async function callBackend<T>(payload: Record<string, unknown>): Promise<T> {
   return response;
 }
 
-async function serviceFetch<T>(baseUrl: string, path: string, payload?: Record<string, unknown>): Promise<T> {
-  const response = await fetch(`${baseUrl}${path}`, {
-    method: payload ? "POST" : "GET",
-    headers: { "Content-Type": "application/json" },
-    body: payload ? JSON.stringify(payload) : undefined
-  });
+const DEFAULT_SERVICE_TIMEOUT_MS = 12_000;
+const LONG_RUNNING_SERVICE_TIMEOUT_MS = 300_000;
+
+type ServiceFetchOptions = {
+  timeoutMs?: number;
+};
+
+async function serviceFetch<T>(
+  baseUrl: string,
+  path: string,
+  payload?: Record<string, unknown>,
+  options: ServiceFetchOptions = {}
+): Promise<T> {
+  const controller = new AbortController();
+  const timeoutMs = options.timeoutMs ?? DEFAULT_SERVICE_TIMEOUT_MS;
+  const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
+  let response: Response;
+  try {
+    response = await fetch(`${baseUrl}${path}`, {
+      method: payload ? "POST" : "GET",
+      headers: { "Content-Type": "application/json" },
+      body: payload ? JSON.stringify(payload) : undefined,
+      signal: controller.signal
+    });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new Error("本地数据服务请求超时，请稍后重试或重新连接本地服务。");
+    }
+    throw error;
+  } finally {
+    window.clearTimeout(timeout);
+  }
   const json = await response.json();
   if (!response.ok) {
     const code = json.code ? `${json.code} - ` : "";
@@ -422,11 +448,16 @@ export async function fetchDailyBars(
       logs: [{ level: "info", message: `Fetched ${symbols.length * 5} daily bar rows` }]
     };
   }
-  return serviceFetch<FetchResult>(baseUrl, "/fetch/daily-bars", {
-    symbols,
-    start_date: startDate,
-    end_date: endDate
-  });
+  return serviceFetch<FetchResult>(
+    baseUrl,
+    "/fetch/daily-bars",
+    {
+      symbols,
+      start_date: startDate,
+      end_date: endDate
+    },
+    { timeoutMs: LONG_RUNNING_SERVICE_TIMEOUT_MS }
+  );
 }
 
 export async function importDailyBars(baseUrl: string, source: "sample" | "file", path?: string): Promise<ImportResult> {
@@ -442,7 +473,7 @@ export async function importDailyBars(baseUrl: string, source: "sample" | "file"
       logs: [{ level: "info", message: `Imported daily bars from ${source}${path ? `: ${path}` : ""}` }]
     };
   }
-  return serviceFetch<ImportResult>(baseUrl, "/import/daily-bars", { source, path });
+  return serviceFetch<ImportResult>(baseUrl, "/import/daily-bars", { source, path }, { timeoutMs: LONG_RUNNING_SERVICE_TIMEOUT_MS });
 }
 
 export async function startFullMarketSync(
