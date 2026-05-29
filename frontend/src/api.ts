@@ -82,12 +82,38 @@ async function callBackend<T>(payload: Record<string, unknown>): Promise<T> {
   return response;
 }
 
-async function serviceFetch<T>(baseUrl: string, path: string, payload?: Record<string, unknown>): Promise<T> {
-  const response = await fetch(`${baseUrl}${path}`, {
-    method: payload ? "POST" : "GET",
-    headers: { "Content-Type": "application/json" },
-    body: payload ? JSON.stringify(payload) : undefined
-  });
+const DEFAULT_SERVICE_TIMEOUT_MS = 12_000;
+const LONG_RUNNING_SERVICE_TIMEOUT_MS = 300_000;
+
+type ServiceFetchOptions = {
+  timeoutMs?: number;
+};
+
+async function serviceFetch<T>(
+  baseUrl: string,
+  path: string,
+  payload?: Record<string, unknown>,
+  options: ServiceFetchOptions = {}
+): Promise<T> {
+  const controller = new AbortController();
+  const timeoutMs = options.timeoutMs ?? DEFAULT_SERVICE_TIMEOUT_MS;
+  const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
+  let response: Response;
+  try {
+    response = await fetch(`${baseUrl}${path}`, {
+      method: payload ? "POST" : "GET",
+      headers: { "Content-Type": "application/json" },
+      body: payload ? JSON.stringify(payload) : undefined,
+      signal: controller.signal
+    });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new Error("本地数据服务请求超时，请稍后重试或重新连接本地服务。");
+    }
+    throw error;
+  } finally {
+    window.clearTimeout(timeout);
+  }
   const json = await response.json();
   if (!response.ok) {
     const code = json.code ? `${json.code} - ` : "";
@@ -283,6 +309,10 @@ export async function loadRecommendedStrategies(baseUrl: string): Promise<Recomm
           suitable_market: "指数温和上行、题材活跃时使用。",
           risk_note: "避免连续大涨后追高。",
           example_conditions: ["突破20日新高", "量比2日介于1.2到2.5"],
+          scenario: "温和上行",
+          featured: true,
+          required_datasets: ["daily_bars", "market_cap"],
+          capability_note: "浏览器预览使用模拟可用数据。",
           strategy: {
             name: "放量突破",
             market_filters: [],
@@ -307,14 +337,18 @@ export async function loadRecommendedStrategies(baseUrl: string): Promise<Recomm
           }
         },
         {
-          id: "extreme-chasing-stress-test",
-          name: "极端追高压力测试",
-          description: "故意追放量突破后的高位票，用来验证回测能暴露大幅亏损。",
-          suitable_market: "仅用于压力测试回测链路。",
-          risk_note: "高位放量后隔日低开会放大亏损，不作为实盘建议。",
-          example_conditions: ["突破2日新高", "量比2日介于2到5", "跌破2日低点离场"],
+          id: "steady-cap-volume",
+          name: "市值量价均衡",
+          description: "过滤超大市值和极端成交，寻找流动性适中的趋势机会。",
+          suitable_market: "震荡偏强或结构性行情中使用。",
+          risk_note: "更适合在市场有承接、但不是全面高潮时使用。",
+          example_conditions: ["流通市值10亿到300亿", "换手率2%到8%", "量比2日介于1.2到2.5"],
+          scenario: "震荡轮动",
+          featured: true,
+          required_datasets: ["daily_bars", "market_cap"],
+          capability_note: "浏览器预览使用模拟可用数据。",
           strategy: {
-            name: "极端追高压力测试",
+            name: "市值量价均衡",
             market_filters: [],
             entry_groups: [
               {
@@ -322,32 +356,40 @@ export async function loadRecommendedStrategies(baseUrl: string): Promise<Recomm
                 operator: "and",
                 conditions: [
                   {
-                    id: "stress-breakout",
-                    condition_id: "breakout_above_n_day_high",
+                    id: "preview-cap",
+                    condition_id: "market_cap_between",
                     enabled: true,
-                    params: { window: 2 },
+                    params: { min: 1000000000, max: 30000000000 },
                     data_lag_days: 0,
-                    expression: "突破2日新高"
+                    expression: "流通市值10亿到300亿"
                   },
                   {
-                    id: "stress-volume",
+                    id: "preview-turnover",
+                    condition_id: "turnover_between",
+                    enabled: true,
+                    params: { min: 0.02, max: 0.08 },
+                    data_lag_days: 0,
+                    expression: "换手率2%到8%"
+                  },
+                  {
+                    id: "preview-volume",
                     condition_id: "volume_ratio_between",
                     enabled: true,
-                    params: { window: 2, min: 2.0, max: 5.0 },
+                    params: { window: 2, min: 1.2, max: 2.5 },
                     data_lag_days: 0,
-                    expression: "量比2日介于2到5"
+                    expression: "量比2日介于1.2到2.5"
                   }
                 ]
               }
             ],
             exit_rules: [
               {
-                id: "stress-exit-low",
-                condition_id: "breakdown_below_n_day_low",
+                id: "preview-exit-ma",
+                condition_id: "close_below_ma",
                 enabled: true,
-                params: { window: 2 },
+                params: { window: 3 },
                 data_lag_days: 0,
-                expression: "跌破2日低点"
+                expression: "收盘价跌破3日均线"
               }
             ],
             score_threshold: null
@@ -406,11 +448,16 @@ export async function fetchDailyBars(
       logs: [{ level: "info", message: `Fetched ${symbols.length * 5} daily bar rows` }]
     };
   }
-  return serviceFetch<FetchResult>(baseUrl, "/fetch/daily-bars", {
-    symbols,
-    start_date: startDate,
-    end_date: endDate
-  });
+  return serviceFetch<FetchResult>(
+    baseUrl,
+    "/fetch/daily-bars",
+    {
+      symbols,
+      start_date: startDate,
+      end_date: endDate
+    },
+    { timeoutMs: LONG_RUNNING_SERVICE_TIMEOUT_MS }
+  );
 }
 
 export async function importDailyBars(baseUrl: string, source: "sample" | "file", path?: string): Promise<ImportResult> {
@@ -426,7 +473,7 @@ export async function importDailyBars(baseUrl: string, source: "sample" | "file"
       logs: [{ level: "info", message: `Imported daily bars from ${source}${path ? `: ${path}` : ""}` }]
     };
   }
-  return serviceFetch<ImportResult>(baseUrl, "/import/daily-bars", { source, path });
+  return serviceFetch<ImportResult>(baseUrl, "/import/daily-bars", { source, path }, { timeoutMs: LONG_RUNNING_SERVICE_TIMEOUT_MS });
 }
 
 export async function startFullMarketSync(

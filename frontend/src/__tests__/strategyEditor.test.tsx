@@ -337,6 +337,8 @@ describe("A 股回测工作台界面", () => {
   });
 
   afterEach(() => {
+    window.localStorage.clear();
+    vi.restoreAllMocks();
     vi.useRealTimers();
   });
 
@@ -887,6 +889,73 @@ describe("A 股回测工作台界面", () => {
     );
   });
 
+  it("asks to save the strategy after entry and exit rules run successfully, then stores it in 策略配置", async () => {
+    const user = userEvent.setup();
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const savedName = "市场热度 + 市值量价筛选";
+    render(<App />);
+
+    await screen.findByText("日线行情");
+    await user.clear(screen.getByLabelText("新增条件表达式"));
+    await user.type(screen.getByLabelText("新增条件表达式"), "收盘价站上20日均线");
+    await user.click(screen.getByRole("button", { name: "校验条件" }));
+    await screen.findByText(/可识别：收盘价站上均线/);
+    await user.click(screen.getByRole("button", { name: "添加已校验条件" }));
+
+    await user.clear(screen.getByLabelText("新增离场条件表达式"));
+    await user.type(screen.getByLabelText("新增离场条件表达式"), "突破20日最低");
+    await user.click(screen.getByRole("button", { name: "校验离场条件" }));
+    await screen.findByText(/离场可识别：跌破前低离场/);
+    await user.click(screen.getByRole("button", { name: "添加离场条件" }));
+
+    await user.click(screen.getByRole("button", { name: "运行历史回测" }));
+
+    expect(confirmSpy).toHaveBeenCalledWith("当前入场规则和离场规则已成功运行回测，是否保存到策略配置？");
+    expect(await screen.findByText(`已保存策略：${savedName}`)).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "已保存策略" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: `套用已保存策略${savedName}` })).toBeInTheDocument();
+    expect(screen.getByText(savedName)).toBeInTheDocument();
+
+    const savedRaw = window.localStorage.getItem("astock-saved-strategies");
+    expect(savedRaw).not.toBeNull();
+    const savedStrategies = JSON.parse(savedRaw ?? "[]") as Array<{ name: string }>;
+    expect(savedStrategies).toHaveLength(1);
+    expect(savedStrategies[0]?.name).toBe(savedName);
+
+    await user.click(screen.getByRole("button", { name: "套用放量突破" }));
+    await user.click(screen.getByRole("button", { name: `套用已保存策略${savedName}` }));
+    expect(await screen.findByText(`已套用已保存策略：${savedName}`)).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: `删除已保存策略${savedName}` }));
+    expect(await screen.findByText(`已删除已保存策略：${savedName}`)).toBeInTheDocument();
+  });
+
+  it("does not store the strategy when the user declines the save prompt", async () => {
+    const user = userEvent.setup();
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+    render(<App />);
+
+    await screen.findByText("日线行情");
+    await user.clear(screen.getByLabelText("新增条件表达式"));
+    await user.type(screen.getByLabelText("新增条件表达式"), "收盘价站上20日均线");
+    await user.click(screen.getByRole("button", { name: "校验条件" }));
+    await screen.findByText(/可识别：收盘价站上均线/);
+    await user.click(screen.getByRole("button", { name: "添加已校验条件" }));
+
+    await user.clear(screen.getByLabelText("新增离场条件表达式"));
+    await user.type(screen.getByLabelText("新增离场条件表达式"), "突破20日最低");
+    await user.click(screen.getByRole("button", { name: "校验离场条件" }));
+    await screen.findByText(/离场可识别：跌破前低离场/);
+    await user.click(screen.getByRole("button", { name: "添加离场条件" }));
+
+    await user.click(screen.getByRole("button", { name: "运行历史回测" }));
+
+    expect(confirmSpy).toHaveBeenCalledWith("当前入场规则和离场规则已成功运行回测，是否保存到策略配置？");
+    expect(await screen.findByText("本次未保存策略，你可以继续调整后再次运行。")).toBeInTheDocument();
+    expect(window.localStorage.getItem("astock-saved-strategies")).toBeNull();
+    expect(screen.getByText(/完成入场规则、离场规则并运行回测后/)).toBeInTheDocument();
+  });
+
   it("validates exit rules with exit-specific low-break conditions before running", async () => {
     const user = userEvent.setup();
     render(<App />);
@@ -1018,6 +1087,33 @@ describe("A 股回测工作台界面", () => {
     expect(exitRules).not.toHaveTextContent("close_below_ma");
     expect(exitRules).not.toHaveTextContent("解析参数");
     expect(exitRules).not.toHaveTextContent("window");
+  });
+
+  it("renders the entry rule editor inside the same panel layout as exit rules", async () => {
+    render(<App />);
+
+    const entryHeading = await screen.findByRole("heading", { name: "入场规则" });
+
+    const entryEditor = screen.getByLabelText("新增条件表达式").closest(".entry-rules-panel");
+    expect(entryEditor).not.toBeNull();
+    expect(entryEditor).toContainElement(entryHeading);
+    expect(entryEditor).toHaveTextContent("入场规则");
+    expect(entryEditor).toHaveTextContent("新增入场条件表达式");
+    expect(entryEditor).toHaveTextContent("校验入场条件");
+    expect(entryEditor).toHaveTextContent("添加入场条件");
+  });
+
+  it("keeps built-in local strategies visible without delete actions", async () => {
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "已保存策略" });
+
+    expect(screen.getByText("基础均衡策略")).toBeInTheDocument();
+    expect(screen.getByText("放量突破策略")).toBeInTheDocument();
+    expect(screen.getByText("回踩均线策略")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "删除已保存策略基础均衡策略" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "删除已保存策略放量突破策略" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "删除已保存策略回踩均线策略" })).not.toBeInTheDocument();
   });
 
   it("shows backend errors without dropping the page", async () => {

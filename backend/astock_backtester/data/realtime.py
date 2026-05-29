@@ -42,6 +42,8 @@ SECTOR_PREFIXES = {
     "92": "北交所",
 }
 
+YESTERDAY_SECTOR_TRACKING_NOTE = "昨日强势板块追踪来自本地历史。"
+
 
 def _decode_sina_response(text: str) -> dict[str, list[str]]:
     quotes: dict[str, list[str]] = {}
@@ -101,6 +103,12 @@ def _dedupe_sectors(groups: Iterable[SectorMover], limit: int = 10) -> list[Sect
     return sectors
 
 
+def _append_yesterday_sector_note(message: str, yesterday_sectors: list[SectorMover]) -> str:
+    if not yesterday_sectors or message.endswith(YESTERDAY_SECTOR_TRACKING_NOTE):
+        return message
+    return f"{message} {YESTERDAY_SECTOR_TRACKING_NOTE}"
+
+
 @dataclass
 class RealtimeMarketProvider:
     warehouse: Warehouse
@@ -127,13 +135,13 @@ class RealtimeMarketProvider:
         if yesterday_sectors:
             source_parts.append("local-yesterday-group")
         source = "+".join(source_parts) if source_parts else local_snapshot.source
-        message = "实时指数来自 Ashare/Sina，强势板块来自东方财富板块榜，本地数据用于红绿家数。"
         if not indexes:
             message = local_snapshot.message
-        if indexes and not live_sectors:
+        elif not live_sectors:
             message = "实时指数来自 Ashare/Sina，本地数据用于红绿家数；东方财富板块榜暂不可用，已用本地市场分组兜底。"
-        if indexes and yesterday_sectors:
-            message = f"{message} 昨日强势板块追踪来自本地历史。"
+        else:
+            message = "实时指数来自 Ashare/Sina，强势板块来自东方财富板块榜，本地数据用于红绿家数。"
+        message = _append_yesterday_sector_note(message, yesterday_sectors)
         return RealtimeMarketSnapshot(
             status=status,
             source=source,
@@ -305,9 +313,10 @@ class RealtimeMarketProvider:
         )
         local_sectors = self._local_market_groups(latest, source="local-market-group")
         yesterday_sectors = self._local_market_groups(yesterday, source="local-yesterday-group")
-        message = f"实时行情源暂不可用，已使用本地最近交易日 {latest_date.date()} 数据。"
-        if yesterday_sectors:
-            message = f"{message} 昨日强势板块追踪来自本地历史。"
+        message = _append_yesterday_sector_note(
+            f"实时行情源暂不可用，已使用本地最近交易日 {latest_date.date()} 数据。",
+            yesterday_sectors,
+        )
         return RealtimeMarketSnapshot(
             status="stale",
             source="local-latest",

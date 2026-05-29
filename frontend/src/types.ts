@@ -266,9 +266,20 @@ export type RecommendedStrategy = {
   suitable_market: string;
   risk_note: string;
   example_conditions: string[];
+  scenario: string;
+  featured: boolean;
+  required_datasets: string[];
+  capability_note?: string | null;
   strategy: StrategyConfig;
 };
 
 export type RecommendedStrategiesResponse = {
   items: RecommendedStrategy[];
+};
+
+export type SavedStrategyPreset = {
+  id: string;
+  name: string;
+  saved_at: string;
+  strategy: StrategyConfig;
 };

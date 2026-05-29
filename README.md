@@ -17,14 +17,14 @@
 
 ### 普通用户（Windows）
 
-1. 打开 [Releases](https://github.com/dzc-bit/A_stock_receiver/releases) 页面。
+1. 打开 [Releases](https://github.com/dzc-bit/Astock-backtester/releases) 页面。
 2. 下载最新版本里的 `*_x64-setup.exe` 安装包。
 3. 双击安装包并按提示安装。
 4. 安装完成后打开 `A股策略回测工作台`。
 
 如果 Windows SmartScreen 提示未知发布者，请确认安装包来自本仓库 Releases 页面后，再选择继续运行。当前更新包使用 Tauri updater 签名校验，但 Windows 安装包本身还没有配置商业代码签名证书。
 
-已经安装过旧版的用户，如果旧版没有“检查更新”入口，需要先手动安装一次最新安装包。之后可以在应用内点击“检查更新”完成后续升级。
+已经安装过旧版的用户，如果旧版没有“检查更新”入口，需要先手动安装一次最新安装包。由于 `v0.1.7` 进行了更新签名密钥迁移，`v0.1.6` 用户这一次也需要手动安装 `v0.1.7` 安装包；从 `v0.1.7` 开始，后续版本可以继续在应用内点击“检查更新”完成升级。
 
 ## 数据说明
 
@@ -44,8 +44,8 @@
 然后执行：
 
 ```powershell
-git clone https://github.com/dzc-bit/A_stock_receiver.git
-cd A_stock_receiver
+git clone https://github.com/dzc-bit/Astock-backtester.git
+cd Astock-backtester
 python -m pip install -e ".[dev]"
 npm install
 npm run test:ui -- --run

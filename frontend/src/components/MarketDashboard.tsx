@@ -107,7 +107,7 @@ function buildClosingSectorReview(snapshot: RealtimeMarketSnapshot | null): stri
     .map((sector) => sector.name);
   const yesterdayText =
     continuedSectors.length > 0
-      ? `昨日强势延续在 ${continuedSectors.join("、")}，次日先看承接。`
+      ? `昨日强势延续在${continuedSectors.join("、")}，次日先看承接。`
       : yesterdaySectors.length > 0
         ? "昨日强势没有明显延续，次日别把旧热点当新主线。"
         : "昨日板块追踪不足，次日观察要保守一点。";
@@ -121,7 +121,7 @@ function buildClosingSectorReview(snapshot: RealtimeMarketSnapshot | null): stri
         : upRatio <= 0.45
           ? "绿盘偏多，板块更像局部抱团"
           : "红绿接近，主线还没有压倒性优势";
-  return `收盘后板块解读：${leaders} 领涨；${breadthText}。${yesterdayText} 次日优先看这些方向是否继续放量，否则不要把一日强势当成趋势。`;
+  return `收盘后板块解读：${leaders}领涨；${breadthText}。${yesterdayText}次日优先看这些方向是否继续放量，否则不要把一日强势当成趋势。`;
 }
 
 export function MarketDashboard({ snapshot, isLoading = false }: Props) {

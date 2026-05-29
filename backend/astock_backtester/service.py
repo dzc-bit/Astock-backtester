@@ -140,7 +140,11 @@ class DataServiceHandler(BaseHTTPRequestHandler):
             self._send_json({"ok": True})
             return
         if self.path == "/health":
-            health = build_service_health(self.server.state.cache, port=self.server.state.port)
+            health = build_service_health(
+                self.server.state.cache,
+                self.server.state.warehouse,
+                port=self.server.state.port,
+            )
             self._send_json(health.model_dump(mode="json"))
             return
         if self.path == "/logs/recent":
@@ -159,7 +163,7 @@ class DataServiceHandler(BaseHTTPRequestHandler):
             self._send_json(alerts.model_dump(mode="json"))
             return
         if self.path == "/strategy/recommended":
-            self._send_json(recommended_strategies().model_dump(mode="json"))
+            self._send_json(recommended_strategies(self.server.state.warehouse.coverage()).model_dump(mode="json"))
             return
         if self.path.startswith("/sync/jobs/"):
             job_id = self.path.rsplit("/", 1)[-1]

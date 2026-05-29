@@ -263,3 +263,13 @@ def test_user_written_condition_reports_examples_for_unrecognized_text():
     assert "无法识别" in result.errors[0].message
     assert "收盘价站上20日均线" in result.examples
     assert condition_examples()
+
+
+def test_user_written_condition_reports_supported_templates_for_unrecognized_text():
+    result = validate_condition_text("随便乱写一个无法执行的条件")
+
+    assert result.ok is False
+    assert result.condition is None
+    assert "收盘价站上N日均线" in result.errors[0].message
+    assert "量比N日介于A到B" in result.errors[0].message
+    assert "近N日主力净流入大于X万/亿" in result.errors[0].message

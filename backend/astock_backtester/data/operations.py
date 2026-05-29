@@ -5,6 +5,7 @@ from collections.abc import Callable, Sequence
 import pandas as pd
 
 from astock_backtester.data.cache import LocalCache
+from astock_backtester.data.warehouse import Warehouse
 from astock_backtester.models import (
     DailyBarsCoverageItem,
     DailyBarsCoverageResponse,
@@ -113,10 +114,13 @@ def fetch_daily_bars_into_cache(
     )
 
 
-def build_service_health(cache: LocalCache, port: int | None = None) -> ServiceHealth:
+def build_service_health(cache: LocalCache, warehouse: Warehouse, port: int | None = None) -> ServiceHealth:
+    coverage = warehouse.coverage()
+    if not any(item.symbols > 0 for item in coverage):
+        coverage = cache.coverage()
     return ServiceHealth(
         ok=True,
         cache_path=str(cache.root.resolve()),
         port=port,
-        coverage=cache.coverage(),
+        coverage=coverage,
     )

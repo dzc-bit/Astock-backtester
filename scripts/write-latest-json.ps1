@@ -3,6 +3,7 @@ param(
   [Parameter(Mandatory = $true)][string]$AssetName,
   [Parameter(Mandatory = $true)][string]$Notes,
   [string]$Tag = "",
+  [string]$ReleaseAssetName = "",
   [string]$OutputPath = "release-assets\latest.json"
 )
 
@@ -11,6 +12,10 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 
 if (-not $Tag) {
   $Tag = "v$Version"
+}
+
+if (-not $ReleaseAssetName) {
+  $ReleaseAssetName = $AssetName
 }
 
 $signaturePath = Join-Path $repoRoot "src-tauri\target\release\bundle\nsis\$AssetName.sig"
@@ -26,7 +31,7 @@ $latest = @{
   platforms = @{
     "windows-x86_64" = @{
       signature = $signature
-      url = "https://github.com/dzc-bit/A_stock_receiver/releases/download/$Tag/$AssetName"
+      url = "https://github.com/dzc-bit/Astock-backtester/releases/download/$Tag/$ReleaseAssetName"
     }
   }
 }

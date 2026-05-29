@@ -119,6 +119,42 @@ describe("DataCenter", () => {
     expect(await screen.findByText(/Baidu daily source returned malformed kline/)).toBeInTheDocument();
   });
 
+  it("refreshes logs from the reconnected service after an import timeout", async () => {
+    const user = userEvent.setup();
+    apiMocks.ensureDataService.mockClear();
+    apiMocks.importDailyBars.mockClear();
+    apiMocks.loadDataServiceHealth.mockClear();
+    apiMocks.loadDataServiceLogs.mockClear();
+    apiMocks.ensureDataService
+      .mockResolvedValueOnce({
+        running: true,
+        port: 9011,
+        base_url: "http://127.0.0.1:9011",
+        cache_dir: ".astock-cache",
+        message: "local data service is ready"
+      })
+      .mockResolvedValueOnce({
+        running: true,
+        port: 9012,
+        base_url: "http://127.0.0.1:9012",
+        cache_dir: ".astock-cache",
+        message: "local data service restarted"
+      });
+    apiMocks.importDailyBars.mockRejectedValue(
+      new Error("本地数据服务请求超时，请稍后重试或重新连接本地服务。")
+    );
+
+    render(<DataCenter cacheDir=".astock-cache" coverage={coverage} onCoverageChange={vi.fn()} />);
+
+    await screen.findByText(/http:\/\/127\.0\.0\.1:9011/);
+    await user.click(screen.getByRole("button", { name: "导入示例数据" }));
+
+    await waitFor(() => expect(apiMocks.ensureDataService).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(apiMocks.loadDataServiceHealth).toHaveBeenLastCalledWith("http://127.0.0.1:9012"));
+    await waitFor(() => expect(apiMocks.loadDataServiceLogs).toHaveBeenLastCalledWith("http://127.0.0.1:9012"));
+    expect(screen.getByRole("status", { name: "数据中心状态" })).toHaveTextContent("本地数据服务请求超时");
+  });
+
   it("fetches missing daily bars through the service and refreshes parent coverage", async () => {
     const user = userEvent.setup();
     const onCoverageChange = vi.fn();

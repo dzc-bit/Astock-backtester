@@ -262,6 +262,10 @@ class RecommendedStrategy(BaseModel):
     suitable_market: str
     risk_note: str
     example_conditions: list[str] = Field(default_factory=list)
+    scenario: str
+    featured: bool = False
+    required_datasets: list[str] = Field(default_factory=list)
+    capability_note: str | None = None
     strategy: StrategyConfig
 
 

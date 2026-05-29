@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
 import { Activity, Database, Flame, ShieldAlert, TrendingUp } from "lucide-react";
 import {
-  loadCoverage,
   loadMarketNews,
   loadRealtimeMarketSnapshot,
   loadRecommendedStrategies,
@@ -15,6 +14,15 @@ import { MarketDashboard } from "./components/MarketDashboard";
 import { NewsPanel } from "./components/NewsPanel";
 import { ResultsOverview } from "./components/ResultsOverview";
 import { RiskAlertsModal } from "./components/RiskAlertsModal";
+import {
+  cloneStrategyConfig,
+  createSavedStrategyPreset,
+  hasSavableRules,
+  isBuiltInStrategyPreset,
+  loadSavedStrategies,
+  persistSavedStrategies,
+  strategySignature
+} from "./savedStrategies";
 import { StrategyWorkbench } from "./components/StrategyWorkbench";
 import { TradesTable } from "./components/TradesTable";
 import { UpdatePanel } from "./components/UpdatePanel";
@@ -29,6 +37,7 @@ import type {
   RealtimeMarketSnapshot,
   RecommendedStrategy,
   RiskAlertsResponse,
+  SavedStrategyPreset,
   StrategyConfig
 } from "./types";
 
@@ -133,12 +142,39 @@ export function App() {
   const [isLoadingRiskAlerts, setIsLoadingRiskAlerts] = useState(false);
   const [riskModalOpen, setRiskModalOpen] = useState(false);
   const [recommendedStrategies, setRecommendedStrategies] = useState<RecommendedStrategy[]>([]);
+  const [savedStrategies, setSavedStrategies] = useState<SavedStrategyPreset[]>(() => loadSavedStrategies());
   const [conditionValidation, setConditionValidation] = useState<ConditionValidationResult | null>(null);
   const [isValidatingCondition, setIsValidatingCondition] = useState(false);
   const [settingsDraftErrors, setSettingsDraftErrors] = useState<string[]>([]);
+  const [strategySaveMessage, setStrategySaveMessage] = useState<string | null>(null);
 
-  const refreshCoverage = async () => {
-    setCoverage(await loadCoverage(".astock-cache"));
+  const saveStrategyIfConfirmed = (currentStrategy: StrategyConfig) => {
+    const hasCustomEntryRule = currentStrategy.entry_groups.some((group) =>
+      group.conditions.some((condition) => Boolean(condition.expression?.trim()))
+    );
+    const hasCustomExitRule = currentStrategy.exit_rules.some((condition) => Boolean(condition.expression?.trim()));
+    if (
+      !hasSavableRules(currentStrategy) ||
+      !hasCustomEntryRule ||
+      !hasCustomExitRule ||
+      strategySignature(currentStrategy) === strategySignature(defaultStrategy)
+    ) {
+      return;
+    }
+    const existing = savedStrategies.find((item) => strategySignature(item.strategy) === strategySignature(currentStrategy));
+    if (existing) {
+      setStrategySaveMessage(`当前策略已保存在“${existing.name}”中。`);
+      return;
+    }
+    if (!window.confirm("当前入场规则和离场规则已成功运行回测，是否保存到策略配置？")) {
+      setStrategySaveMessage("本次未保存策略，你可以继续调整后再次运行。");
+      return;
+    }
+    const nextPreset = createSavedStrategyPreset(currentStrategy, savedStrategies);
+    const nextSavedStrategies = [nextPreset, ...savedStrategies];
+    persistSavedStrategies(nextSavedStrategies);
+    setSavedStrategies(nextSavedStrategies);
+    setStrategySaveMessage(`已保存策略：${nextPreset.name}`);
   };
 
   const runBacktest = async () => {
@@ -183,6 +219,7 @@ export function App() {
       setResult(nextResult);
       setStreamedTrades(nextResult.trades);
       setRunProgressMessage(null);
+      saveStrategyIfConfirmed(strategy);
       setRunPhases(["校验参数", "读取本地数据", "计算指标", "撮合交易", "生成结果"]);
     } catch (caught) {
       setError(caught instanceof Error ? translateError(caught.message) : "回测运行失败。");
@@ -191,10 +228,6 @@ export function App() {
       setIsRunningBacktest(false);
     }
   };
-
-  useEffect(() => {
-    void refreshCoverage();
-  }, []);
 
   useEffect(() => {
     if (!dataService) {
@@ -341,6 +374,23 @@ export function App() {
     custom: settings.custom_symbols.length > 0 ? `自选 ${settings.custom_symbols.length} 只` : "自选代码"
   }[settings.stock_pool];
 
+  const applySavedStrategy = (preset: SavedStrategyPreset) => {
+    setStrategy(cloneStrategyConfig(preset.strategy));
+    setStrategySaveMessage(`已套用已保存策略：${preset.name}`);
+  };
+
+  const deleteSavedStrategy = (presetId: string) => {
+    if (isBuiltInStrategyPreset(presetId)) {
+      setStrategySaveMessage("内置基础策略会一直保留，不能删除。");
+      return;
+    }
+    const target = savedStrategies.find((item) => item.id === presetId);
+    const nextSavedStrategies = savedStrategies.filter((item) => item.id !== presetId);
+    persistSavedStrategies(nextSavedStrategies);
+    setSavedStrategies(nextSavedStrategies);
+    setStrategySaveMessage(target ? `已删除已保存策略：${target.name}` : "已删除已保存策略。");
+  };
+
   return (
     <main className="app-shell">
       <header className="topbar">
@@ -414,8 +464,12 @@ export function App() {
           isValidatingCondition={isValidatingCondition}
           validationExamples={conditionValidation?.examples ?? []}
           recommendedStrategies={recommendedStrategies}
+          savedStrategies={savedStrategies}
+          strategySaveMessage={strategySaveMessage}
           onValidateCondition={handleValidateCondition}
           validateConditionText={validateConditionText}
+          onApplySavedStrategy={applySavedStrategy}
+          onDeleteSavedStrategy={deleteSavedStrategy}
           onSettingsDraftErrorsChange={setSettingsDraftErrors}
         />
         {error ? <div className="error-banner" role="alert">{error}</div> : null}
