@@ -97,6 +97,27 @@ def test_warehouse_coverage_reports_daily_and_market_cap(tmp_path):
     assert coverage["market_cap"].missing_rows == 0
 
 
+def test_warehouse_coverage_uses_partition_stats_without_full_read(tmp_path, monkeypatch):
+    warehouse = Warehouse(tmp_path)
+    warehouse.write_daily_bars(_bars())
+
+    def fail_full_read(*args, **kwargs):
+        raise AssertionError("coverage should not load the full warehouse")
+
+    monkeypatch.setattr(warehouse, "read_daily_bars", fail_full_read)
+
+    coverage = {item.dataset: item for item in warehouse.coverage()}
+
+    assert coverage["daily_bars"].symbols == 2
+    assert coverage["daily_bars"].start_date.isoformat() == "2015-01-05"
+    assert coverage["daily_bars"].end_date.isoformat() == "2016-01-04"
+    assert coverage["daily_bars"].missing_rows == 0
+    assert coverage["market_cap"].symbols == 2
+    assert coverage["market_cap"].missing_rows == 0
+    assert coverage["capital_flow"].symbols == 0
+    assert coverage["capital_flow"].missing_rows == 3
+
+
 def test_warehouse_reads_latest_daily_bars_from_recent_partitions(tmp_path):
     warehouse = Warehouse(tmp_path)
     warehouse.write_daily_bars(_bars())
