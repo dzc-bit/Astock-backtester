@@ -27,6 +27,14 @@ def test_tauri_bundle_builds_data_service_before_packaging():
     assert config["bundle"]["resources"] == ["bin"]
 
 
+def test_vite_config_resolves_real_frontend_root_from_config_dir():
+    config = Path("frontend/vite.config.ts").read_text(encoding="utf-8")
+
+    assert 'const frontendRoot = realpathSync(fileURLToPath(new URL(".", import.meta.url)));' in config
+    assert "root: frontendRoot" in config
+    assert 'outDir: resolve(frontendRoot, "../dist")' in config
+
+
 def test_write_latest_json_supports_distinct_release_asset_name():
     script = Path("scripts/write-latest-json.ps1").read_text(encoding="utf-8")
 
@@ -43,7 +51,8 @@ def test_service_manager_defines_and_uses_packaged_sidecar_relative_helper():
     assert "resource_dir.join(packaged_service_relative_path())" in source
 
 
-def test_service_manager_resolves_release_cache_dir_from_app_local_data():
+def test_service_manager_resolves_release_cache_dir_from_d_drive_workspace_data_dir():
     source = Path("src-tauri/src/service_manager.rs").read_text(encoding="utf-8")
 
-    assert "app_local_data_dir()" in source
+    assert 'join("运行产物").join("本地数据仓")' in source
+    assert "app_local_data_dir()" not in source

@@ -174,6 +174,7 @@ describe("DataCenter", () => {
     ));
     expect(onCoverageChange).toHaveBeenCalledWith(coverage);
     expect(await screen.findByText("Fetched 3 daily bar rows")).toBeInTheDocument();
+    expect(screen.getAllByText("建议补齐").length).toBeGreaterThan(0);
   });
 
   afterEach(() => {

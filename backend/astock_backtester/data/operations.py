@@ -24,21 +24,28 @@ def _date_range(start_date: pd.Timestamp, end_date: pd.Timestamp) -> set[pd.Time
 
 def build_daily_bars_coverage(
     cache: LocalCache,
+    warehouse: Warehouse | None = None,
     symbols: Sequence[str] | None = None,
     start_date: str | None = None,
     end_date: str | None = None,
 ) -> DailyBarsCoverageResponse:
-    bars = cache.read_daily_bars()
+    bars = pd.DataFrame()
+    used_warehouse = False
+    if warehouse is not None:
+        bars = warehouse.read_daily_bars(symbols=symbols, start_date=start_date, end_date=end_date)
+        used_warehouse = not bars.empty
+    if bars.empty:
+        bars = cache.read_daily_bars()
     if bars.empty:
         return DailyBarsCoverageResponse(items=[])
 
-    if symbols:
+    if not used_warehouse and symbols:
         selected_symbols = {str(symbol).strip() for symbol in symbols if str(symbol).strip()}
         if selected_symbols:
             bars = bars.loc[bars["symbol"].astype(str).isin(selected_symbols)]
-    if start_date:
+    if not used_warehouse and start_date:
         bars = bars.loc[bars["trade_date"] >= pd.Timestamp(start_date)]
-    if end_date:
+    if not used_warehouse and end_date:
         bars = bars.loc[bars["trade_date"] <= pd.Timestamp(end_date)]
     if bars.empty:
         return DailyBarsCoverageResponse(items=[])
@@ -75,12 +82,16 @@ def import_daily_bars_into_cache(
     cache: LocalCache,
     frame: pd.DataFrame,
     source: str,
+    warehouse: Warehouse | None = None,
 ) -> DataOperationResult:
     cache.write_daily_bars(frame)
+    if warehouse is not None:
+        warehouse.write_daily_bars(frame)
+    coverage = warehouse.coverage() if warehouse is not None else cache.coverage()
     return DataOperationResult(
         status="ok",
         imported_rows=int(len(frame)),
-        coverage=cache.coverage(),
+        coverage=coverage,
         logs=[ServiceLogEntry(level="info", message=f"Imported daily bars from {source}")],
     )
 
@@ -91,6 +102,7 @@ def fetch_daily_bars_into_cache(
     symbols: Sequence[str],
     start_date: str,
     end_date: str,
+    warehouse: Warehouse | None = None,
 ) -> DataOperationResult:
     requested_symbols = [str(symbol) for symbol in symbols]
     frame = fetcher(requested_symbols, start_date, end_date)
@@ -98,18 +110,21 @@ def fetch_daily_bars_into_cache(
         fetched_symbols: list[str] = []
     else:
         cache.write_daily_bars(frame)
+        if warehouse is not None:
+            warehouse.write_daily_bars(frame)
         fetched_symbols = sorted(frame["symbol"].astype(str).unique().tolist())
     missing_symbols = sorted(symbol for symbol in requested_symbols if symbol not in fetched_symbols)
     logs = [ServiceLogEntry(level="info", message=f"Fetched {len(frame)} daily bar rows")]
     if missing_symbols:
         logs.append(ServiceLogEntry(level="warning", message=f"Missing symbols: {', '.join(missing_symbols)}"))
+    coverage = warehouse.coverage() if warehouse is not None else cache.coverage()
     return DataOperationResult(
         status="partial" if missing_symbols else "ok",
         imported_rows=int(len(frame)),
         requested_symbols=requested_symbols,
         fetched_symbols=fetched_symbols,
         missing_symbols=missing_symbols,
-        coverage=cache.coverage(),
+        coverage=coverage,
         logs=logs,
     )
 

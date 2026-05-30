@@ -385,7 +385,7 @@ export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceRead
                     <td>{item.missing_rows}</td>
                     <td>
                       <span className={item.missing_rows === 0 ? "health-pill good" : "health-pill warn"}>
-                        {item.missing_rows === 0 ? "覆盖正常" : "需要补齐"}
+                        {item.missing_rows === 0 ? "数据已就绪" : "建议补齐"}
                       </span>
                       <small>{meta.source}</small>
                     </td>

@@ -200,9 +200,11 @@ function parseSymbols(value: string): string[] {
 
 function settingDateRange(coverage: DatasetCoverage[]): { min?: string; max?: string } {
   const daily = coverage.find((item) => item.dataset === "daily_bars");
+  const today = new Date().toISOString().slice(0, 10);
+  const max = daily?.end_date && daily.end_date < today ? daily.end_date : today;
   return {
     min: daily?.start_date ?? undefined,
-    max: daily?.end_date ?? undefined
+    max
   };
 }
 

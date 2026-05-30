@@ -1,0 +1,11 @@
+{
+    "platforms":  {
+                      "windows-x86_64":  {
+                                             "signature":  "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTekhYdjVRcU50eTR2cWs0YXNYZFUyTUxja3pSOE1mSExqUGF1R3JraitvZEg3dnZLUnR3MUlyNEIyRS9lYS8yYzl1Y3R3K3ZjSnZYU2xsRm9HUnY5K0FEb2M0eE16V1FRPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzgwMTI3NTk1CWZpbGU6QeiCoeetlueVpeWbnua1i+W3peS9nOWPsF8xLjAuMF94NjQtc2V0dXAuZXhlCkNVTHpUYjJCSk11TUh3cUkxOFlvbndQQmVjR3U4WmdQZ0xXMkoveGFGUzQ1UnZaTk9ra3lBVXhUbTFRanBwamU1M3dWRmZPR3FXcHBRV3YwRmt6cEJRPT0K",
+                                             "url":  "https://github.com/dzc-bit/Astock-backtester/releases/download/v1.0.0/A股策略回测工作台_1.0.0_x64-setup.exe"
+                                         }
+                  },
+    "pub_date":  "2026-05-30T07:57:27Z",
+    "version":  "1.0.0",
+    "notes":  "Promote Tonghuashun realtime market summary and hot-topic sources, add HTML-based industry fallback, and ship desktop release 1.0.0."
+}
