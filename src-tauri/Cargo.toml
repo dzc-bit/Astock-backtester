@@ -1,6 +1,6 @@
 [package]
 name = "a-stock-backtester"
-version = "0.1.9"
+version = "1.0.0"
 description = "A-share historical backtester"
 edition = "2021"
 

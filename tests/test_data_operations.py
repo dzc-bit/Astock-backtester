@@ -12,6 +12,9 @@ from astock_backtester.data.operations import (
     fetch_daily_bars_into_cache,
     import_daily_bars_into_cache,
 )
+from astock_backtester.data.realtime import (
+    _aggregate_ths_hot_topics,
+)
 from astock_backtester.data.warehouse import Warehouse
 
 
@@ -258,3 +261,18 @@ def test_import_syncs_warehouse_when_provided(tmp_path):
     assert len(stored) == 1
     assert stored.loc[0, "symbol"] == "AAA"
     assert datasets["daily_bars"].symbols == 1
+
+
+def test_aggregate_ths_hot_topics_ranks_normalized_topics():
+    topics = _aggregate_ths_hot_topics(
+        [
+            {"code": "300001", "name": "A", "reason": "算力租赁+AI政务", "zhangfu": 9.9, "chengjiaoe": 100000},
+            {"code": "300002", "name": "B", "reason": "算力租赁+液冷服务器", "zhangfu": 8.2, "chengjiaoe": 90000},
+            {"code": "300003", "name": "C", "reason": "液冷服务器+AI政务", "zhangfu": 6.8, "chengjiaoe": 70000},
+        ]
+    )
+
+    assert topics
+    assert topics[0].name == "算力租赁"
+    assert topics[0].source == "ths-hot-reason"
+    assert all(topic.name not in {"", "A股", "市场"} for topic in topics)

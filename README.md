@@ -9,6 +9,7 @@ Windows 桌面版 A 股回测工具，前端使用 React，桌面容器使用 Ta
 - 项目根下的 `.astock-cache` 只是指向该目录的 Junction。
 - 已保存策略在桌面端写入 `D:\New project 6\运行产物\策略配置\saved-strategies.json`。
 - 首页行情、资讯、风险、推荐策略都通过本地 HTTP 数据服务聚合。
+- 实时行情链路已调整为“同花顺优先，东方财富与本地历史兜底”，避免首页继续显示空题材或纯本地红绿家数。
 - 应用内“检查更新”走 Tauri updater，不走本地 HTTP 服务。
 
 ## 统一路径规则
@@ -80,9 +81,9 @@ Windows 桌面版 A 股回测工具，前端使用 React，桌面容器使用 Ta
 | 行情模块 | 本地接口 | 后端实现 | 上游来源 / 兜底 |
 | --- | --- | --- | --- |
 | 指数行情 | `GET /realtime/market-snapshot` | `RealtimeMarketProvider._fetch_indexes` | Sina `https://hq.sinajs.cn/list=...` |
-| 红绿家数 | `GET /realtime/market-snapshot` | `RealtimeMarketProvider._snapshot_from_local` | 本地 `warehouse` 最近交易日统计 |
-| 强势板块 | `GET /realtime/market-snapshot` | `RealtimeMarketProvider._fetch_live_sectors` | 东方财富板块榜，失败时退回 Sina 板块，再失败退回本地市场分组 |
-| 昨日强势追踪 | `GET /realtime/market-snapshot` | `RealtimeMarketProvider._snapshot_from_local` | 本地 `warehouse` 前一交易日分组 |
+| 红绿家数 | `GET /realtime/market-snapshot` | `RealtimeMarketProvider._fetch_live_breadth` | 同花顺市场总览页优先，失败时退回东方财富全 A 实时统计，再失败退回本地 `warehouse` 最近交易日统计 |
+| 强势板块 | `GET /realtime/market-snapshot` | `RealtimeMarketProvider._fetch_live_sectors` | 同花顺热点归因优先，再退回同花顺行业板块总览，再退回东方财富概念板块、东方财富行业板块、Sina 板块，最后才退回本地市场分组 |
+| 昨日强势追踪 | `GET /realtime/market-snapshot` | `RealtimeMarketProvider._snapshot_from_local` + `RealtimeMarketProvider._local_market_groups` | 使用当前实时板块成员与本地 `warehouse` 前一交易日涨跌幅聚合，无法实时取板块成员时退回空列表 |
 | 市场资讯 | `GET /market/news` | `MarketNewsProvider.latest_news` | 东方财富栏目、东方财富要闻页、财联社电报 |
 | 风险清单 | `GET /risk/alerts` | `RiskAlertProvider.current_alerts` | 本地潜在风险观察名单、东方财富、Sina 名称扫描、AData、本地仓库兜底 |
 
