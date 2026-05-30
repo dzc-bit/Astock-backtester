@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Sequence
 
 import pandas as pd
+import pyarrow.parquet as pq
 
 from astock_backtester.data.importer import normalize_daily_bars
 from astock_backtester.models import DatasetCoverage
@@ -133,35 +134,91 @@ class Warehouse:
         )
 
     def coverage(self) -> list[DatasetCoverage]:
-        bars = self.read_daily_bars()
-        if bars.empty:
+        paths = sorted(self.daily_bars_root.glob("year=*/daily_bars.parquet"))
+        if not paths:
             return [
                 DatasetCoverage(dataset="daily_bars", symbols=0, start_date=None, end_date=None),
                 DatasetCoverage(dataset="market_cap", symbols=0, start_date=None, end_date=None),
                 DatasetCoverage(dataset="capital_flow", symbols=0, start_date=None, end_date=None),
             ]
-        start = bars["trade_date"].min().date()
-        end = bars["trade_date"].max().date()
+
+        required_columns = ["symbol", "trade_date", "open", "high", "low", "close"]
+        optional_columns = ["float_market_cap", "main_net_inflow"]
+        wanted_columns = required_columns + optional_columns
+        symbols: set[str] = set()
+        market_cap_symbols: set[str] = set()
+        capital_flow_symbols: set[str] = set()
+        start: date | None = None
+        end: date | None = None
+        daily_missing_rows = 0
+        market_cap_missing_rows = 0
+        capital_flow_missing_rows = 0
+
+        for path in paths:
+            available_columns = set(pq.ParquetFile(path).schema_arrow.names)
+            selected_columns = [column for column in wanted_columns if column in available_columns]
+            if "symbol" not in selected_columns or "trade_date" not in selected_columns:
+                continue
+
+            frame = pd.read_parquet(path, columns=selected_columns)
+            if frame.empty:
+                continue
+            row_count = int(len(frame))
+            frame["trade_date"] = pd.to_datetime(frame["trade_date"])
+            symbols.update(str(symbol) for symbol in frame["symbol"].dropna().astype(str).unique())
+
+            part_start = frame["trade_date"].min().date()
+            part_end = frame["trade_date"].max().date()
+            start = part_start if start is None else min(start, part_start)
+            end = part_end if end is None else max(end, part_end)
+
+            present_ohlc = [column for column in ["open", "high", "low", "close"] if column in frame]
+            if len(present_ohlc) < 4:
+                daily_missing_rows += row_count
+            else:
+                daily_missing_rows += int(frame[present_ohlc].isna().any(axis=1).sum())
+
+            if "float_market_cap" in frame:
+                market_cap_mask = frame["float_market_cap"].notna()
+                market_cap_symbols.update(str(symbol) for symbol in frame.loc[market_cap_mask, "symbol"].dropna().astype(str).unique())
+                market_cap_missing_rows += int((~market_cap_mask).sum())
+            else:
+                market_cap_missing_rows += row_count
+
+            if "main_net_inflow" in frame:
+                capital_flow_mask = frame["main_net_inflow"].notna()
+                capital_flow_symbols.update(str(symbol) for symbol in frame.loc[capital_flow_mask, "symbol"].dropna().astype(str).unique())
+                capital_flow_missing_rows += int((~capital_flow_mask).sum())
+            else:
+                capital_flow_missing_rows += row_count
+
+        if start is None or end is None:
+            return [
+                DatasetCoverage(dataset="daily_bars", symbols=0, start_date=None, end_date=None),
+                DatasetCoverage(dataset="market_cap", symbols=0, start_date=None, end_date=None),
+                DatasetCoverage(dataset="capital_flow", symbols=0, start_date=None, end_date=None),
+            ]
+
         return [
             DatasetCoverage(
                 dataset="daily_bars",
-                symbols=int(bars["symbol"].nunique()),
+                symbols=len(symbols),
                 start_date=start,
                 end_date=end,
-                missing_rows=int(bars[["open", "high", "low", "close"]].isna().any(axis=1).sum()),
+                missing_rows=daily_missing_rows,
             ),
             DatasetCoverage(
                 dataset="market_cap",
-                symbols=int(bars.loc[bars["float_market_cap"].notna(), "symbol"].nunique()),
+                symbols=len(market_cap_symbols),
                 start_date=start,
                 end_date=end,
-                missing_rows=int(bars["float_market_cap"].isna().sum()),
+                missing_rows=market_cap_missing_rows,
             ),
             DatasetCoverage(
                 dataset="capital_flow",
-                symbols=int(bars.loc[bars["main_net_inflow"].notna(), "symbol"].nunique()),
+                symbols=len(capital_flow_symbols),
                 start_date=start,
                 end_date=end,
-                missing_rows=int(bars["main_net_inflow"].isna().sum()),
+                missing_rows=capital_flow_missing_rows,
             ),
         ]

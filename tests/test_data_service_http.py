@@ -364,6 +364,166 @@ def test_service_realtime_market_snapshot_prefers_live_sector_provider(tmp_path)
         thread.join(timeout=5)
 
 
+def test_service_realtime_market_snapshot_prefers_ths_concept_quotes_over_industry_quotes(tmp_path):
+    class FakeResponse:
+        text = ""
+        encoding = "utf-8"
+
+        def __init__(self, payload=None, text=""):
+            self._payload = payload or {}
+            self.text = text
+
+        def raise_for_status(self):
+            return
+
+        def json(self):
+            return self._payload
+
+    def requester(url, **kwargs):
+        if "hq.sinajs.cn" in url:
+            return FakeResponse(
+                text='var hq_str_sh000001="上证指数,0,100,101,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2026-05-27,10:30:00";'
+            )
+        if "q.10jqka.com.cn/gn/" in url:
+            return FakeResponse(
+                text="""
+                <html><body>
+                <input type="hidden" id="gnSection"
+                  value='{"1":{"platecode":"885001","platename":"AI应用","199112":4.6,"zjjlr":12.3,"zfl":77},
+                          "2":{"platecode":"885002","platename":"机器人概念","199112":3.1,"zjjlr":8.5,"zfl":68}}'>
+                </body></html>
+                """
+            )
+        if "q.10jqka.com.cn/thshy/index/field/199112/order/desc/page/1/" in url:
+            return FakeResponse(
+                text="""
+                <html><body>
+                <table class="m-table m-pager-table">
+                  <tbody>
+                    <tr>
+                      <td>1</td><td>白酒</td><td>3.52</td><td>416.94</td><td>272.51</td><td>27.66</td><td>18</td><td>1</td><td>65.36</td><td>酒鬼酒</td><td>45.74</td><td>10.01</td>
+                    </tr>
+                  </tbody>
+                </table>
+                </body></html>
+                """
+            )
+        return FakeResponse({"data": {"diff": []}})
+
+    server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
+    server.state.warehouse.write_daily_bars(sample_daily_bars())
+    server.state.realtime_provider.requester = requester
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        response = _request_json("GET", f"http://127.0.0.1:{port}/realtime/market-snapshot")
+
+        assert response["strong_sectors"]
+        assert response["strong_sectors"][0]["name"] == "AI应用"
+        assert response["strong_sectors"][0]["change_pct"] == 0.046
+        assert response["strong_sectors"][0]["source"] == "ths-concept-section"
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_service_realtime_market_snapshot_parses_sub_one_ths_concept_pct_as_percent_unit(tmp_path):
+    class FakeResponse:
+        text = ""
+        encoding = "utf-8"
+
+        def __init__(self, payload=None, text=""):
+            self._payload = payload or {}
+            self.text = text
+
+        def raise_for_status(self):
+            return
+
+        def json(self):
+            return self._payload
+
+    def requester(url, **kwargs):
+        if "hq.sinajs.cn" in url:
+            return FakeResponse(
+                text='var hq_str_sh000001="上证指数,0,100,101,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2026-05-27,10:30:00";'
+            )
+        if "q.10jqka.com.cn/gn/" in url:
+            return FakeResponse(
+                text="""
+                <html><body>
+                <input type="hidden" id="gnSection"
+                  value='{"1":{"platecode":"885001","platename":"预制菜","199112":0.99,"zjjlr":10.9,"zfl":62}}'>
+                </body></html>
+                """
+            )
+        return FakeResponse({"data": {"diff": []}})
+
+    server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
+    server.state.warehouse.write_daily_bars(sample_daily_bars())
+    server.state.realtime_provider.requester = requester
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        response = _request_json("GET", f"http://127.0.0.1:{port}/realtime/market-snapshot")
+
+        assert response["strong_sectors"][0]["name"] == "预制菜"
+        assert abs(response["strong_sectors"][0]["change_pct"] - 0.0099) < 0.000001
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_service_realtime_market_snapshot_sorts_ths_concept_percent_units(tmp_path):
+    class FakeResponse:
+        text = ""
+        encoding = "utf-8"
+
+        def __init__(self, payload=None, text=""):
+            self._payload = payload or {}
+            self.text = text
+
+        def raise_for_status(self):
+            return
+
+        def json(self):
+            return self._payload
+
+    def requester(url, **kwargs):
+        if "hq.sinajs.cn" in url:
+            return FakeResponse(
+                text='var hq_str_sh000001="上证指数,0,100,101,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2026-05-27,10:30:00";'
+            )
+        if "q.10jqka.com.cn/gn/" in url:
+            return FakeResponse(
+                text="""
+                <html><body>
+                <input type="hidden" id="gnSection"
+                  value='{"1":{"platecode":"885001","platename":"预制菜","199112":0.99,"zjjlr":10.9,"zfl":62},
+                          "2":{"platecode":"885002","platename":"AI应用","199112":4.6,"zjjlr":12.3,"zfl":77}}'>
+                </body></html>
+                """
+            )
+        return FakeResponse({"data": {"diff": []}})
+
+    server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
+    server.state.warehouse.write_daily_bars(sample_daily_bars())
+    server.state.realtime_provider.requester = requester
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        response = _request_json("GET", f"http://127.0.0.1:{port}/realtime/market-snapshot")
+
+        assert [item["name"] for item in response["strong_sectors"][:2]] == ["AI应用", "预制菜"]
+        assert abs(response["strong_sectors"][0]["change_pct"] - 0.046) < 0.000001
+        assert abs(response["strong_sectors"][1]["change_pct"] - 0.0099) < 0.000001
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
 def test_service_realtime_market_snapshot_falls_back_to_live_industry_sectors_when_concepts_fail(tmp_path):
     class FakeResponse:
         text = ""
@@ -468,6 +628,67 @@ def test_service_realtime_market_snapshot_uses_live_breadth_counts_when_availabl
         response = _request_json("GET", f"http://127.0.0.1:{port}/realtime/market-snapshot")
 
         assert response["breadth"] == {"up": 1, "down": 1, "flat": 1, "total": 3, "source": "eastmoney-a-share-live"}
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_service_realtime_market_snapshot_paginates_eastmoney_breadth_rows(tmp_path):
+    class FakeResponse:
+        text = ""
+        encoding = "utf-8"
+
+        def __init__(self, payload=None, text=""):
+            self._payload = payload or {}
+            self.text = text
+
+        def raise_for_status(self):
+            return
+
+        def json(self):
+            return self._payload
+
+    requested_pages = []
+
+    def requester(url, **kwargs):
+        if "hq.sinajs.cn" in url:
+            return FakeResponse(
+                text='var hq_str_sh000001="上证指数,0,100,101,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2026-05-27,10:30:00";'
+            )
+        params = kwargs.get("params", {})
+        fs = str(params.get("fs", ""))
+        fields = str(params.get("fields", ""))
+        if "m:90+t:3" in fs:
+            return FakeResponse({"data": {"diff": [{"f12": "BK1036", "f14": "半导体", "f3": 2.5, "f128": "688001"}]}})
+        if fs == "m:0+t:6" and fields == "f12,f14,f3":
+            page = int(params.get("pn", "1"))
+            requested_pages.append(page)
+            pages = {
+                1: [
+                    {"f12": "000001", "f14": "平安银行", "f3": 1.2},
+                    {"f12": "000002", "f14": "万科A", "f3": -0.8},
+                ],
+                2: [
+                    {"f12": "000004", "f14": "国农科技", "f3": 0.0},
+                    {"f12": "000005", "f14": "世纪星源", "f3": 2.1},
+                ],
+            }
+            return FakeResponse({"data": {"total": 4, "diff": pages.get(page, [])}})
+        if fields == "f12,f14,f3":
+            return FakeResponse({"data": {"total": 0, "diff": []}})
+        return FakeResponse({"data": {"diff": []}})
+
+    server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
+    server.state.warehouse.write_daily_bars(sample_daily_bars())
+    server.state.realtime_provider.requester = requester
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        response = _request_json("GET", f"http://127.0.0.1:{port}/realtime/market-snapshot")
+
+        assert response["breadth"] == {"up": 2, "down": 1, "flat": 1, "total": 4, "source": "eastmoney-a-share-live"}
+        assert requested_pages[:2] == [1, 2]
     finally:
         server.shutdown()
         thread.join(timeout=5)
@@ -643,7 +864,80 @@ def test_service_realtime_market_snapshot_prefers_ths_market_summary_breadth(tmp
         thread.join(timeout=5)
 
 
-def test_service_realtime_market_snapshot_prefers_ths_hot_reason_topics(tmp_path):
+def test_service_realtime_market_snapshot_prefers_ths_industry_quotes_over_hot_reason_labels(tmp_path):
+    class FakeResponse:
+        text = ""
+        encoding = "utf-8"
+
+        def __init__(self, payload=None, text=""):
+            self._payload = payload or {}
+            self.text = text
+
+        def raise_for_status(self):
+            return
+
+        def json(self):
+            return self._payload
+
+        @property
+        def content(self):
+            return self.text.encode("gbk", errors="ignore")
+
+    def requester(url, **kwargs):
+        if "hq.sinajs.cn" in url:
+            return FakeResponse(
+                text='var hq_str_sh000001="上证指数,0,100,101,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2026-05-30,10:30:00";'
+            )
+        if "zx.10jqka.com.cn/event/api/getharden" in url:
+            return FakeResponse(
+                payload={
+                    "errocode": 0,
+                    "errormsg": "",
+                    "data": [
+                        {"code": "300001", "name": "A", "reason": "算力租赁+AI政务", "zhangfu": 9.9, "huanshou": 12.0, "chengjiaoe": 100000},
+                        {"code": "300002", "name": "B", "reason": "算力租赁+液冷服务器", "zhangfu": 8.2, "huanshou": 9.0, "chengjiaoe": 90000},
+                        {"code": "300003", "name": "C", "reason": "液冷服务器+AI政务", "zhangfu": 6.8, "huanshou": 7.0, "chengjiaoe": 70000},
+                    ],
+                }
+            )
+        if "q.10jqka.com.cn/thshy/index/field/199112/order/desc/page/1/" in url:
+            return FakeResponse(
+                text="""
+                <html><body>
+                <table class="m-table m-pager-table">
+                  <tbody>
+                    <tr>
+                      <td>1</td><td>白酒</td><td>3.52</td><td>416.94</td><td>272.51</td><td>27.66</td><td>18</td><td>1</td><td>65.36</td><td>酒鬼酒</td><td>45.74</td><td>10.01</td>
+                    </tr>
+                    <tr>
+                      <td>2</td><td>电力</td><td>2.40</td><td>15974.60</td><td>1314.34</td><td>69.90</td><td>83</td><td>24</td><td>8.23</td><td>珈伟新能</td><td>5.72</td><td>11.28</td>
+                    </tr>
+                  </tbody>
+                </table>
+                </body></html>
+                """
+            )
+        return FakeResponse({"data": {"diff": []}})
+
+    server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
+    server.state.warehouse.write_daily_bars(sample_daily_bars())
+    server.state.realtime_provider.requester = requester
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        response = _request_json("GET", f"http://127.0.0.1:{port}/realtime/market-snapshot")
+
+        assert response["strong_sectors"]
+        assert response["strong_sectors"][0]["name"] == "白酒"
+        assert response["strong_sectors"][0]["change_pct"] == 0.0352
+        assert response["strong_sectors"][0]["source"] == "ths-industry-html"
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_service_realtime_market_snapshot_uses_hot_reason_only_when_board_quotes_fail(tmp_path):
     class FakeResponse:
         text = ""
         encoding = "utf-8"

@@ -81,8 +81,8 @@ Windows 桌面版 A 股回测工具，前端使用 React，桌面容器使用 Ta
 | 行情模块 | 本地接口 | 后端实现 | 上游来源 / 兜底 |
 | --- | --- | --- | --- |
 | 指数行情 | `GET /realtime/market-snapshot` | `RealtimeMarketProvider._fetch_indexes` | Sina `https://hq.sinajs.cn/list=...` |
-| 红绿家数 | `GET /realtime/market-snapshot` | `RealtimeMarketProvider._fetch_live_breadth` | 同花顺市场总览页优先，失败时退回东方财富全 A 实时统计，再失败退回本地 `warehouse` 最近交易日统计 |
-| 强势板块 | `GET /realtime/market-snapshot` | `RealtimeMarketProvider._fetch_live_sectors` | 同花顺热点归因优先，再退回同花顺行业板块总览，再退回东方财富概念板块、东方财富行业板块、Sina 板块，最后才退回本地市场分组 |
+| 红绿家数 | `GET /realtime/market-snapshot` | `RealtimeMarketProvider._fetch_live_breadth` | 同花顺市场总览页优先，失败时退回东方财富全 A 按市场段分页聚合统计，再失败退回本地 `warehouse` 最近交易日统计 |
+| 强势板块 | `GET /realtime/market-snapshot` | `RealtimeMarketProvider._fetch_live_sectors` | 同花顺概念题材板块优先，再退回东方财富概念板块、同花顺行业板块、东方财富行业板块、Sina 板块；这些真实板块源都不可用时，才用同花顺热点归因标签兜底 |
 | 昨日强势追踪 | `GET /realtime/market-snapshot` | `RealtimeMarketProvider._snapshot_from_local` + `RealtimeMarketProvider._local_market_groups` | 使用当前实时板块成员与本地 `warehouse` 前一交易日涨跌幅聚合，无法实时取板块成员时退回空列表 |
 | 市场资讯 | `GET /market/news` | `MarketNewsProvider.latest_news` | 东方财富栏目、东方财富要闻页、财联社电报 |
 | 风险清单 | `GET /risk/alerts` | `RiskAlertProvider.current_alerts` | 本地潜在风险观察名单、东方财富、Sina 名称扫描、AData、本地仓库兜底 |

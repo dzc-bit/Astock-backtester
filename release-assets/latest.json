@@ -1,11 +1,11 @@
 {
     "platforms":  {
                       "windows-x86_64":  {
-                                             "signature":  "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTekhYdjVRcU50eTR2cWs0YXNYZFUyTUxja3pSOE1mSExqUGF1R3JraitvZEg3dnZLUnR3MUlyNEIyRS9lYS8yYzl1Y3R3K3ZjSnZYU2xsRm9HUnY5K0FEb2M0eE16V1FRPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzgwMTI3NTk1CWZpbGU6QeiCoeetlueVpeWbnua1i+W3peS9nOWPsF8xLjAuMF94NjQtc2V0dXAuZXhlCkNVTHpUYjJCSk11TUh3cUkxOFlvbndQQmVjR3U4WmdQZ0xXMkoveGFGUzQ1UnZaTk9ra3lBVXhUbTFRanBwamU1M3dWRmZPR3FXcHBRV3YwRmt6cEJRPT0K",
-                                             "url":  "https://github.com/dzc-bit/Astock-backtester/releases/download/v1.0.0/A股策略回测工作台_1.0.0_x64-setup.exe"
+                                             "signature":  "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTekhYdjVRcU50eTB2NUxCUTAxcUxBVmdvVEFRY1dxdTJlZzVYNDc0L1FWY1JyZFIwL1N1d2xSQ1h0NEpJek1ob2N4RVQ5RElUQnZuY1JReTl1YnBpQldyRmF4bTlwQmc0PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzgwMTQwMDQ1CWZpbGU6QeiCoeetlueVpeWbnua1i+W3peS9nOWPsF8xLjAuMV94NjQtc2V0dXAuZXhlCmZoQkNlY1lrQUxXMlA5Y2hFN0hLVVpxU0VML2I5Um1UOXlpTmduQmxRRDV1MUlIVzVsTDJPdmthMWMzcUFaVlh6cC8rRlBvb1ZjZC9VaEhZTnNrR0F3PT0K",
+                                             "url":  "https://github.com/dzc-bit/Astock-backtester/releases/download/v1.0.1/AstockBacktester_1.0.1_x64-setup.exe"
                                          }
                   },
-    "pub_date":  "2026-05-30T07:57:27Z",
-    "version":  "1.0.0",
-    "notes":  "Promote Tonghuashun realtime market summary and hot-topic sources, add HTML-based industry fallback, and ship desktop release 1.0.0."
+    "pub_date":  "2026-05-30T11:35:19Z",
+    "version":  "1.0.1",
+    "notes":  "Fix realtime strong sector data, live breadth aggregation, and large warehouse health checks."
 }
