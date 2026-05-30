@@ -20,7 +20,8 @@ import {
   hasSavableRules,
   isBuiltInStrategyPreset,
   loadSavedStrategies,
-  persistSavedStrategies,
+  loadSavedStrategiesFromStore,
+  persistSavedStrategiesToStore,
   strategySignature
 } from "./savedStrategies";
 import { StrategyWorkbench } from "./components/StrategyWorkbench";
@@ -148,7 +149,23 @@ export function App() {
   const [settingsDraftErrors, setSettingsDraftErrors] = useState<string[]>([]);
   const [strategySaveMessage, setStrategySaveMessage] = useState<string | null>(null);
 
-  const saveStrategyIfConfirmed = (currentStrategy: StrategyConfig) => {
+  useEffect(() => {
+    let cancelled = false;
+    void loadSavedStrategiesFromStore()
+      .then((items) => {
+        if (!cancelled) {
+          setSavedStrategies(items);
+        }
+      })
+      .catch(() => {
+        // Keep built-in presets visible even if runtime persistence is unavailable.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const saveStrategyIfConfirmed = async (currentStrategy: StrategyConfig) => {
     const hasCustomEntryRule = currentStrategy.entry_groups.some((group) =>
       group.conditions.some((condition) => Boolean(condition.expression?.trim()))
     );
@@ -172,9 +189,13 @@ export function App() {
     }
     const nextPreset = createSavedStrategyPreset(currentStrategy, savedStrategies);
     const nextSavedStrategies = [nextPreset, ...savedStrategies];
-    persistSavedStrategies(nextSavedStrategies);
-    setSavedStrategies(nextSavedStrategies);
-    setStrategySaveMessage(`已保存策略：${nextPreset.name}`);
+    try {
+      await persistSavedStrategiesToStore(nextSavedStrategies);
+      setSavedStrategies(nextSavedStrategies);
+      setStrategySaveMessage(`已保存策略：${nextPreset.name}`);
+    } catch (caught) {
+      setStrategySaveMessage(caught instanceof Error ? `策略保存失败：${caught.message}` : "策略保存失败。");
+    }
   };
 
   const runBacktest = async () => {
@@ -219,7 +240,7 @@ export function App() {
       setResult(nextResult);
       setStreamedTrades(nextResult.trades);
       setRunProgressMessage(null);
-      saveStrategyIfConfirmed(strategy);
+      await saveStrategyIfConfirmed(strategy);
       setRunPhases(["校验参数", "读取本地数据", "计算指标", "撮合交易", "生成结果"]);
     } catch (caught) {
       setError(caught instanceof Error ? translateError(caught.message) : "回测运行失败。");
@@ -379,16 +400,20 @@ export function App() {
     setStrategySaveMessage(`已套用已保存策略：${preset.name}`);
   };
 
-  const deleteSavedStrategy = (presetId: string) => {
+  const deleteSavedStrategy = async (presetId: string) => {
     if (isBuiltInStrategyPreset(presetId)) {
       setStrategySaveMessage("内置基础策略会一直保留，不能删除。");
       return;
     }
     const target = savedStrategies.find((item) => item.id === presetId);
     const nextSavedStrategies = savedStrategies.filter((item) => item.id !== presetId);
-    persistSavedStrategies(nextSavedStrategies);
-    setSavedStrategies(nextSavedStrategies);
-    setStrategySaveMessage(target ? `已删除已保存策略：${target.name}` : "已删除已保存策略。");
+    try {
+      await persistSavedStrategiesToStore(nextSavedStrategies);
+      setSavedStrategies(nextSavedStrategies);
+      setStrategySaveMessage(target ? `已删除已保存策略：${target.name}` : "已删除已保存策略。");
+    } catch (caught) {
+      setStrategySaveMessage(caught instanceof Error ? `删除策略失败：${caught.message}` : "删除策略失败。");
+    }
   };
 
   return (

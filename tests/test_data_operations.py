@@ -209,3 +209,52 @@ def test_health_prefers_warehouse_coverage_when_available(tmp_path):
     assert datasets["daily_bars"].symbols == 1
     assert datasets["market_cap"].missing_rows == 0
     assert datasets["capital_flow"].missing_rows == 1
+
+
+def test_coverage_prefers_warehouse_rows_when_available(tmp_path):
+    cache = LocalCache(tmp_path)
+    warehouse = Warehouse(tmp_path)
+    warehouse.write_daily_bars(
+        _bars(
+            [
+                ("AAA", "2024-01-02", 10.0, 11.0, 9.0, 10.5, 1000, 0.1, 9_000_000_000.0, 1_500_000.0, False, False, 90),
+                ("AAA", "2024-01-03", 10.5, 11.5, 10.0, 11.0, 1200, 0.1, 9_100_000_000.0, 1_600_000.0, False, False, 91),
+            ]
+        )
+    )
+
+    details = build_daily_bars_coverage(
+        cache=cache,
+        warehouse=warehouse,
+        symbols=["AAA"],
+        start_date="2024-01-02",
+        end_date="2024-01-03",
+    )
+
+    assert [item.symbol for item in details.items] == ["AAA"]
+    assert details.items[0].rows == 2
+
+
+def test_import_syncs_warehouse_when_provided(tmp_path):
+    cache = LocalCache(tmp_path)
+    warehouse = Warehouse(tmp_path)
+
+    result = import_daily_bars_into_cache(
+        cache=cache,
+        warehouse=warehouse,
+        frame=_bars(
+            [
+                ("AAA", "2024-01-02", 10.0, 11.0, 9.0, 10.5, 1000, 0.1, 9_000_000_000.0, 1_500_000.0, False, False, 90),
+            ]
+        ),
+        source="unit-test",
+    )
+
+    cached = cache.read_daily_bars()
+    stored = warehouse.read_daily_bars()
+    datasets = {item.dataset: item for item in result.coverage}
+
+    assert len(cached) == 1
+    assert len(stored) == 1
+    assert stored.loc[0, "symbol"] == "AAA"
+    assert datasets["daily_bars"].symbols == 1

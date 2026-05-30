@@ -182,6 +182,7 @@ class DataServiceHandler(BaseHTTPRequestHandler):
                 self._send_json(
                     build_daily_bars_coverage(
                         self.server.state.cache,
+                        self.server.state.warehouse,
                         symbols=payload.get("symbols"),
                         start_date=payload.get("start_date"),
                         end_date=payload.get("end_date"),
@@ -220,6 +221,7 @@ class DataServiceHandler(BaseHTTPRequestHandler):
                     frame = read_daily_bars(payload["path"])
                 result = import_daily_bars_into_cache(
                     cache=self.server.state.cache,
+                    warehouse=self.server.state.warehouse,
                     frame=frame,
                     source=str(payload.get("source", "file")),
                 )
@@ -230,6 +232,7 @@ class DataServiceHandler(BaseHTTPRequestHandler):
             if self.path == "/fetch/daily-bars":
                 result = fetch_daily_bars_into_cache(
                     cache=self.server.state.cache,
+                    warehouse=self.server.state.warehouse,
                     fetcher=AStockDataAdapter.from_http_sources().fetch_daily_bars,
                     symbols=payload["symbols"],
                     start_date=payload["start_date"],

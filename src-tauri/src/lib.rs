@@ -17,7 +17,9 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::backend_command,
-            commands::ensure_data_service
+            commands::ensure_data_service,
+            commands::load_saved_strategies,
+            commands::persist_saved_strategies
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

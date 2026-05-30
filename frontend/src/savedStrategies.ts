@@ -1,3 +1,4 @@
+import { invoke } from "@tauri-apps/api/core";
 import type { ConditionGroup, ConditionNode, SavedStrategyPreset, StrategyConfig } from "./types";
 import { defaultStrategy } from "./strategyDefaults";
 
@@ -105,6 +106,10 @@ function sortParams(params: ConditionNode["params"]): ConditionNode["params"] {
   return Object.fromEntries(Object.entries(params).sort(([left], [right]) => left.localeCompare(right)));
 }
 
+function isTauriRuntime(): boolean {
+  return typeof window !== "undefined" && Boolean((window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__);
+}
+
 function normalizeCondition(condition: ConditionNode) {
   return {
     condition_id: condition.condition_id,
@@ -153,12 +158,53 @@ export function hasSavableRules(strategy: StrategyConfig): boolean {
   return strategy.entry_groups.some((group) => group.conditions.length > 0) && strategy.exit_rules.length > 0;
 }
 
-export function loadSavedStrategies(): SavedStrategyPreset[] {
-  const builtins = builtInStrategies.map((item) => ({
+function builtInStrategyPresets(): SavedStrategyPreset[] {
+  return builtInStrategies.map((item) => ({
     ...item,
     strategy: cloneStrategyConfig(item.strategy)
   }));
-  if (typeof window === "undefined") {
+}
+
+function parseCustomSavedStrategies(raw: unknown): SavedStrategyPreset[] {
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+  return raw.flatMap((item) => {
+    if (
+      !item ||
+      typeof item !== "object" ||
+      typeof item.id !== "string" ||
+      typeof item.name !== "string" ||
+      typeof item.saved_at !== "string" ||
+      !("strategy" in item)
+    ) {
+      return [];
+    }
+    return [
+      {
+        id: item.id,
+        name: item.name,
+        saved_at: item.saved_at,
+        strategy: cloneStrategyConfig(item.strategy as StrategyConfig)
+      }
+    ];
+  });
+}
+
+function serializeCustomSavedStrategies(items: SavedStrategyPreset[]) {
+  return items
+    .filter((item) => !isBuiltInStrategyPreset(item.id))
+    .map((item) => ({
+      id: item.id,
+      name: item.name,
+      saved_at: item.saved_at,
+      strategy: cloneStrategyConfig(item.strategy)
+    }));
+}
+
+export function loadSavedStrategies(): SavedStrategyPreset[] {
+  const builtins = builtInStrategyPresets();
+  if (typeof window === "undefined" || isTauriRuntime()) {
     return builtins;
   }
   try {
@@ -166,30 +212,7 @@ export function loadSavedStrategies(): SavedStrategyPreset[] {
     if (!raw) {
       return builtins;
     }
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) {
-      return builtins;
-    }
-    const customItems = parsed.flatMap((item) => {
-      if (
-        !item ||
-        typeof item !== "object" ||
-        typeof item.id !== "string" ||
-        typeof item.name !== "string" ||
-        typeof item.saved_at !== "string" ||
-        !item.strategy
-      ) {
-        return [];
-      }
-      return [
-        {
-          id: item.id,
-          name: item.name,
-          saved_at: item.saved_at,
-          strategy: cloneStrategyConfig(item.strategy as StrategyConfig)
-        }
-      ];
-    });
+    const customItems = parseCustomSavedStrategies(JSON.parse(raw));
     return [...builtins, ...customItems];
   } catch {
     return builtins;
@@ -200,8 +223,24 @@ export function persistSavedStrategies(items: SavedStrategyPreset[]): void {
   if (typeof window === "undefined") {
     return;
   }
-  const customItems = items.filter((item) => !isBuiltInStrategyPreset(item.id));
-  window.localStorage.setItem(STORAGE_KEY, JSON.stringify(customItems));
+  window.localStorage.setItem(STORAGE_KEY, JSON.stringify(serializeCustomSavedStrategies(items)));
+}
+
+export async function loadSavedStrategiesFromStore(): Promise<SavedStrategyPreset[]> {
+  if (!isTauriRuntime()) {
+    return loadSavedStrategies();
+  }
+  const builtins = builtInStrategyPresets();
+  const customItems = parseCustomSavedStrategies(await invoke<unknown[]>("load_saved_strategies"));
+  return [...builtins, ...customItems];
+}
+
+export async function persistSavedStrategiesToStore(items: SavedStrategyPreset[]): Promise<void> {
+  if (!isTauriRuntime()) {
+    persistSavedStrategies(items);
+    return;
+  }
+  await invoke("persist_saved_strategies", { items: serializeCustomSavedStrategies(items) });
 }
 
 export function isBuiltInStrategyPreset(presetId: string): boolean {

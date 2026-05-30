@@ -195,6 +195,26 @@ def test_service_uses_provider_symbols_for_full_market_sync_when_not_supplied(tm
         thread.join(timeout=5)
 
 
+def test_service_coverage_endpoint_reads_warehouse_when_cache_is_empty(tmp_path):
+    server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
+    server.state.warehouse.write_daily_bars(sample_daily_bars())
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        response = _request_json(
+            "POST",
+            f"http://127.0.0.1:{port}/coverage/daily-bars",
+            {"symbols": ["AAA"], "start_date": "2024-01-02", "end_date": "2024-01-08"},
+        )
+
+        assert [item["symbol"] for item in response["items"]] == ["AAA"]
+        assert response["items"][0]["rows"] >= 1
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
 def test_service_streams_backtest_trade_events_before_final_result(tmp_path, basic_strategy, basic_settings):
     server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
     server.state.cache.write_daily_bars(sample_daily_bars())
@@ -304,12 +324,24 @@ def test_service_realtime_market_snapshot_prefers_live_sector_provider(tmp_path)
             return FakeResponse(
                 text='var hq_str_sh000001="上证指数,0,100,101,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2026-05-27,10:30:00";'
             )
+        params = kwargs.get("params", {})
+        fs = str(params.get("fs", ""))
+        if "m:90+t:3" in fs:
+            return FakeResponse(
+                {
+                    "data": {
+                        "diff": [
+                            {"f12": "BK1037", "f14": "电力设备", "f3": 3.2, "f128": "300750"},
+                            {"f12": "BK1036", "f14": "半导体", "f3": 2.5, "f128": "688001"},
+                        ]
+                    }
+                }
+            )
         return FakeResponse(
             {
                 "data": {
                     "diff": [
-                        {"f12": "BK1037", "f14": "电力设备", "f3": 3.2, "f128": "300750"},
-                        {"f12": "BK1036", "f14": "半导体", "f3": 2.5, "f128": "688001"},
+                        {"f12": "BK0475", "f14": "银行", "f3": 1.5, "f128": "600036"},
                     ]
                 }
             }
@@ -332,7 +364,7 @@ def test_service_realtime_market_snapshot_prefers_live_sector_provider(tmp_path)
         thread.join(timeout=5)
 
 
-def test_service_realtime_market_snapshot_falls_back_to_local_market_groups_when_live_source_fails(tmp_path):
+def test_service_realtime_market_snapshot_falls_back_to_live_industry_sectors_when_concepts_fail(tmp_path):
     class FakeResponse:
         text = ""
         encoding = "utf-8"
@@ -352,6 +384,21 @@ def test_service_realtime_market_snapshot_falls_back_to_local_market_groups_when
             return FakeResponse(
                 text='var hq_str_sh000001="上证指数,0,100,101,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2026-05-27,10:30:00";'
             )
+        params = kwargs.get("params", {})
+        fs = str(params.get("fs", ""))
+        if "m:90+t:3" in fs:
+            return FakeResponse({"data": {"diff": []}})
+        if "m:90+t:2" in fs:
+            return FakeResponse(
+                {
+                    "data": {
+                        "diff": [
+                            {"f12": "BK1027", "f14": "小金属", "f3": 2.8, "f128": "601899"},
+                            {"f12": "BK0917", "f14": "电力", "f3": 2.1, "f128": "600900"},
+                        ]
+                    }
+                }
+            )
         return FakeResponse({"data": {"diff": []}})
 
     server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
@@ -364,9 +411,63 @@ def test_service_realtime_market_snapshot_falls_back_to_local_market_groups_when
         response = _request_json("GET", f"http://127.0.0.1:{port}/realtime/market-snapshot")
 
         assert response["strong_sectors"]
-        assert response["strong_sectors"][0]["source"] == "local-market-group"
-        assert "东方财富板块榜暂不可用" in response["message"]
-        assert "本地市场分组" in response["message"]
+        assert response["strong_sectors"][0]["name"] == "小金属"
+        assert response["strong_sectors"][0]["source"] == "eastmoney-industry-sector"
+        assert "行业板块" in response["message"]
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_service_realtime_market_snapshot_uses_live_breadth_counts_when_available(tmp_path):
+    class FakeResponse:
+        text = ""
+        encoding = "utf-8"
+
+        def __init__(self, payload=None, text=""):
+            self._payload = payload or {}
+            self.text = text
+
+        def raise_for_status(self):
+            return
+
+        def json(self):
+            return self._payload
+
+    def requester(url, **kwargs):
+        if "hq.sinajs.cn" in url:
+            return FakeResponse(
+                text='var hq_str_sh000001="上证指数,0,100,101,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2026-05-27,10:30:00";'
+            )
+        params = kwargs.get("params", {})
+        fs = str(params.get("fs", ""))
+        fields = str(params.get("fields", ""))
+        if "m:90+t:3" in fs:
+            return FakeResponse({"data": {"diff": [{"f12": "BK1036", "f14": "半导体", "f3": 2.5, "f128": "688001"}]}})
+        if "m:0+t:6" in fs and fields == "f12,f14,f3":
+            return FakeResponse(
+                {
+                    "data": {
+                        "diff": [
+                            {"f12": "000001", "f14": "平安银行", "f3": 1.2},
+                            {"f12": "000002", "f14": "万科A", "f3": -0.8},
+                            {"f12": "000004", "f14": "国农科技", "f3": 0.0},
+                        ]
+                    }
+                }
+            )
+        return FakeResponse({"data": {"diff": []}})
+
+    server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
+    server.state.warehouse.write_daily_bars(sample_daily_bars())
+    server.state.realtime_provider.requester = requester
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        response = _request_json("GET", f"http://127.0.0.1:{port}/realtime/market-snapshot")
+
+        assert response["breadth"] == {"up": 1, "down": 1, "flat": 1, "total": 3, "source": "eastmoney-a-share-live"}
     finally:
         server.shutdown()
         thread.join(timeout=5)
@@ -391,6 +492,19 @@ def test_service_realtime_market_snapshot_tracks_yesterday_strong_sectors_from_l
         if "hq.sinajs.cn" in url:
             return FakeResponse(
                 text='var hq_str_sh000001="上证指数,0,100,101,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2026-05-27,10:30:00";'
+            )
+        params = kwargs.get("params", {})
+        fs = str(params.get("fs", ""))
+        if "b:BK1037" in fs:
+            return FakeResponse(
+                {
+                    "data": {
+                        "diff": [
+                            {"f12": "300001"},
+                            {"f12": "300002"},
+                        ]
+                    }
+                }
             )
         return FakeResponse(
             {
@@ -472,7 +586,7 @@ def test_service_realtime_market_snapshot_tracks_yesterday_strong_sectors_from_l
 
         assert response["strong_sectors"][0]["name"] == "电力设备"
         assert response["yesterday_strong_sectors"]
-        assert response["yesterday_strong_sectors"][0]["name"] == "创业板"
+        assert response["yesterday_strong_sectors"][0]["name"] == "电力设备"
         assert response["yesterday_strong_sectors"][0]["source"] == "local-yesterday-group"
         assert response["message"].endswith("昨日强势板块追踪来自本地历史。")
     finally:

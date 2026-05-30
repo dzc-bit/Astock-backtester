@@ -7,6 +7,16 @@ fn backend_marker(root: &Path) -> PathBuf {
         .join("__init__.py")
 }
 
+fn compile_time_project_root() -> Option<PathBuf> {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let root = manifest_dir.parent()?.to_path_buf();
+    if backend_marker(&root).exists() {
+        Some(root)
+    } else {
+        None
+    }
+}
+
 pub fn resolve_project_root_from(start: &Path) -> Option<PathBuf> {
     for candidate in start.ancestors() {
         if backend_marker(candidate).exists() {
@@ -36,6 +46,10 @@ pub fn project_root() -> Result<PathBuf, String> {
                 return Ok(path);
             }
         }
+    }
+
+    if let Some(path) = compile_time_project_root() {
+        return Ok(path);
     }
 
     Err("project root was not found; expected backend/astock_backtester under the workspace root".to_string())
@@ -74,7 +88,7 @@ pub fn python_command() -> Result<Command, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{backend_dir, bundled_python_path, resolve_project_root_from};
+    use super::{backend_dir, bundled_python_path, compile_time_project_root, resolve_project_root_from};
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -110,5 +124,12 @@ mod tests {
             bundled_python_path(root),
             root.join(".tools").join("python-3.11.9").join("python.exe")
         );
+    }
+
+    #[test]
+    fn compile_time_project_root_points_to_workspace_root() {
+        let root = compile_time_project_root().expect("compile-time workspace root should resolve");
+
+        assert!(backend_dir(&root).join("astock_backtester").join("__init__.py").exists());
     }
 }

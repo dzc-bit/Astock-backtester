@@ -1,63 +1,139 @@
 # A股策略回测工作台
 
-一个面向 A 股历史数据的 Windows 桌面回测工具。目标是把 `a-stock-data` 风格的数据源接入本地缓存，让用户调整 MACD、量比、换手率、前期涨幅、形态、市值、主力资金流入、市场热度等条件，再回滚历史查看策略预期收益。
+Windows 桌面版 A 股回测工具，前端使用 React，桌面容器使用 Tauri，数据与回测逻辑使用 Python。本项目当前的设计原则很明确：历史数据、策略配置、安装产物、签名密钥都统一放在 `D:\New project 6` 目录树内，不再把业务数据写到 `AppData`。
 
-## 当前能力
+## 当前版本重点
 
-- Windows 桌面壳：Tauri + React + Python 后端。
-- 中文工作台界面：数据中心、策略条件、回测设置、收益概览、交易明细。
-- 常见 A 股条件库：市场热度、流通市值、近 N 日主力净流入、MACD、均线、量比、换手率、前期涨幅、突破前高。
-- 历史回测结果：总收益、最大回撤、胜率、交易次数、权益曲线、买入原因。
-- 数据中心：展示本地缓存覆盖范围、缺失行、资金流和市值数据状态。
-- 应用会启动本机 `127.0.0.1` 数据服务来补齐缺失历史数据。
-- 回测引擎仍然只读取本地缓存，不在回测过程中联网。
-- 新版本通过 GitHub Release 发布后，应用内“检查更新”可以检测并安装。
+- 历史日线、资金流、市值覆盖统一由本地数据仓提供。
+- 桌面端本地数据服务统一读取 `D:\New project 6\运行产物\本地数据仓`。
+- 项目根下的 `.astock-cache` 只是指向该目录的 Junction。
+- 已保存策略在桌面端写入 `D:\New project 6\运行产物\策略配置\saved-strategies.json`。
+- 首页行情、资讯、风险、推荐策略都通过本地 HTTP 数据服务聚合。
+- 应用内“检查更新”走 Tauri updater，不走本地 HTTP 服务。
 
-## 安装方式
+## 统一路径规则
 
-### 普通用户（Windows）
+业务路径统一按下面这一套理解：
 
-1. 打开 [Releases](https://github.com/dzc-bit/Astock-backtester/releases) 页面。
-2. 下载最新版本里的 `*_x64-setup.exe` 安装包。
-3. 双击安装包并按提示安装。
-4. 安装完成后打开 `A股策略回测工作台`。
+- 项目根目录：`D:\New project 6`
+- 本地数据仓：`D:\New project 6\运行产物\本地数据仓`
+- 项目缓存别名：`D:\New project 6\.astock-cache`
+- 策略配置：`D:\New project 6\运行产物\策略配置\saved-strategies.json`
+- 安装包产物：`D:\New project 6\运行产物\安装包`
+- 更新签名密钥：`D:\New project 6\运行产物\签名密钥`
 
-如果 Windows SmartScreen 提示未知发布者，请确认安装包来自本仓库 Releases 页面后，再选择继续运行。当前更新包使用 Tauri updater 签名校验，但 Windows 安装包本身还没有配置商业代码签名证书。
+说明：
 
-已经安装过旧版的用户，如果旧版没有“检查更新”入口，需要先手动安装一次最新安装包。由于 `v0.1.7` 进行了更新签名密钥迁移，`v0.1.6` 用户这一次也需要手动安装 `v0.1.7` 安装包；从 `v0.1.7` 开始，后续版本可以继续在应用内点击“检查更新”完成升级。
+- `.astock-cache` 是一个联接目录，目标是 `运行产物\本地数据仓`。
+- 发布态桌面端不再把历史数据或策略配置落到 `C:\Users\<你>\AppData\Local\...`。
+- 桌面端本地服务启动后返回的 `cache_dir` / `cache_path` 应该都指向 `D` 盘项目目录。
 
-## 数据说明
+## 架构概览
 
-当前版本专注本地历史回测，不模拟实时行情。数据中心会通过应用托管的本地服务补齐或导入历史数据；回测路径只读本地缓存，避免在策略回放过程中发生网络请求。
+1. 前端：`frontend/src`
+2. 桌面容器：`src-tauri/src`
+3. Python 数据服务与回测：`backend/astock_backtester`
 
-`a-stock-data` 的具体抓取函数通过适配器边界接入。开发和发布命令见 `docs/dev.md` 与 `docs/release.md`。
+桌面端运行链路：
 
-## 开发运行
+1. 前端先调用 Tauri 命令 `ensure_data_service`。
+2. Tauri 在本机 `127.0.0.1` 随机端口启动 `astock-data-service.exe` 或 Python 模块服务。
+3. 前端通过这个本地 HTTP 服务读取行情、资讯、风险、数据覆盖与回测结果。
+4. 历史回测只读本地数据仓，不在回测执行过程中联网。
 
-普通 Windows 开发环境需要先安装：
+## 按钮与接口总览
 
-- Node.js LTS
-- Python 3.11+
-- Rust 和 `x86_64-pc-windows-msvc` 工具链
-- Visual Studio Build Tools 2022 C++ 工作负载
+下面是当前界面里真正会触发接口的按钮或模块。更完整的明细见 [项目说明书.md](/D:/New%20project%206/项目说明书.md)。
 
-然后执行：
+| 页面 / 模块 | 按钮或动作 | 前端入口 | 调用接口 | 后端处理 |
+| --- | --- | --- | --- | --- |
+| 应用启动 | 连接本地服务 | `ensureDataService` | Tauri `ensure_data_service` | `src-tauri/src/commands.rs` -> `DataServiceManager::ensure_running` |
+| 数据中心 | 刷新覆盖范围 | `handleRefreshDetails` | `POST /coverage/daily-bars` + `GET /health` + `GET /logs/recent` | `backend/astock_backtester/service.py` |
+| 数据中心 | 下载全市场历史数据 | `handleFullMarketSync` | `POST /sync/full-market`，之后轮询 `GET /sync/jobs/{job_id}` | `SyncJobManager` |
+| 数据中心 | 补全缺失数据 | `handleFetch` | `POST /fetch/daily-bars` | `fetch_daily_bars_into_cache` |
+| 数据中心 | 导入示例数据 | `handleImportSample` | `POST /import/daily-bars` with `source=sample` | `import_daily_bars_into_cache` |
+| 数据中心 | 导入本地文件 | `handleImportFile` | `POST /import/daily-bars` with `source=file` | `read_daily_bars` + `import_daily_bars_into_cache` |
+| 首页行情 | 自动刷新行情 | `loadRealtimeMarketSnapshot` | `GET /realtime/market-snapshot` | `RealtimeMarketProvider.market_snapshot` |
+| 资讯面板 | 刷新资讯 | `refreshNews` | `GET /market/news` | `MarketNewsProvider.latest_news` |
+| 风险弹窗 | 刷新风险 | `refreshRiskAlerts` | `GET /risk/alerts` | `RiskAlertProvider.current_alerts` |
+| 推荐策略 | 初始加载 | `loadRecommendedStrategies` | `GET /strategy/recommended` | `recommended_strategies(...)` |
+| 策略配置 | 校验入场条件 | `onValidateCondition` | `POST /strategy/conditions/validate` with `mode=entry` | `validate_condition_text` |
+| 策略配置 | 校验离场条件 | `validateExitCondition` | `POST /strategy/conditions/validate` with `mode=exit` | `validate_exit_condition_text` |
+| 收益概览 | 运行历史回测 | `runBacktest` | `POST /run/backtest/stream` | `_run_backtest_stream` |
+| 更新面板 | 检查更新 | `checkForUpdate` | Tauri updater `check()` | GitHub Release `latest.json` |
+| 更新面板 | 安装并重启 | `installAndRelaunch` | Tauri updater `downloadAndInstall()` + process `relaunch()` | 不经过本地 HTTP 服务 |
+| 策略配置 | 读取已保存策略 | `loadSavedStrategiesFromStore` | Tauri `load_saved_strategies` | 读取 `运行产物\策略配置\saved-strategies.json` |
+| 策略配置 | 保存 / 删除已保存策略 | `persistSavedStrategiesToStore` | Tauri `persist_saved_strategies` | 写入 `运行产物\策略配置\saved-strategies.json` |
+
+不走 HTTP 的纯前端动作：
+
+- 套用推荐策略
+- 套用已保存策略
+- 重置策略
+- 套用数据中心日期
+- 打开 / 关闭风险弹窗
+
+## 行情模块与上游来源
+
+首页“今日实时行情”虽然只有一个前端接口 `GET /realtime/market-snapshot`，但后端内部是多源聚合：
+
+| 行情模块 | 本地接口 | 后端实现 | 上游来源 / 兜底 |
+| --- | --- | --- | --- |
+| 指数行情 | `GET /realtime/market-snapshot` | `RealtimeMarketProvider._fetch_indexes` | Sina `https://hq.sinajs.cn/list=...` |
+| 红绿家数 | `GET /realtime/market-snapshot` | `RealtimeMarketProvider._snapshot_from_local` | 本地 `warehouse` 最近交易日统计 |
+| 强势板块 | `GET /realtime/market-snapshot` | `RealtimeMarketProvider._fetch_live_sectors` | 东方财富板块榜，失败时退回 Sina 板块，再失败退回本地市场分组 |
+| 昨日强势追踪 | `GET /realtime/market-snapshot` | `RealtimeMarketProvider._snapshot_from_local` | 本地 `warehouse` 前一交易日分组 |
+| 市场资讯 | `GET /market/news` | `MarketNewsProvider.latest_news` | 东方财富栏目、东方财富要闻页、财联社电报 |
+| 风险清单 | `GET /risk/alerts` | `RiskAlertProvider.current_alerts` | 本地潜在风险观察名单、东方财富、Sina 名称扫描、AData、本地仓库兜底 |
+
+## 数据导入与写入规则
+
+当前数据写入规则：
+
+1. 历史数据导入 / 补齐时，同时写 `LocalCache` 和 `Warehouse`。
+2. 覆盖范围查询优先读 `Warehouse`，没有命中才退回旧缓存。
+3. 回测读取优先读 `Warehouse` 指定日期区间，没有数据才退回旧缓存。
+4. 桌面端已保存策略写入 `运行产物\策略配置\saved-strategies.json`。
+
+## 开发与验证
+
+常用命令：
 
 ```powershell
-git clone https://github.com/dzc-bit/Astock-backtester.git
-cd Astock-backtester
-python -m pip install -e ".[dev]"
-npm install
+python -m pytest tests/test_data_operations.py tests/test_data_service_http.py tests/test_build_scripts.py -q
 npm run test:ui -- --run
-python -m pytest tests -q
-npm run build:data-service
+powershell -ExecutionPolicy Bypass -File scripts/build-data-service.ps1
 npm run tauri -- build --debug
 ```
 
-调试安装包会生成在：
+如果只看本地服务健康状态，可手动检查：
 
-```text
-src-tauri\target\debug\bundle\nsis\
+```powershell
+Invoke-WebRequest http://127.0.0.1:<port>/health | Select-Object -ExpandProperty Content
 ```
 
-Codex 工作区里的特殊运行方式记录在 `docs/dev.md`。
+期望重点：
+
+- `cache_path` 指向 `D:\New project 6\运行产物\本地数据仓` 或 `D:\New project 6\.astock-cache`
+- 红绿家数、强势板块、昨日强势追踪非空
+- 已保存策略文件落在 `运行产物\策略配置`
+
+## 清理规则
+
+可以安全清理的生成物：
+
+- `.pytest_cache`
+- `dist`
+- `.pyinstaller`
+- `src-tauri\target`
+
+不要清理：
+
+- `运行产物\本地数据仓`
+- `运行产物\签名密钥`
+- 你自己仍在使用的安装包或桌面运行目录
+
+## 相关文件
+
+- [项目说明书.md](/D:/New%20project%206/项目说明书.md)
+- [运行产物/目录说明.md](</D:/New project 6/运行产物/目录说明.md>)

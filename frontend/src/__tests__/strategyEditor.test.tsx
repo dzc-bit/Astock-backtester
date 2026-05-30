@@ -498,7 +498,7 @@ describe("A 股回测工作台界面", () => {
     expect(screen.getByLabelText("新增条件表达式")).toBeInTheDocument();
     expect(screen.queryByLabelText("新增条件")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("窗口")).not.toBeInTheDocument();
-    expect(screen.getByText("收盘价站上20日均线")).toBeInTheDocument();
+    expect(screen.getAllByText("收盘价站上20日均线").length).toBeGreaterThan(0);
     expect(screen.getAllByText("量比2日介于1.2到2.5").length).toBeGreaterThan(0);
   });
 
@@ -953,7 +953,29 @@ describe("A 股回测工作台界面", () => {
     expect(confirmSpy).toHaveBeenCalledWith("当前入场规则和离场规则已成功运行回测，是否保存到策略配置？");
     expect(await screen.findByText("本次未保存策略，你可以继续调整后再次运行。")).toBeInTheDocument();
     expect(window.localStorage.getItem("astock-saved-strategies")).toBeNull();
-    expect(screen.getByText(/完成入场规则、离场规则并运行回测后/)).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "已保存策略" })).toBeInTheDocument();
+  });
+
+  it("caps strategy backtest date inputs at today when coverage ends in the future", async () => {
+    vi.setSystemTime(new Date("2026-05-30T10:00:00+08:00"));
+    apiMocks.loadDataServiceHealth.mockResolvedValue({
+      ok: true,
+      cache_path: "C:\\cache",
+      port: 9010,
+      coverage: [
+        { dataset: "daily_bars", symbols: 2, start_date: "2024-01-02", end_date: "2026-12-31", missing_rows: 0 }
+      ]
+    });
+
+    render(<App />);
+
+    await screen.findByText("日线行情");
+    const strategyStartDateInput = screen.getAllByLabelText("开始日期")[0] as HTMLInputElement;
+    const strategyEndDateInput = screen.getAllByLabelText("结束日期")[0] as HTMLInputElement;
+
+    expect(strategyStartDateInput.max).toBe("2026-05-30");
+    expect(strategyEndDateInput.max).toBe("2026-05-30");
+    expect(screen.getByText(/可用范围 2024-01-02 至 2026-05-30/)).toBeInTheDocument();
   });
 
   it("validates exit rules with exit-specific low-break conditions before running", async () => {
