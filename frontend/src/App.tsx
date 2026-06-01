@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Activity, Database, Flame, ShieldAlert, TrendingUp } from "lucide-react";
 import {
+  loadMarketBriefing,
   loadMarketNews,
   loadRealtimeMarketSnapshot,
   loadRecommendedStrategies,
@@ -26,6 +27,7 @@ import {
 } from "./savedStrategies";
 import { StrategyWorkbench } from "./components/StrategyWorkbench";
 import { TradesTable } from "./components/TradesTable";
+import { TonghuashunBriefingPanel } from "./components/TonghuashunBriefingPanel";
 import { UpdatePanel } from "./components/UpdatePanel";
 import { defaultSettings, defaultStrategy } from "./strategyDefaults";
 import type {
@@ -34,6 +36,7 @@ import type {
   DataServiceStatus,
   DatasetCoverage,
   ConditionValidationResult,
+  MarketBriefingResponse,
   MarketNewsResponse,
   RealtimeMarketSnapshot,
   RecommendedStrategy,
@@ -138,6 +141,8 @@ export function App() {
   const [marketSnapshot, setMarketSnapshot] = useState<RealtimeMarketSnapshot | null>(null);
   const [isLoadingMarket, setIsLoadingMarket] = useState(false);
   const [marketNews, setMarketNews] = useState<MarketNewsResponse | null>(null);
+  const [fupanBriefing, setFupanBriefing] = useState<MarketBriefingResponse | null>(null);
+  const [zaopanBriefing, setZaopanBriefing] = useState<MarketBriefingResponse | null>(null);
   const [isLoadingNews, setIsLoadingNews] = useState(false);
   const [riskAlerts, setRiskAlerts] = useState<RiskAlertsResponse | null>(null);
   const [isLoadingRiskAlerts, setIsLoadingRiskAlerts] = useState(false);
@@ -295,7 +300,14 @@ export function App() {
     }
     setIsLoadingNews(true);
     try {
-      setMarketNews(await loadMarketNews(dataService.base_url));
+      const [news, fupan, zaopan] = await Promise.all([
+        loadMarketNews(dataService.base_url),
+        loadMarketBriefing(dataService.base_url, "fupan"),
+        loadMarketBriefing(dataService.base_url, "zaopan")
+      ]);
+      setMarketNews(news);
+      setFupanBriefing(fupan);
+      setZaopanBriefing(zaopan);
     } finally {
       setIsLoadingNews(false);
     }
@@ -349,8 +361,10 @@ export function App() {
     }
     let cancelled = false;
     const loadAuxiliaryData = async () => {
-      const [newsResult, riskResult, recommendedResult] = await Promise.allSettled([
+      const [newsResult, fupanResult, zaopanResult, riskResult, recommendedResult] = await Promise.allSettled([
         loadMarketNews(dataService.base_url),
+        loadMarketBriefing(dataService.base_url, "fupan"),
+        loadMarketBriefing(dataService.base_url, "zaopan"),
         loadRiskAlerts(dataService.base_url),
         loadRecommendedStrategies(dataService.base_url)
       ]);
@@ -359,6 +373,12 @@ export function App() {
       }
       if (newsResult.status === "fulfilled") {
         setMarketNews(newsResult.value);
+      }
+      if (fupanResult.status === "fulfilled") {
+        setFupanBriefing(fupanResult.value);
+      }
+      if (zaopanResult.status === "fulfilled") {
+        setZaopanBriefing(zaopanResult.value);
       }
       if (riskResult.status === "fulfilled") {
         setRiskAlerts(riskResult.value);
@@ -434,6 +454,7 @@ export function App() {
         <MarketDashboard snapshot={marketSnapshot} isLoading={isLoadingMarket} />
         <NewsPanel news={marketNews} isLoading={isLoadingNews} onRefresh={refreshNews} />
       </div>
+      <TonghuashunBriefingPanel fupan={fupanBriefing} zaopan={zaopanBriefing} />
       <section className="summary-band" aria-label="工作台概览">
         <article className="summary-card heat-card">
           <div>

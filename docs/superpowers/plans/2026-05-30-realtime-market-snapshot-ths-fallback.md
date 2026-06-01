@@ -265,7 +265,7 @@ Expected: build succeeds.
 Run:
 
 ```powershell
-$env:ASTOCK_BACKTESTER_PYTHON = "C:\Users\大帝之资\Documents\New project 6\.tools\python-3.11.9\python.exe"
+$env:ASTOCK_BACKTESTER_PYTHON = "D:\New project 6\.tools\python-3.11.9\python.exe"
 powershell -ExecutionPolicy Bypass -File scripts\build-data-service.ps1
 Remove-Item Env:\ASTOCK_BACKTESTER_PYTHON
 ```
@@ -277,7 +277,7 @@ Expected: `src-tauri\bin\astock-data-service.exe` exists.
 Run:
 
 ```powershell
-$repo = "C:\Users\大帝之资\Documents\New project 6"
+$repo = "D:\New project 6"
 $node = Join-Path $repo ".tools\node-v20.18.1-win-x64\node.exe"
 $cargoBin = Join-Path $repo ".tools\rustup-home\toolchains\stable-x86_64-pc-windows-msvc\bin"
 $rustupBin = Join-Path $repo ".tools\cargo-home\bin"
@@ -330,7 +330,7 @@ git commit -m "build: generate 1.0.0 updater metadata"
 Run:
 
 ```powershell
-$installer = "C:\Users\大帝之资\Documents\New project 6\src-tauri\target\release\bundle\nsis\A股策略回测工作台_1.0.0_x64-setup.exe"
+$installer = "D:\New project 6\src-tauri\target\release\bundle\nsis\A股策略回测工作台_1.0.0_x64-setup.exe"
 Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -match 'a-stock-backtester|A股策略|astock-data-service' } | Stop-Process -Force
 Start-Process -FilePath $installer -ArgumentList '/S' -Wait
 ```

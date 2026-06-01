@@ -10,6 +10,7 @@ import type {
   FetchResult,
   ImportResult,
   ConditionValidationResult,
+  MarketBriefingResponse,
   MarketNewsResponse,
   RealtimeMarketSnapshot,
   RecommendedStrategiesResponse,
@@ -226,6 +227,41 @@ export async function loadMarketNews(baseUrl: string): Promise<MarketNewsRespons
     };
   }
   return serviceFetch<MarketNewsResponse>(baseUrl, "/market/news");
+}
+
+export async function loadMarketBriefing(baseUrl: string, kind: "fupan" | "zaopan"): Promise<MarketBriefingResponse> {
+  if (!isTauriRuntime()) {
+    const now = new Date("2026-06-01T15:30:00+08:00").toISOString();
+    return {
+      kind,
+      updated_at: now,
+      source: "browser-preview",
+      source_url: kind === "fupan" ? "https://stock.10jqka.com.cn/fupan/" : "https://stock.10jqka.com.cn/zaopan/",
+      summary:
+        kind === "fupan"
+          ? "A股三大指数集体调整，煤炭、养鸡、AI应用等方向活跃，科技成长方向分化加剧。"
+          : "早盘关注昨日行情回顾、公司事项、机构观点与停复牌信息，先看主线承接再决定仓位。",
+      sections: [
+        {
+          title: kind === "fupan" ? "指数/概念分析" : "早盘要点",
+          content:
+            kind === "fupan"
+              ? "强势题材集中在煤炭、养鸡和 AI 应用，若次日量能无法延续，应降低追高权重。"
+              : "公司事项和机构观点提供盘前线索，但仍需用开盘后的红绿家数与板块强度确认。",
+          links: [],
+          tables: [
+            {
+              title: "示例表格",
+              columns: ["方向", "观察点"],
+              rows: [{ "方向": "AI应用", "观察点": "看成交额与龙头承接" }]
+            }
+          ]
+        }
+      ],
+      diagnostics: []
+    };
+  }
+  return serviceFetch<MarketBriefingResponse>(baseUrl, `/market/${kind}`);
 }
 
 export async function loadRiskAlerts(baseUrl: string): Promise<RiskAlertsResponse> {

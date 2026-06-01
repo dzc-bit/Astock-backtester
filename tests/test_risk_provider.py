@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import time
 
+import pandas as pd
+
 from astock_backtester.data.risk import RiskAlertProvider
 from astock_backtester.data.warehouse import Warehouse
 
@@ -153,6 +155,59 @@ def test_risk_provider_uses_sina_names_for_local_full_market_symbols(tmp_path):
     assert response.items[1].risk_type == "退市风险"
 
 
+def test_risk_provider_uses_latest_daily_symbols_for_sina_when_symbol_files_missing(tmp_path):
+    warehouse = Warehouse(tmp_path)
+    warehouse.write_daily_bars(
+        pd.DataFrame(
+            [
+                {
+                    "symbol": "000001",
+                    "trade_date": "2026-05-29",
+                    "open": 10,
+                    "high": 11,
+                    "low": 9,
+                    "close": 10.5,
+                    "volume": 1000,
+                },
+                {
+                    "symbol": "000004",
+                    "trade_date": "2026-05-29",
+                    "open": 3,
+                    "high": 3.2,
+                    "low": 2.9,
+                    "close": 3.1,
+                    "volume": 800,
+                },
+            ]
+        )
+    )
+
+    requested_urls: list[str] = []
+
+    def requester(url, *args, **kwargs):
+        requested_urls.append(url)
+        if "hq.sinajs.cn" in url:
+            return FakeTextResponse(
+                'var hq_str_s_sz000001="平安银行,10.76,-0.03,-0.28,839727,90571";\n'
+                'var hq_str_s_sz000004="*ST国华,0.00,0.00,0.00,0,0";\n'
+            )
+        raise RuntimeError("external source unavailable")
+
+    provider = RiskAlertProvider(
+        warehouse,
+        timeout=0.1,
+        requester=requester,
+        adata_loader=lambda: (_ for _ in ()).throw(RuntimeError("adata unavailable")),
+        include_packaged_watchlist=False,
+    )
+
+    response = provider.current_alerts()
+
+    assert any("hq.sinajs.cn" in url and "s_sz000004" in url for url in requested_urls)
+    assert response.source == "sina"
+    assert [item.symbol for item in response.items] == ["000004"]
+
+
 def test_risk_provider_prefers_local_potential_risk_watchlist_with_detailed_reasons(tmp_path):
     warehouse = Warehouse(tmp_path)
     (tmp_path / "potential_risk_watchlist.csv").write_text(
@@ -184,3 +239,59 @@ def test_risk_provider_prefers_local_potential_risk_watchlist_with_detailed_reas
     assert "信息披露违规" in response.items[0].reason
     assert "潜在 ST 风险观察名单" in response.items[0].reason
     assert any("实时扫描未发现新增已 ST" in message for message in response.diagnostics)
+
+
+def test_risk_provider_appends_watchlist_outside_live_st_alerts(tmp_path):
+    warehouse = Warehouse(tmp_path)
+    (tmp_path / "potential_risk_watchlist.csv").write_text(
+        "name,symbol,risk_type,detail\n"
+        "黑芝麻,000716,ST预警,信息披露违规\n",
+        encoding="utf-8",
+    )
+    warehouse.write_daily_bars(
+        pd.DataFrame(
+            [
+                {
+                    "symbol": "000716",
+                    "trade_date": "2026-05-29",
+                    "open": 5,
+                    "high": 5.2,
+                    "low": 4.9,
+                    "close": 5.1,
+                    "volume": 1000,
+                },
+                {
+                    "symbol": "000004",
+                    "trade_date": "2026-05-29",
+                    "open": 3,
+                    "high": 3.2,
+                    "low": 2.9,
+                    "close": 3.1,
+                    "volume": 800,
+                },
+            ]
+        )
+    )
+
+    def requester(url, *args, **kwargs):
+        if "hq.sinajs.cn" in url:
+            return FakeTextResponse(
+                'var hq_str_s_sz000716="黑芝麻,5.00,0.01,0.20,100,500";\n'
+                'var hq_str_s_sz000004="*ST国华,0.00,0.00,0.00,0,0";\n'
+            )
+        raise RuntimeError("external source unavailable")
+
+    provider = RiskAlertProvider(
+        warehouse,
+        timeout=0.1,
+        requester=requester,
+        adata_loader=lambda: (_ for _ in ()).throw(RuntimeError("adata unavailable")),
+        include_packaged_watchlist=False,
+    )
+
+    response = provider.current_alerts()
+
+    assert response.source == "local-watchlist+sina"
+    assert [item.symbol for item in response.items] == ["000716", "000004"]
+    assert response.items[1].name == "*ST国华"
+    assert any("名单外已 ST 或退市股票" in message for message in response.diagnostics)

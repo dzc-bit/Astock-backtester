@@ -225,6 +225,36 @@ class MarketNewsResponse(BaseModel):
     items: list[MarketNewsItem] = Field(default_factory=list)
 
 
+class MarketBriefingLink(BaseModel):
+    title: str
+    url: str | None = None
+    published_at: datetime | None = None
+    category: str | None = None
+
+
+class MarketBriefingTable(BaseModel):
+    title: str | None = None
+    columns: list[str] = Field(default_factory=list)
+    rows: list[dict[str, str]] = Field(default_factory=list)
+
+
+class MarketBriefingSection(BaseModel):
+    title: str
+    content: str | None = None
+    links: list[MarketBriefingLink] = Field(default_factory=list)
+    tables: list[MarketBriefingTable] = Field(default_factory=list)
+
+
+class MarketBriefingResponse(BaseModel):
+    kind: Literal["fupan", "zaopan"]
+    updated_at: datetime
+    source: str
+    source_url: str
+    summary: str
+    sections: list[MarketBriefingSection] = Field(default_factory=list)
+    diagnostics: list[str] = Field(default_factory=list)
+
+
 class RiskAlertItem(BaseModel):
     symbol: str
     name: str
