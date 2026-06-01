@@ -105,10 +105,14 @@ class RiskAlertProvider:
             live_symbols = {item.symbol for item in [*eastmoney_items, *sina_items]}
             watchlist_symbols = {item.symbol for item in watchlist_items}
             new_live_symbols = sorted(live_symbols - watchlist_symbols)
+            source_items = [
+                *watchlist_items,
+                *[item for item in [*eastmoney_items, *sina_items] if item.symbol in new_live_symbols],
+            ]
             if new_live_symbols:
                 diagnostics.append(
                     f"实时名称扫描发现 {len(new_live_symbols)} 只名单外已 ST 或退市股票，"
-                    "主清单仍以潜在风险观察名单为准。"
+                    "已追加到风险清单末尾。"
                 )
             else:
                 diagnostics.append("实时扫描未发现新增已 ST、*ST 或退市名称变化。")
@@ -314,6 +318,17 @@ class RiskAlertProvider:
                     seen.add(symbol)
             if symbols:
                 return symbols
+        try:
+            latest = self.warehouse.read_latest_daily_bars(days=1)
+        except Exception:
+            return symbols
+        if latest.empty or "symbol" not in latest.columns:
+            return symbols
+        for value in latest["symbol"].dropna():
+            symbol = normalize_symbol(str(value))
+            if symbol and symbol not in seen:
+                symbols.append(symbol)
+                seen.add(symbol)
         return symbols
 
     def _sina_symbol(self, symbol: str) -> str | None:

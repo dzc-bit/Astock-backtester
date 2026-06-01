@@ -11,6 +11,7 @@ src-tauri/bin/
 __pycache__/
 .pytest_cache/
 .tmp-test/
+.tmp/
 .reference/
 backend/astock_backtester.egg-info/
 运行产物/

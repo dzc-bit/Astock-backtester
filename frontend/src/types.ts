@@ -125,6 +125,36 @@ export type MarketNewsResponse = {
   items: MarketNewsItem[];
 };
 
+export type MarketBriefingLink = {
+  title: string;
+  url?: string | null;
+  published_at?: string | null;
+  category?: string | null;
+};
+
+export type MarketBriefingTable = {
+  title?: string | null;
+  columns: string[];
+  rows: Array<Record<string, string>>;
+};
+
+export type MarketBriefingSection = {
+  title: string;
+  content?: string | null;
+  links: MarketBriefingLink[];
+  tables: MarketBriefingTable[];
+};
+
+export type MarketBriefingResponse = {
+  kind: "fupan" | "zaopan";
+  updated_at: string;
+  source: string;
+  source_url: string;
+  summary: string;
+  sections: MarketBriefingSection[];
+  diagnostics: string[];
+};
+
 export type RiskAlertItem = {
   symbol: string;
   name: string;

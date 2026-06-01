@@ -1094,6 +1094,70 @@ def test_service_market_news_uses_configured_provider(tmp_path):
         thread.join(timeout=5)
 
 
+def test_service_market_fupan_uses_configured_provider(tmp_path):
+    class FakeBriefingProvider:
+        def latest_fupan(self):
+            from datetime import datetime, timezone
+
+            from astock_backtester.models import MarketBriefingResponse, MarketBriefingSection
+
+            return MarketBriefingResponse(
+                kind="fupan",
+                updated_at=datetime(2026, 6, 1, 15, 30, tzinfo=timezone.utc),
+                source="fake-fupan",
+                source_url="https://stock.10jqka.com.cn/fupan/",
+                summary="复盘摘要",
+                sections=[MarketBriefingSection(title="指数/概念分析", content="煤炭活跃")],
+            )
+
+    server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
+    server.state.briefing_provider = FakeBriefingProvider()
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        response = _request_json("GET", f"http://127.0.0.1:{port}/market/fupan")
+
+        assert response["kind"] == "fupan"
+        assert response["source"] == "fake-fupan"
+        assert response["sections"][0]["title"] == "指数/概念分析"
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_service_market_zaopan_uses_configured_provider(tmp_path):
+    class FakeBriefingProvider:
+        def latest_zaopan(self):
+            from datetime import datetime, timezone
+
+            from astock_backtester.models import MarketBriefingResponse, MarketBriefingSection
+
+            return MarketBriefingResponse(
+                kind="zaopan",
+                updated_at=datetime(2026, 6, 1, 8, 30, tzinfo=timezone.utc),
+                source="fake-zaopan",
+                source_url="https://stock.10jqka.com.cn/zaopan/",
+                summary="早盘摘要",
+                sections=[MarketBriefingSection(title="早盘要点", content="关注公司事项")],
+            )
+
+    server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
+    server.state.briefing_provider = FakeBriefingProvider()
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        response = _request_json("GET", f"http://127.0.0.1:{port}/market/zaopan")
+
+        assert response["kind"] == "zaopan"
+        assert response["source"] == "fake-zaopan"
+        assert response["sections"][0]["title"] == "早盘要点"
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
 def test_market_news_parses_display_time_as_beijing_time():
     parsed = _parse_time("2026-05-27 10:20:00")
 

@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from astock_backtester.data.astock_adapter import AStockDataAdapter
+from astock_backtester.data.briefing import MarketBriefingProvider
 from astock_backtester.data.cache import LocalCache
 from astock_backtester.data.importer import read_daily_bars
 from astock_backtester.data.operations import (
@@ -38,6 +39,7 @@ class DataServiceState:
         self.sync_manager = SyncJobManager(warehouse=self.warehouse, provider=self.provider)
         self.realtime_provider = RealtimeMarketProvider(self.warehouse)
         self.news_provider = MarketNewsProvider()
+        self.briefing_provider = MarketBriefingProvider()
         self.risk_provider = RiskAlertProvider(self.warehouse)
         self.port = port
         self.logs: deque[dict[str, str]] = deque(maxlen=100)
@@ -157,6 +159,14 @@ class DataServiceHandler(BaseHTTPRequestHandler):
         if self.path == "/market/news":
             news = self.server.state.news_provider.latest_news()
             self._send_json(news.model_dump(mode="json"))
+            return
+        if self.path == "/market/fupan":
+            briefing = self.server.state.briefing_provider.latest_fupan()
+            self._send_json(briefing.model_dump(mode="json"))
+            return
+        if self.path == "/market/zaopan":
+            briefing = self.server.state.briefing_provider.latest_zaopan()
+            self._send_json(briefing.model_dump(mode="json"))
             return
         if self.path == "/risk/alerts":
             alerts = self.server.state.risk_provider.current_alerts()

@@ -68,11 +68,14 @@ export function RiskAlertsModal({ open, alerts, isLoading = false, onClose, onRe
               <div className="risk-alert-list" aria-label="风险股票滚动列表">
                 {items.map((item) => (
                   <article className={`risk-alert ${item.severity}`} key={`${item.symbol}-${item.risk_type}`}>
-                    <div>
-                      <strong>{item.name}</strong>
-                      <span>{item.symbol}</span>
+                    <div className="risk-alert-head">
+                      <div className="risk-alert-identity">
+                        <strong>{item.name}</strong>
+                        <span>{item.symbol}</span>
+                      </div>
+                      <span className={`risk-severity-badge ${item.severity}`}>{severityLabels[item.severity]}</span>
                     </div>
-                    <small>{item.risk_type} / {severityLabels[item.severity]}</small>
+                    <small className="risk-alert-type">{item.risk_type}</small>
                     <p>{item.reason}</p>
                   </article>
                 ))}
