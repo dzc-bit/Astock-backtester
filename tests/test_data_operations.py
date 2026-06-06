@@ -214,6 +214,27 @@ def test_health_prefers_warehouse_coverage_when_available(tmp_path):
     assert datasets["capital_flow"].missing_rows == 1
 
 
+def test_health_falls_back_to_cache_when_warehouse_coverage_fails(tmp_path):
+    class BrokenWarehouse:
+        def coverage(self):
+            raise RuntimeError("bad warehouse partition")
+
+    cache = LocalCache(tmp_path)
+    cache.write_daily_bars(
+        _bars(
+            [
+                ("AAA", "2024-01-02", 10.0, 11.0, 9.0, 10.5, 1000, 0.1, 9_000_000_000.0, 1_500_000.0, False, False, 90),
+            ]
+        )
+    )
+
+    health = build_service_health(cache=cache, warehouse=BrokenWarehouse(), port=8765)
+    datasets = {item.dataset: item for item in health.coverage}
+
+    assert health.ok is True
+    assert datasets["daily_bars"].symbols == 1
+
+
 def test_coverage_prefers_warehouse_rows_when_available(tmp_path):
     cache = LocalCache(tmp_path)
     warehouse = Warehouse(tmp_path)
@@ -261,6 +282,27 @@ def test_import_syncs_warehouse_when_provided(tmp_path):
     assert len(stored) == 1
     assert stored.loc[0, "symbol"] == "AAA"
     assert datasets["daily_bars"].symbols == 1
+
+
+def test_import_recreates_missing_local_parquet_directory(tmp_path):
+    cache = LocalCache(tmp_path)
+    warehouse = Warehouse(tmp_path)
+    cache.parquet_dir.rmdir()
+
+    result = import_daily_bars_into_cache(
+        cache=cache,
+        warehouse=warehouse,
+        frame=_bars(
+            [
+                ("AAA", "2024-01-02", 10.0, 11.0, 9.0, 10.5, 1000, 0.1, 9_000_000_000.0, 1_500_000.0, False, False, 90),
+            ]
+        ),
+        source="unit-test",
+    )
+
+    assert result.imported_rows == 1
+    assert cache.daily_bars_path.exists() or cache.daily_bars_pickle_path.exists()
+    assert len(cache.read_daily_bars()) == 1
 
 
 def test_aggregate_ths_hot_topics_ranks_normalized_topics():

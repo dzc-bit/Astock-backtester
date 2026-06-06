@@ -39,6 +39,77 @@ def _node_text(node: Tag | None, max_length: int | None = None) -> str:
     return _clean_text(node.get_text(" ", strip=True) if node else "", max_length=max_length)
 
 
+_TIMESTAMP_PATTERN = re.compile(r"\d{4}[-/年]\d{1,2}[-/月]\d{1,2}日?(?:\s+\d{1,2}:\d{2}(?::\d{2})?)?")
+_NUMERIC_TOKEN_PATTERN = re.compile(r"^[+-]?\d+(?:\.\d+)?%?$")
+
+
+def _is_percent_text(value: str) -> bool:
+    return bool(re.search(r"[+-]?\d+(?:\.\d+)?%", value))
+
+
+def _is_number_text(value: str) -> bool:
+    return bool(re.search(r"[+-]?\d+(?:\.\d+)?", value))
+
+
+def _neutral_columns(width: int) -> list[str]:
+    labels = ["名称", "数值一", "数值二", "数值三", "数值四", "数值五", "数值六", "数值七"]
+    return [labels[index] if index < len(labels) else f"数值{index + 1}" for index in range(width)]
+
+
+def _infer_table_columns(rows: list[list[str]], title: str | None) -> list[str]:
+    width = max(len(row) for row in rows)
+    first_data_row = next((row for row in rows if row), [])
+    title_text = title or ""
+    second_is_percent = len(first_data_row) > 1 and _is_percent_text(first_data_row[1])
+    third_is_number = len(first_data_row) > 2 and _is_number_text(first_data_row[2])
+    stock_like_title = any(keyword in title_text for keyword in ("个股", "股票", "热门个股", "异动个股"))
+    rank_like_title = any(keyword in title_text for keyword in ("涨幅榜", "跌幅榜", "排行榜", "榜单"))
+
+    if width >= 3 and second_is_percent and third_is_number:
+        base = ["个股", "涨幅", "现价"] if stock_like_title else ["名称", "涨跌幅", "最新价"]
+        return base + _neutral_columns(width)[len(base) :]
+    if width == 2 and second_is_percent:
+        return ["个股", "涨幅"] if stock_like_title else ["名称", "涨跌幅"]
+    if rank_like_title and width >= 2:
+        base = ["名称", "涨跌幅", "最新价"]
+        return base[:width] + _neutral_columns(width)[len(base[:width]) :]
+    return _neutral_columns(width)
+
+
+def _is_noisy_content_line(text: str) -> bool:
+    cleaned = _clean_text(text)
+    if not cleaned:
+        return True
+    timestamp_count = len(_TIMESTAMP_PATTERN.findall(cleaned))
+    without_timestamps = _TIMESTAMP_PATTERN.sub("", cleaned).strip()
+    if timestamp_count >= 2 and len(without_timestamps) <= 24:
+        return True
+
+    cjk_count = len(re.findall(r"[\u4e00-\u9fff]", without_timestamps))
+    digit_count = len(re.findall(r"\d", without_timestamps))
+    text_length = max(len(re.sub(r"\s+", "", without_timestamps)), 1)
+    numeric_tokens = [
+        token
+        for token in re.split(r"\s+", without_timestamps)
+        if token and (_NUMERIC_TOKEN_PATTERN.match(token) or re.search(r"\d", token))
+    ]
+    if digit_count >= 8 and cjk_count <= 6 and digit_count / text_length >= 0.35:
+        return True
+    if len(numeric_tokens) >= 4 and cjk_count <= 8 and not re.search(r"[，。；、：]", without_timestamps):
+        return True
+    return False
+
+
+def _readable_content_from_node(node: Tag | None) -> str:
+    if node is None:
+        return ""
+    blocks = [_node_text(block) for block in node.select("h1,h2,h3,p,li")]
+    if not blocks:
+        blocks = [_node_text(node)]
+    filtered = [block for block in blocks if block and not _is_noisy_content_line(block)]
+    return _clean_text(" ".join(filtered))
+
+
 def _ths_headers(referer: str = THS_REFERER) -> dict[str, str]:
     return {
         "User-Agent": THS_USER_AGENT,
@@ -73,7 +144,7 @@ def _table_from_node(table: Tag, title: str | None = None) -> MarketBriefingTabl
         data_rows = rows[1:]
     else:
         max_width = max(len(row) for row in rows)
-        columns = [f"字段{index + 1}" for index in range(max_width)]
+        columns = _infer_table_columns(rows, title)
         data_rows = rows
 
     normalized_rows: list[dict[str, str]] = []
@@ -157,7 +228,7 @@ def _article_body(soup: BeautifulSoup) -> str | None:
         paragraphs = [_node_text(node) for node in container.select("p,li")]
         if not paragraphs:
             paragraphs = [_node_text(container)]
-    paragraphs = [paragraph for paragraph in paragraphs if len(paragraph) >= 8]
+    paragraphs = [paragraph for paragraph in paragraphs if len(paragraph) >= 8 and not _is_noisy_content_line(paragraph)]
     if not paragraphs:
         return None
     return "\n\n".join(paragraphs)
@@ -265,7 +336,7 @@ class MarketBriefingProvider:
                 if table is not None
             ]
             links = _links_from_node(content, THS_FUPAN_URL)
-            body = _node_text(content_without_tables)
+            body = _readable_content_from_node(content_without_tables)
             if body or tables or links:
                 sections.append(MarketBriefingSection(title=title or "复盘板块", content=body or None, links=links, tables=tables))
         expanded_sections, diagnostics = self._expand_article_links(sections[:8], THS_FUPAN_URL)
@@ -290,7 +361,7 @@ class MarketBriefingProvider:
                 for table in (_table_from_node(node, title="早盘表格") for node in main.select("table")[:3])
                 if table is not None
             ]
-            content = _node_text(main_text_root)
+            content = _readable_content_from_node(main_text_root)
             if content or tables:
                 sections.append(
                     MarketBriefingSection(
@@ -309,7 +380,7 @@ class MarketBriefingProvider:
                 if table is not None
             ]
             content_root = _remove_non_textual_nodes(part)
-            content = _node_text(content_root)
+            content = _readable_content_from_node(content_root)
             if content or tables:
                 sections.append(
                     MarketBriefingSection(

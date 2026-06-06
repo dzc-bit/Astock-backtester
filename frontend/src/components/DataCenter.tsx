@@ -129,12 +129,13 @@ export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceRead
   }, [cacheDir]);
 
   useEffect(() => {
-    if (!service || !isSyncRunning(syncJob)) {
+    const activeSyncJob = syncJob;
+    if (!service || !activeSyncJob || !isSyncRunning(activeSyncJob)) {
       return;
     }
     let cancelled = false;
     const timer = window.setInterval(() => {
-      void loadSyncJob(service.base_url, syncJob.job_id)
+      void loadSyncJob(service.base_url, activeSyncJob.job_id)
         .then(async (result) => {
           if (cancelled) {
             return;

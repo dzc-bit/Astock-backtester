@@ -76,3 +76,11 @@ it("shows a friendly empty state when no stocks match today", () => {
   expect(screen.getByText("当日符合策略股票")).toBeInTheDocument();
   expect(screen.getByText("今日没有股票命中当前策略")).toBeInTheDocument();
 });
+
+it("shows annualized return beside the other backtest metrics", () => {
+  render(<ResultsOverview result={buildResult()} onRun={vi.fn()} onOpenRiskAlerts={vi.fn()} />);
+
+  expect(screen.getByText("总收益 3.20%")).toBeInTheDocument();
+  expect(screen.getByText("年化收益 4.10%")).toBeInTheDocument();
+  expect(screen.getByText("最大回撤 -1.80%")).toBeInTheDocument();
+});

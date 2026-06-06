@@ -286,6 +286,47 @@ def test_market_briefing_provider_parses_ths_zaopan_summary_and_tables():
     assert response.sections[1].tables[0].rows[0]["简称"] == "*ST天择"
 
 
+def test_market_briefing_provider_labels_stock_gain_price_tables_without_misusing_theme_columns():
+    html = """
+    <html><body>
+      <div id="fpzj">复盘摘要：热门个股活跃。</div>
+      <div class="fp_item_hd"><h2>热门个股</h2></div>
+      <div class="fp_item_cnt">
+        <table>
+          <tr><td>软通动力</td><td>20.00%</td><td>58.63</td></tr>
+          <tr><td>新易盛</td><td>13.24%</td><td>118.20</td></tr>
+        </table>
+      </div>
+    </body></html>
+    """
+
+    response = MarketBriefingProvider(requester=lambda *args, **kwargs: FakeHtmlResponse(html)).latest_fupan()
+
+    table = response.sections[0].tables[0]
+    assert table.columns == ["个股", "涨幅", "现价"]
+    assert table.rows[0] == {"个股": "软通动力", "涨幅": "20.00%", "现价": "58.63"}
+    assert "异动原因" not in table.columns
+    assert "影响" not in table.columns
+
+
+def test_market_briefing_provider_filters_numeric_soup_and_repeated_timestamps_from_section_content():
+    html = """
+    <html><body>
+      <div id="fpzj">复盘摘要：指数小幅反弹。</div>
+      <div class="fp_item_hd"><h2>指数表现</h2></div>
+      <div class="fp_item_cnt">
+        <p>权重 1293.69 +14.46 +1.13% 363.54亿 2026-06-05 15:00:00 2026-06-05 15:00:00 2026-06-05 15:00:00</p>
+        <p>2026-06-05 15:00:00 2026-06-05 15:00:00 2026-06-05 15:00:00</p>
+        <p>机器人板块午后持续走强，资金围绕题材龙头博弈。</p>
+      </div>
+    </body></html>
+    """
+
+    response = MarketBriefingProvider(requester=lambda *args, **kwargs: FakeHtmlResponse(html)).latest_fupan()
+
+    assert response.sections[0].content == "机器人板块午后持续走强，资金围绕题材龙头博弈。"
+
+
 def test_market_briefing_provider_returns_diagnostics_when_ths_unavailable():
     def requester(*args, **kwargs):
         raise RuntimeError("network closed")

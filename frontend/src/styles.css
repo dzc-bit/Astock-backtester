@@ -504,6 +504,28 @@ body {
   font-weight: 800;
 }
 
+.commentary-context-warning {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+  border: 1px solid #fed7aa;
+  border-radius: 12px;
+  background: linear-gradient(90deg, #fff7ed, #ffffff);
+  color: #9a3412;
+  padding: 10px 12px;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.commentary-context-warning strong {
+  flex: 0 0 auto;
+}
+
+.commentary-context-warning span {
+  color: #7c2d12;
+}
+
 .commentary-grid {
   display: grid;
   grid-template-columns: minmax(0, 1.2fr) minmax(240px, 0.8fr);
@@ -512,6 +534,13 @@ body {
   overflow: auto;
   padding-right: 4px;
   margin-top: 12px;
+}
+
+.commentary-actions {
+  display: inline-flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
 }
 
 .commentary-block {
@@ -630,6 +659,155 @@ body {
   font-size: 12px;
 }
 
+.commentary-modal {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  gap: 14px;
+  width: min(920px, 100%);
+  max-height: min(760px, calc(100vh - 48px));
+  overflow: hidden;
+  border: 1px solid #bbe6d1;
+  border-top: 4px solid #0f766e;
+  border-radius: 18px;
+  background:
+    radial-gradient(circle at top right, rgba(159, 232, 112, 0.18), transparent 34%),
+    linear-gradient(180deg, #f2fff7 0, #ffffff 138px),
+    #ffffff;
+  padding: 18px;
+  box-shadow: 0 28px 70px rgba(15, 23, 42, 0.28);
+}
+
+.commentary-modal h2 {
+  margin: 0;
+  color: #17212f;
+  font-size: 22px;
+}
+
+.commentary-modal-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.commentary-modal-meta span {
+  border: 1px solid #d7dee8;
+  border-radius: 999px;
+  background: #ffffff;
+  color: #526071;
+  padding: 6px 10px;
+  font-size: 12px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+
+.commentary-modal-body {
+  display: grid;
+  gap: 12px;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 4px;
+  overscroll-behavior: contain;
+}
+
+.commentary-full-section {
+  display: grid;
+  gap: 12px;
+  border: 1px solid #dbe4ee;
+  border-radius: 14px;
+  background: #fbfcfe;
+  padding: 14px;
+}
+
+.commentary-full-section.conclusion {
+  border-color: #bbe6d1;
+  background:
+    radial-gradient(circle at top left, rgba(159, 232, 112, 0.22), transparent 34%),
+    linear-gradient(90deg, #f2fff7, #ffffff);
+}
+
+.commentary-full-section.risks {
+  border-color: #fed7aa;
+  background: linear-gradient(90deg, #fff7ed, #fffdf7);
+}
+
+.commentary-full-section.watch {
+  border-color: #cfe0f5;
+  background: linear-gradient(90deg, #edf5ff, #ffffff);
+}
+
+.commentary-full-section.conclusion > span,
+.commentary-reader-head span {
+  color: #0f766e;
+  font-size: 13px;
+  font-weight: 900;
+}
+
+.commentary-full-section.risks > strong,
+.commentary-full-section.watch > strong {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #9a3412;
+}
+
+.commentary-full-section.watch > strong {
+  color: #1d4ed8;
+}
+
+.commentary-reader-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  border: 1px solid #dbe4ee;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.96);
+  padding: 10px 12px;
+  backdrop-filter: blur(10px);
+}
+
+.commentary-reader-head small {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.commentary-full-list {
+  display: grid;
+  gap: 10px;
+}
+
+.commentary-full-card {
+  display: grid;
+  gap: 10px;
+  border: 1px solid #dbe4ee;
+  border-left: 4px solid #0f766e;
+  border-radius: 14px;
+  background: #ffffff;
+  padding: 14px;
+}
+
+.commentary-full-section p,
+.commentary-full-section li,
+.commentary-full-section span {
+  color: #334155;
+  line-height: 1.68;
+}
+
+.commentary-full-section p {
+  margin: 0;
+}
+
+.commentary-full-section ul {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+  padding-left: 18px;
+}
+
 .news-summary-list {
   display: flex;
   flex: 1;
@@ -700,6 +878,37 @@ body {
   border-color: #d7dee8;
   background: #ffffff;
   color: #64748b;
+}
+
+.news-summary-collapsed {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px dashed #b8c8dc;
+  border-radius: 14px;
+  background:
+    linear-gradient(135deg, rgba(237, 245, 255, 0.92), rgba(255, 255, 255, 0.96)),
+    #ffffff;
+  color: #1d4ed8;
+  padding: 12px 14px;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 900;
+  text-align: left;
+  cursor: pointer;
+}
+
+.news-summary-collapsed:hover {
+  border-style: solid;
+  border-color: #93b4df;
+  transform: translateY(-1px);
+}
+
+.news-summary-collapsed span {
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 800;
 }
 
 .news-summary-columns {
@@ -1882,6 +2091,7 @@ td small {
 .strategy-save-banner {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 10px;
   margin: 0 0 16px;
   border: 1px solid #99d6cc;
@@ -1894,6 +2104,24 @@ td small {
   font-size: 13px;
   font-weight: 800;
   box-shadow: 0 10px 22px rgba(15, 118, 110, 0.08);
+}
+
+.strategy-save-banner > div:first-child {
+  display: grid;
+  gap: 3px;
+}
+
+.strategy-save-banner span {
+  color: #475569;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.strategy-save-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
 }
 
 .saved-strategies-panel {
@@ -2351,6 +2579,40 @@ td small {
   background: #fbfcfe;
   padding: 12px;
   color: #17212f;
+  font-weight: 800;
+}
+
+.trade-blocked-row {
+  background: linear-gradient(90deg, #fff7ed, #ffffff);
+}
+
+.trade-status-badge {
+  width: fit-content;
+  margin-top: 5px;
+  border: 1px solid #fed7aa;
+  border-radius: 999px;
+  background: #fff7ed;
+  color: #9a3412;
+  padding: 3px 7px;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.trade-reason-text {
+  color: #526170;
+  line-height: 1.7;
+}
+
+.trade-blocked-reason {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 8px;
+  border: 1px solid #fed7aa;
+  border-radius: 10px;
+  background: #fff7ed;
+  color: #9a3412;
+  padding: 6px 8px;
   font-weight: 800;
 }
 

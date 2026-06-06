@@ -48,6 +48,7 @@ class LocalCache:
                 .sort_values(["symbol", "trade_date"])
                 .reset_index(drop=True)
             )
+        self.parquet_dir.mkdir(parents=True, exist_ok=True)
         try:
             normalized.to_parquet(self.daily_bars_path, index=False)
             if self.daily_bars_pickle_path.exists():

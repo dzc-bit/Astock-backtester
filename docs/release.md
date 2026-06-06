@@ -38,7 +38,7 @@ npm run tauri -- signer generate -w "$env:USERPROFILE\.tauri\a-stock-receiver.ke
 
 如果私钥丢失，已经安装的带更新器版本无法校验新密钥签出的更新包。除非有计划地做一次迁移发布，否则不要轮换密钥。
 
-本次 `v0.1.7` 就属于一次计划内迁移发布：旧私钥已不可用，因此 `v0.1.6` 用户需要手动安装 `v0.1.7`。从 `v0.1.7` 开始，后续版本恢复为正常的应用内更新流程。
+历史上如果旧私钥不可用，需要做一次计划内迁移发布：旧版用户必须手动安装新的 NSIS 安装包，之后才能重新走应用内更新。除非明确安排迁移，不要轮换更新私钥。
 
 ## 版本号
 
@@ -52,7 +52,7 @@ npm run tauri -- signer generate -w "$env:USERPROFILE\.tauri\a-stock-receiver.ke
 Git tag 使用 `v版本号`，例如：
 
 ```text
-v0.1.1
+v1.1.0
 ```
 
 ## Release Order
@@ -60,9 +60,10 @@ v0.1.1
 1. Bump `package.json`, `pyproject.toml`, `src-tauri/Cargo.toml`, and `src-tauri/tauri.conf.json` to the same version.
 2. Build the sidecar with `scripts/build-data-service.ps1`.
 3. Build the signed NSIS installer.
-4. Generate `release-assets/latest.json` with `scripts/write-latest-json.ps1`.
-5. Create the GitHub Release and upload the installer plus `latest.json`.
-6. Verify `https://github.com/dzc-bit/Astock-backtester/releases/latest/download/latest.json` returns the new version.
+4. Confirm the installer contains the latest `src-tauri\bin\astock-data-service.exe`; for a same-version local reinstall, also verify the installed `bin\astock-data-service.exe` was actually overwritten.
+5. Generate `release-assets/latest.json` with `scripts/write-latest-json.ps1` from the real `.sig`.
+6. Create the GitHub Release and upload the installer plus `latest.json`.
+7. Verify `https://github.com/dzc-bit/Astock-backtester/releases/latest/download/latest.json` returns the new version.
 
 `latest.json` must be generated from the real `.sig` file produced next to the installer. Do not hand-edit a future version into `release-assets/latest.json` before the installer and signature exist, because the app updater verifies that signature.
 
@@ -113,11 +114,11 @@ Remove-Item Env:\TAURI_SIGNING_PRIVATE_KEY
 用发布版本、安装包 URL 和签名内容生成 `latest.json`：
 
 ```powershell
-$assetName = "A股策略回测工作台_0.1.1_x64-setup.exe"
+$assetName = "A股策略回测工作台_1.1.0_x64-setup.exe"
 powershell -ExecutionPolicy Bypass -File scripts/write-latest-json.ps1 `
-  -Version "0.1.1" `
+  -Version "1.1.0" `
   -AssetName $assetName `
-  -Notes "新增本地数据服务与数据中心缺口补数。"
+  -Notes "发布行情无感刷新、复盘/早盘全文、策略命中展示、回测口径校准与桌面更新增强。"
 ```
 
 不要提前加入 macOS 或 Linux 平台字段。静态 JSON 会被 updater 整体解析，只有真实可用的平台资产才应该写入。

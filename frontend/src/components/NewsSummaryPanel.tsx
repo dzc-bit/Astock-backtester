@@ -155,6 +155,8 @@ export function NewsSummaryPanel({ summary, isLoading = false }: Props) {
   const [isFullTextOpen, setIsFullTextOpen] = useState(false);
   const openButtonRef = useRef<HTMLButtonElement>(null);
   const themes = summary?.themes ?? [];
+  const visibleThemes = themes.slice(0, 2);
+  const hiddenThemeCount = Math.max(0, themes.length - visibleThemes.length);
 
   function closeFullText() {
     setIsFullTextOpen(false);
@@ -195,7 +197,7 @@ export function NewsSummaryPanel({ summary, isLoading = false }: Props) {
           </div>
         ) : (
           <div className="news-summary-list">
-            {themes.map((theme) => (
+            {visibleThemes.map((theme) => (
               <article className={`news-summary-topic ${theme.sentiment}`} key={theme.title}>
                 <div className="news-summary-topic-head">
                   <div>
@@ -223,6 +225,17 @@ export function NewsSummaryPanel({ summary, isLoading = false }: Props) {
                 </div>
               </article>
             ))}
+            {hiddenThemeCount > 0 ? (
+              <button
+                className="news-summary-collapsed"
+                type="button"
+                onClick={() => setIsFullTextOpen(true)}
+                aria-label={`查看已收起的 ${hiddenThemeCount} 个新闻主题`}
+              >
+                还有 {hiddenThemeCount} 个主题已收起
+                <span>打开全文查看全部主题、要点和风险</span>
+              </button>
+            ) : null}
           </div>
         )}
 

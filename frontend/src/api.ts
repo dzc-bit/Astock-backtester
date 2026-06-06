@@ -55,6 +55,7 @@ const demoResult: BacktestResult = {
       actual_position_pct: 0.48,
       buy_reason: ["float market cap 8800000000 in [1000000000, 30000000000]", "3d main net inflow 6000000 >= 3000000"],
       sell_reason: ["fixed holding days reached"],
+      blocked_reason: null,
       pnl: -7200,
       pnl_pct: -0.15
     }
@@ -345,6 +346,7 @@ export async function loadRiskAlerts(baseUrl: string): Promise<RiskAlertsRespons
     return {
       updated_at: new Date("2026-05-27T10:30:00+08:00").toISOString(),
       source: "browser-preview",
+      diagnostics: [],
       items: [
         {
           symbol: "000001",
@@ -697,13 +699,14 @@ export async function runBacktestStreamWithDataService(
       | { type: "progress"; message: string; trade_date?: string; scanned_days?: number; total_days?: number; open_positions?: number; closed_trades?: number; candidates?: number }
       | { type: "trade_opened"; trade: BacktestResult["trades"][number] }
       | { type: "trade_closed"; trade: BacktestResult["trades"][number] }
+      | { type: "trade_blocked"; trade: BacktestResult["trades"][number] }
       | { type: "result"; result: BacktestResult }
       | { type: "error"; message?: string };
     if (event.type === "phase") {
       handlers.onPhase?.(event.phase);
     } else if (event.type === "progress") {
       handlers.onProgress?.(event);
-    } else if (event.type === "trade_opened" || event.type === "trade_closed") {
+    } else if (event.type === "trade_opened" || event.type === "trade_closed" || event.type === "trade_blocked") {
       handlers.onTrade?.(event.trade);
     } else if (event.type === "result") {
       finalResult = event.result;

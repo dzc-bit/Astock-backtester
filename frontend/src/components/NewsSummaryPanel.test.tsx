@@ -55,6 +55,39 @@ it("keeps long news text out of the main card and shows it in a dialog", async (
   expect(screen.getAllByText(fullTextOnly).length).toBeGreaterThan(0);
 });
 
+it("keeps extra news topics collapsed on the main page and shows them in the dialog", async () => {
+  const user = userEvent.setup();
+  const summary = buildSummary();
+  summary.themes = [
+    summary.themes[0],
+    {
+      title: "AI",
+      summary: "AI相关消息较多。",
+      sentiment: "neutral",
+      source_count: 4,
+      headlines: ["算力链出现新进展"]
+    },
+    {
+      title: "半导体",
+      summary: "半导体长内容只应该在全文里出现。",
+      sentiment: "positive",
+      source_count: 3,
+      headlines: ["设备材料方向活跃"]
+    }
+  ];
+
+  render(<NewsSummaryPanel summary={summary} />);
+
+  expect(screen.getByText("机器人产业链")).toBeInTheDocument();
+  expect(screen.getByText("AI")).toBeInTheDocument();
+  expect(screen.queryByText("半导体")).not.toBeInTheDocument();
+  expect(screen.getByText("还有 1 个主题已收起")).toBeInTheDocument();
+
+  await user.click(screen.getByRole("button", { name: "查看新闻汇总全文" }));
+
+  expect(screen.getByRole("dialog", { name: "新闻汇总全文" })).toHaveTextContent("半导体");
+});
+
 it("does not leak long headline text through main-card attributes", () => {
   const summary = buildSummary();
   const fullTextOnly = `${"主卡片属性泄漏哨兵：".repeat(4)}这里不能出现在任何 title 属性里`;

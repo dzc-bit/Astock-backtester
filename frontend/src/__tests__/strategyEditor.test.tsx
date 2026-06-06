@@ -1,4 +1,4 @@
-import { act, render, screen } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "../App";
@@ -696,6 +696,54 @@ describe("A 股回测工作台界面", () => {
     expect(await screen.findByText("交易次数 1")).toBeInTheDocument();
   });
 
+  it("keeps blocked trade reasons from the stream after the final backtest result", async () => {
+    const user = userEvent.setup();
+    let emitBlocked: (() => void) | null = null;
+    let finish: (() => void) | null = null;
+    const blockedTrade = {
+      ...demoResult.trades[0],
+      shares: 0,
+      buy_amount: 0,
+      actual_position_pct: 0,
+      sell_date: null,
+      sell_price: null,
+      sell_amount: null,
+      pnl: null,
+      pnl_pct: null,
+      blocked_reason: "次日开盘接近涨停，未买入：AAA"
+    };
+    apiMocks.runBacktestStreamWithDataService.mockImplementation(
+      (_baseUrl, _strategy, _settings, handlers) =>
+        new Promise((resolve) => {
+          handlers.onPhase("校验参数");
+          emitBlocked = () => handlers.onTrade(blockedTrade);
+          finish = () => {
+            handlers.onResult({ ...demoResult, trades: [] });
+            resolve({ ...demoResult, trades: [] });
+          };
+        })
+    );
+
+    render(<App />);
+    await screen.findByText("日线行情");
+    await user.click(screen.getByRole("button", { name: "运行历史回测" }));
+    await waitFor(() => {
+      expect(apiMocks.runBacktestStreamWithDataService).toHaveBeenCalled();
+      expect(emitBlocked).not.toBeNull();
+    });
+
+    act(() => {
+      emitBlocked?.();
+    });
+    expect(await screen.findByText("次日开盘接近涨停，未买入：AAA")).toBeInTheDocument();
+
+    act(() => {
+      finish?.();
+    });
+    expect(await screen.findByText("回测完成，已生成收益曲线和交易明细。")).toBeInTheDocument();
+    expect(screen.getByText("次日开盘接近涨停，未买入：AAA")).toBeInTheDocument();
+  });
+
   it("uses editable funding and matching inputs with examples instead of fixed selectors", async () => {
     render(<App />);
 
@@ -767,7 +815,7 @@ describe("A 股回测工作台界面", () => {
   it("shows structured market data and independent commentary after market close", async () => {
     apiMocks.loadRealtimeMarketSnapshot.mockResolvedValue({
       status: "live",
-      source: "ashare-sina+local+eastmoney-sector",
+      source: "ashare-sina+local+ths-concept-section",
       updated_at: "2026-05-27T07:30:00Z",
       indexes: [
         {
@@ -783,8 +831,8 @@ describe("A 股回测工作台界面", () => {
       ],
       breadth: { up: 3200, down: 1700, flat: 200, total: 5100, source: "local-latest" },
       strong_sectors: [
-        { name: "半导体", change_pct: 0.036, leading_symbol: "688001", source: "eastmoney-sector" },
-        { name: "电力设备", change_pct: 0.024, leading_symbol: "300750", source: "eastmoney-sector" }
+        { name: "半导体", change_pct: 0.036, leading_symbol: "688001", source: "ths-concept-section" },
+        { name: "电力设备", change_pct: 0.024, leading_symbol: "300750", source: "ths-concept-section" }
       ],
       yesterday_strong_sectors: [],
       message: "实时行情已更新"
@@ -798,10 +846,22 @@ describe("A 股回测工作台界面", () => {
     expect(screen.queryByText(/收盘后板块解读/)).not.toBeInTheDocument();
   });
 
+  it("shows defensive market commentary when the commentary API fails", async () => {
+    apiMocks.loadMarketCommentary.mockRejectedValue(new Error("commentary upstream timeout"));
+
+    render(<App />);
+
+    const panel = await screen.findByRole("region", { name: "行情评价" });
+    await waitFor(() => expect(panel).toHaveTextContent("防守"));
+    expect(panel).toHaveTextContent("实时盘面暂不可用");
+    expect(panel).toHaveTextContent("依据不完整");
+    expect(panel).toHaveTextContent("行情评价接口失败：commentary upstream timeout");
+  });
+
   it("tracks yesterday's strong sectors in the market panel and commentary", async () => {
     apiMocks.loadRealtimeMarketSnapshot.mockResolvedValue({
       status: "live",
-      source: "ashare-sina+local+eastmoney-sector+local-yesterday-group",
+      source: "ashare-sina+local+ths-concept-section+local-yesterday-group",
       updated_at: "2026-05-27T02:30:00Z",
       indexes: [
         {
@@ -817,8 +877,8 @@ describe("A 股回测工作台界面", () => {
       ],
       breadth: { up: 3200, down: 1700, flat: 200, total: 5100, source: "local-latest" },
       strong_sectors: [
-        { name: "半导体", change_pct: 0.036, leading_symbol: "688001", source: "eastmoney-sector" },
-        { name: "电力设备", change_pct: 0.024, leading_symbol: "300750", source: "eastmoney-sector" }
+        { name: "半导体", change_pct: 0.036, leading_symbol: "688001", source: "ths-concept-section" },
+        { name: "电力设备", change_pct: 0.024, leading_symbol: "300750", source: "ths-concept-section" }
       ],
       yesterday_strong_sectors: [
         { name: "机器人", change_pct: 0.041, leading_symbol: "300024", source: "local-yesterday-group" },
@@ -945,9 +1005,9 @@ describe("A 股回测工作台界面", () => {
     );
   });
 
-  it("asks to save the strategy after entry and exit rules run successfully, then stores it in 策略配置", async () => {
+  it("offers an inline save action after entry and exit rules run successfully, then stores it in 策略配置", async () => {
     const user = userEvent.setup();
-    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const confirmSpy = vi.spyOn(window, "confirm");
     const savedName = "市场热度 + 市值量价筛选";
     render(<App />);
 
@@ -966,7 +1026,10 @@ describe("A 股回测工作台界面", () => {
 
     await user.click(screen.getByRole("button", { name: "运行历史回测" }));
 
-    expect(confirmSpy).toHaveBeenCalledWith("当前入场规则和离场规则已成功运行回测，是否保存到策略配置？");
+    expect(confirmSpy).not.toHaveBeenCalled();
+    expect(await screen.findByText("回测完成，可将当前入场与离场规则保存到策略配置。")).toBeInTheDocument();
+    expect(screen.getByText(`建议名称：${savedName}`)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "保存策略" }));
     expect(await screen.findByText(`已保存策略：${savedName}`)).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "已保存策略" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: `套用已保存策略${savedName}` })).toBeInTheDocument();
@@ -986,9 +1049,9 @@ describe("A 股回测工作台界面", () => {
     expect(await screen.findByText(`已删除已保存策略：${savedName}`)).toBeInTheDocument();
   });
 
-  it("does not store the strategy when the user declines the save prompt", async () => {
+  it("does not store the strategy when the user dismisses the inline save prompt", async () => {
     const user = userEvent.setup();
-    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+    const confirmSpy = vi.spyOn(window, "confirm");
     render(<App />);
 
     await screen.findByText("日线行情");
@@ -1006,7 +1069,9 @@ describe("A 股回测工作台界面", () => {
 
     await user.click(screen.getByRole("button", { name: "运行历史回测" }));
 
-    expect(confirmSpy).toHaveBeenCalledWith("当前入场规则和离场规则已成功运行回测，是否保存到策略配置？");
+    expect(confirmSpy).not.toHaveBeenCalled();
+    expect(await screen.findByText("回测完成，可将当前入场与离场规则保存到策略配置。")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "暂不保存" }));
     expect(await screen.findByText("本次未保存策略，你可以继续调整后再次运行。")).toBeInTheDocument();
     expect(window.localStorage.getItem("astock-saved-strategies")).toBeNull();
     expect(screen.getByRole("heading", { name: "已保存策略" })).toBeInTheDocument();

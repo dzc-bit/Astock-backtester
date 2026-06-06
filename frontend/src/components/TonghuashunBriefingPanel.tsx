@@ -40,6 +40,42 @@ function compactText(value: string, maxLength = 120): string {
   return `${normalized.slice(0, maxLength).trimEnd()}...`;
 }
 
+const defaultGenericTableColumnLabels = ["项目", "内容", "说明", "备注", "来源", "时间"];
+const themeGenericTableColumnLabels = ["题材", "异动原因", "影响", "备注", "来源", "时间"];
+const companyGenericTableColumnLabels = ["公司/事项", "内容", "影响", "备注", "来源", "时间"];
+
+function isGenericTableColumn(column: string): boolean {
+  return /^(字段|field|column|col)[\s_-]*[0-9０-９]+$/i.test(column.trim());
+}
+
+function genericTableColumnLabelsFor(tableTitle: string | null | undefined): string[] {
+  const title = (tableTitle ?? "").trim();
+  if (/强势|方向|题材|板块|概念|热点/.test(title)) {
+    return themeGenericTableColumnLabels;
+  }
+  if (/公司|事项|公告|停复牌|个股/.test(title)) {
+    return companyGenericTableColumnLabels;
+  }
+  return defaultGenericTableColumnLabels;
+}
+
+function cleanTableColumnLabel(column: string, index: number, tableTitle?: string | null): string {
+  const trimmed = column.trim();
+  const fallbackLabels = genericTableColumnLabelsFor(tableTitle);
+  if (!trimmed) {
+    return fallbackLabels[index] ?? `内容${index + 1}`;
+  }
+  if (isGenericTableColumn(trimmed)) {
+    return fallbackLabels[index] ?? `内容${index + 1}`;
+  }
+  return trimmed;
+}
+
+function hasMeaningfulTableValue(value: string | null | undefined): boolean {
+  const normalized = (value ?? "").trim();
+  return normalized.length > 0 && normalized !== "--" && normalized !== "-";
+}
+
 function BriefingCard({
   briefing,
   title,
@@ -101,7 +137,6 @@ function BriefingCard({
               <span>正文已收起</span>
               <span>点击查看可读完整内容</span>
             </div>
-            {briefing.diagnostics.length > 0 ? <small>{briefing.diagnostics[0]}</small> : null}
           </>
         ) : (
           <p className="ths-briefing-empty">{emptyText}</p>
@@ -112,10 +147,17 @@ function BriefingCard({
 }
 
 function BriefingTable({ table }: { table: MarketBriefingTable }) {
-  const columns =
+  const rawColumns =
     table.columns.length > 0
       ? table.columns
       : Array.from(new Set(table.rows.flatMap((row) => Object.keys(row))));
+  const columns = rawColumns
+    .map((column, index) => ({
+      key: column,
+      label: cleanTableColumnLabel(column, index, table.title),
+      hasValue: table.rows.some((row) => hasMeaningfulTableValue(row[column]))
+    }))
+    .filter((column) => column.hasValue || !isGenericTableColumn(column.key));
   if (columns.length === 0 || table.rows.length === 0) {
     return null;
   }
@@ -126,7 +168,7 @@ function BriefingTable({ table }: { table: MarketBriefingTable }) {
         <thead>
           <tr>
             {columns.map((column) => (
-              <th key={column}>{column}</th>
+              <th key={column.key}>{column.label}</th>
             ))}
           </tr>
         </thead>
@@ -134,7 +176,7 @@ function BriefingTable({ table }: { table: MarketBriefingTable }) {
           {table.rows.map((row, rowIndex) => (
             <tr key={`${table.title ?? "table"}-${rowIndex}`}>
               {columns.map((column) => (
-                <td key={column}>{row[column] ?? "--"}</td>
+                <td key={column.key}>{row[column.key] ?? "--"}</td>
               ))}
             </tr>
           ))}

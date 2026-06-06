@@ -264,6 +264,69 @@ def _optional_float(row: pd.Series, column: str) -> float | None:
     return float(value)
 
 
+def _stock_limit_pct(row: pd.Series) -> float | None:
+    pre_close = _optional_float(row, "pre_close")
+    if pre_close is None or pre_close <= 0:
+        return None
+    symbol = str(row.get("symbol", ""))
+    if bool(row.get("is_st", False)):
+        return 0.05
+    if symbol.startswith(("300", "688")):
+        return 0.20
+    return 0.10
+
+
+def _is_open_near_limit(row: pd.Series, direction: str) -> bool:
+    limit_pct = _stock_limit_pct(row)
+    if limit_pct is None:
+        return False
+    pre_close = _optional_float(row, "pre_close")
+    open_price = _optional_float(row, "open")
+    if pre_close is None or open_price is None:
+        return False
+    tolerance = 1e-4
+    if direction == "up":
+        return open_price >= pre_close * (1 + limit_pct) * (1 - tolerance)
+    return open_price <= pre_close * (1 - limit_pct) * (1 + tolerance)
+
+
+def _buy_execution_price(row: pd.Series, settings: BacktestSettings) -> float:
+    price = float(row["open"])
+    if settings.conservative_execution:
+        return price * (1 + settings.slippage_rate)
+    return price
+
+
+def _sell_execution_price(price: float, settings: BacktestSettings) -> float:
+    if settings.conservative_execution:
+        return price * (1 - settings.slippage_rate)
+    return price
+
+
+def _blocked_trade(
+    row: pd.Series,
+    signal_date: pd.Timestamp,
+    trade_date: pd.Timestamp,
+    planned_amount: float,
+    current_equity: float,
+    reasons: list[str],
+    blocked_reason: str,
+) -> Trade:
+    return Trade(
+        symbol=str(row["symbol"]),
+        buy_signal_date=pd.Timestamp(signal_date).date(),
+        buy_date=pd.Timestamp(trade_date).date(),
+        buy_price=float(row["open"]),
+        shares=0,
+        planned_amount=planned_amount,
+        buy_amount=0.0,
+        target_position_pct=planned_amount / current_equity if current_equity else 0.0,
+        actual_position_pct=0.0,
+        buy_reason=reasons,
+        blocked_reason=blocked_reason,
+    )
+
+
 def _candidate_rank(row: pd.Series) -> tuple[float, float, float, float, float, float, float]:
     return (
         _max_numeric_prefix(row, "volume_ratio_"),
@@ -330,6 +393,13 @@ def _build_metrics(
     equity_curve: list[EquityPoint],
 ) -> BacktestMetrics:
     total_return = (final_equity / initial_cash) - 1
+    annualized_return = 0.0
+    if len(equity_curve) >= 2:
+        first_date = equity_curve[0].trade_date
+        last_date = equity_curve[-1].trade_date
+        days = (last_date - first_date).days
+        if days > 0:
+            annualized_return = (final_equity / initial_cash) ** (365 / days) - 1
     closed = [trade for trade in trades if trade.pnl_pct is not None]
     wins = [trade for trade in closed if (trade.pnl_pct or 0) > 0]
     avg_trade = sum(trade.pnl_pct or 0 for trade in closed) / len(closed) if closed else 0.0
@@ -337,7 +407,7 @@ def _build_metrics(
     max_drawdown = min((point.drawdown_pct for point in equity_curve), default=0.0)
     return BacktestMetrics(
         total_return_pct=total_return,
-        annualized_return_pct=total_return,
+        annualized_return_pct=annualized_return,
         max_drawdown_pct=max_drawdown,
         win_rate_pct=len(wins) / len(closed) if closed else 0.0,
         trade_count=len(closed),
@@ -432,15 +502,32 @@ def run_backtest(
             if held_days >= settings.fixed_holding_days:
                 exit_reasons.append(f"fixed holding days reached: {settings.fixed_holding_days}")
             if settings.take_profit_pct is not None and (current["high"] / position.buy_price - 1) >= settings.take_profit_pct:
-                exit_reasons.append(f"take profit touched: {settings.take_profit_pct:.2%}")
+                exit_reasons.append(f"止盈触发：{settings.take_profit_pct:.2%}")
             if settings.stop_loss_pct is not None and (current["low"] / position.buy_price - 1) <= settings.stop_loss_pct:
-                exit_reasons.append(f"stop loss touched: {settings.stop_loss_pct:.2%}")
+                exit_reasons.append(f"止损触发：{settings.stop_loss_pct:.2%}")
             for node in strategy.exit_rules:
                 result = evaluate_condition(node, current, data)
                 if result.passed:
                     exit_reasons.append(result.reason)
             if exit_reasons:
-                sell_price = float(current["open"]) * (1 - settings.slippage_rate)
+                if settings.limit_down_blocks_sell and _is_open_near_limit(current, "down"):
+                    position.blocked_reason = f"卖出日开盘接近跌停，暂不卖出：{position.symbol}"
+                    still_open.append(position)
+                    if on_event is not None:
+                        on_event({"type": "trade_blocked", "trade": position})
+                    continue
+                raw_sell_price = float(current["open"])
+                if (
+                    settings.stop_loss_pct is not None
+                    and (current["low"] / position.buy_price - 1) <= settings.stop_loss_pct
+                ):
+                    raw_sell_price = position.buy_price * (1 + settings.stop_loss_pct)
+                elif (
+                    settings.take_profit_pct is not None
+                    and (current["high"] / position.buy_price - 1) >= settings.take_profit_pct
+                ):
+                    raw_sell_price = position.buy_price * (1 + settings.take_profit_pct)
+                sell_price = _sell_execution_price(raw_sell_price, settings)
                 proceeds = sell_price * position.shares * (1 - settings.fee_rate - settings.stamp_tax_rate)
                 cash += proceeds
                 position.sell_signal_date = pd.Timestamp(signal_date).date()
@@ -490,7 +577,21 @@ def run_backtest(
                     continue
                 buy = pd.Series(buy_tuple._asdict())
                 planned_amount = _planned_entry_amount(settings, cash, open_positions, current_equity)
-                executed_buy_price = float(buy["open"]) * (1 + settings.slippage_rate)
+                if settings.limit_up_blocks_buy and _is_open_near_limit(buy, "up"):
+                    blocked_reason = f"次日开盘接近涨停，未买入：{buy['symbol']}"
+                    blocked_trade = _blocked_trade(
+                        buy,
+                        signal_date,
+                        next_date,
+                        planned_amount,
+                        current_equity,
+                        reasons,
+                        blocked_reason,
+                    )
+                    if on_event is not None:
+                        on_event({"type": "trade_blocked", "trade": blocked_trade})
+                    continue
+                executed_buy_price = _buy_execution_price(buy, settings)
                 cost_per_share = executed_buy_price * (1 + settings.fee_rate)
                 shares = int(planned_amount // cost_per_share)
                 shares = (shares // BOARD_LOT_SIZE) * BOARD_LOT_SIZE
@@ -502,7 +603,7 @@ def run_backtest(
                     symbol=str(row["symbol"]),
                     buy_signal_date=pd.Timestamp(signal_date).date(),
                     buy_date=pd.Timestamp(next_date).date(),
-                    buy_price=float(buy["open"]),
+                    buy_price=executed_buy_price,
                     shares=shares,
                     planned_amount=planned_amount,
                     buy_amount=buy_amount,

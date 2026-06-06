@@ -124,16 +124,23 @@ export function ResultsOverview({
           ))}
         </div>
       ) : null}
-      {isRunning && !result ? (
+      {progressMessage && (!result || !isRunning) ? (
+        <div className="run-live-state">
+          <strong>{isRunning ? "回测正在撮合" : "回测完成"}</strong>
+          <span>{progressMessage}</span>
+        </div>
+      ) : null}
+      {isRunning && !result && !progressMessage ? (
         <div className="run-live-state">
           <strong>回测正在撮合</strong>
-          <span>{progressMessage ?? "正在扫描历史交易日，首笔开仓或平仓会立即写入右侧交易明细。"}</span>
+          <span>正在扫描历史交易日，首笔开仓或平仓会立即写入右侧交易明细。</span>
         </div>
       ) : null}
       {result ? (
         <>
           <div className="metrics">
             <span>总收益 {(result.metrics.total_return_pct * 100).toFixed(2)}%</span>
+            <span>年化收益 {(result.metrics.annualized_return_pct * 100).toFixed(2)}%</span>
             <span>最大回撤 {(result.metrics.max_drawdown_pct * 100).toFixed(2)}%</span>
             <span>胜率 {(result.metrics.win_rate_pct * 100).toFixed(2)}%</span>
             <span>交易次数 {result.metrics.trade_count}</span>

@@ -123,6 +123,7 @@ export type MarketNewsResponse = {
   updated_at: string;
   source: string;
   items: MarketNewsItem[];
+  diagnostics?: string[];
 };
 
 export type MarketBriefingLink = {
@@ -246,6 +247,8 @@ export type BacktestSettingsConfig = {
   stop_loss_pct: number | null;
   max_positions: number;
   max_daily_buys: number;
+  limit_up_blocks_buy?: boolean;
+  limit_down_blocks_sell?: boolean;
   fee_rate: number;
   stamp_tax_rate: number;
   slippage_rate: number;
@@ -288,6 +291,7 @@ export type Trade = {
   actual_position_pct: number;
   buy_reason: string[];
   sell_reason: string[];
+  blocked_reason: string | null;
   pnl?: number | null;
   pnl_pct?: number | null;
 };

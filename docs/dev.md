@@ -93,7 +93,9 @@ python -m pip install -e ".[dev]"
 
 before starting the desktop app.
 
-The Tauri bridge calls `python -m astock_backtester.cli` with `PYTHONPATH=backend` in development. Packaged sidecar bundling is a later hardening step after the development bridge is verified.
+In development, the Tauri bridge can still call `python -m astock_backtester.cli` with `PYTHONPATH=backend`.
+Release builds must bundle the packaged sidecar at `src-tauri\bin\astock-data-service.exe`;
+the installed app starts that binary from the application resource directory.
 
 ## Build The Local Data Service Sidecar
 
@@ -137,4 +139,4 @@ Remove-Item Env:\TAURI_SIGNING_PRIVATE_KEY
 
 ## Release And Updates
 
-Windows update signing, release asset requirements, `latest.json`, and installed-user update flow are documented in `docs/release.md`.
+Windows update signing, release asset requirements, `latest.json`, sidecar replacement checks, and installed-user update flow are documented in `docs/release.md`.

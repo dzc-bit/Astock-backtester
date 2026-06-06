@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { expect, it } from "vitest";
 import type { MarketBriefingResponse } from "../types";
@@ -161,4 +161,73 @@ it("highlights crawled article full text separately from the summary", async () 
   expect(screen.getByText("抓取到的原文详情")).toBeInTheDocument();
   expect(screen.getByText("今日机器人板块午后持续冲高。")).toBeInTheDocument();
   expect(screen.getByText("明日重点观察成交额能否继续放大。")).toBeInTheDocument();
+});
+
+it("cleans placeholder table field names in the full briefing dialog", async () => {
+  const user = userEvent.setup();
+  const briefing = buildBriefing("fupan");
+  briefing.sections = [
+    {
+      title: "复盘表格",
+      content: "结构化表格来自页面抓取，需要整理字段名。",
+      links: [],
+      tables: [
+        {
+          title: "强势方向",
+          columns: ["字段1", "字段2", "字段3"],
+          rows: [{ 字段1: "机器人", 字段2: "午后持续拉升", 字段3: "" }]
+        }
+      ]
+    }
+  ];
+
+  render(<TonghuashunBriefingPanel fupan={briefing} zaopan={buildBriefing("zaopan")} />);
+
+  await user.click(screen.getByRole("button", { name: "查看同花顺复盘总评全文" }));
+
+  expect(screen.queryByText("字段1")).not.toBeInTheDocument();
+  expect(screen.queryByText("字段2")).not.toBeInTheDocument();
+  expect(screen.queryByText("字段3")).not.toBeInTheDocument();
+  expect(screen.getByText("题材")).toBeInTheDocument();
+  expect(screen.getByText("异动原因")).toBeInTheDocument();
+  expect(screen.queryByText("影响")).not.toBeInTheDocument();
+  expect(screen.getByText("机器人")).toBeInTheDocument();
+  expect(screen.getByText("午后持续拉升")).toBeInTheDocument();
+});
+
+it("keeps diagnostics and long table details out of the main card while organizing them in the dialog", async () => {
+  const user = userEvent.setup();
+  const briefing = buildBriefing("fupan");
+  const mainHiddenText = "弹窗专属长表格内容，不应铺在主界面";
+  briefing.summary = "复盘重点：指数缩量震荡，题材轮动加快。";
+  briefing.diagnostics = ["已过滤纯数字汤和重复时间戳"];
+  briefing.sections = [
+    {
+      title: "重点摘要",
+      content: "题材轮动较快，注意追高风险。",
+      links: [{ title: "阅读全文链接", url: "https://stock.10jqka.com.cn/fupan/detail.html" }],
+      tables: [
+        {
+          title: "相关表格",
+          columns: ["题材", "说明"],
+          rows: [{ 题材: "机器人", 说明: mainHiddenText }]
+        }
+      ]
+    }
+  ];
+
+  render(<TonghuashunBriefingPanel fupan={briefing} zaopan={buildBriefing("zaopan")} />);
+
+  const panel = screen.getByRole("region", { name: "同花顺复盘与早盘总评" });
+  expect(panel).not.toHaveTextContent(mainHiddenText);
+  expect(panel).not.toHaveTextContent("已过滤纯数字汤和重复时间戳");
+
+  await user.click(screen.getByRole("button", { name: "查看同花顺复盘总评全文" }));
+
+  const dialog = screen.getByRole("dialog", { name: "同花顺复盘总评全文" });
+  expect(within(dialog).getAllByText("重点摘要").length).toBeGreaterThan(0);
+  expect(within(dialog).getByText("阅读全文")).toBeInTheDocument();
+  expect(within(dialog).getByText("相关表格")).toBeInTheDocument();
+  expect(within(dialog).getByText("阅读全文链接")).toBeInTheDocument();
+  expect(within(dialog).getByLabelText("同花顺总评诊断")).toHaveTextContent("已过滤纯数字汤和重复时间戳");
 });
