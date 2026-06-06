@@ -29,6 +29,17 @@ function pickSection(briefing: MarketBriefingResponse | null, pattern: RegExp): 
   return (preferred ?? briefing.sections[0]).content ?? null;
 }
 
+function splitParagraphs(content: string | null | undefined): string[] {
+  return (content ?? "")
+    .split(/\n{2,}|\r?\n/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function isFullTextSection(title: string): boolean {
+  return /^全文[:：]/.test(title.trim());
+}
+
 function BriefingCard({
   briefing,
   title,
@@ -157,7 +168,7 @@ function BriefingDialog({
         </div>
         <div className="ths-briefing-modal-body">
           <article className="ths-briefing-full-summary">
-            <span>摘要</span>
+            <span>重点摘要</span>
             <p>{briefing.summary}</p>
           </article>
           {briefing.sections.length === 0 ? (
@@ -166,25 +177,46 @@ function BriefingDialog({
               <span>当前接口只返回了摘要，稍后可刷新或打开同花顺原文查看。</span>
             </div>
           ) : (
-            briefing.sections.map((section, sectionIndex) => (
-              <article className="ths-briefing-section" key={`${section.title}-${sectionIndex}`}>
-                <h3>{section.title}</h3>
-                {section.content ? <p>{section.content}</p> : null}
-                {section.links.length > 0 ? (
-                  <div className="ths-briefing-link-list">
-                    {section.links.map((link, linkIndex) => (
-                      <a href={link.url ?? briefing.source_url} target="_blank" rel="noreferrer" key={`${link.title}-${linkIndex}`}>
-                        {link.title}
-                        <ExternalLink size={13} aria-hidden="true" />
-                      </a>
+            <section className="ths-briefing-reader" aria-label="阅读全文">
+              <div className="ths-briefing-reader-head">
+                <span>阅读全文</span>
+                <small>已按段落整理，向下滚动可读完整尾部。</small>
+              </div>
+              {briefing.sections.map((section, sectionIndex) => {
+                const paragraphs = splitParagraphs(section.content);
+                return (
+                  <article
+                    className={`ths-briefing-section${isFullTextSection(section.title) ? " full-text-section" : ""}`}
+                    key={`${section.title}-${sectionIndex}`}
+                  >
+                    {isFullTextSection(section.title) ? (
+                      <span className="ths-briefing-section-badge">抓取到的原文详情</span>
+                    ) : null}
+                    <h3>{section.title}</h3>
+                    {paragraphs.length > 0 ? (
+                      <div className="ths-briefing-paragraphs">
+                        {paragraphs.map((paragraph, paragraphIndex) => (
+                          <p key={`${section.title}-${paragraphIndex}`}>{paragraph}</p>
+                        ))}
+                      </div>
+                    ) : null}
+                    {section.links.length > 0 ? (
+                      <div className="ths-briefing-link-list">
+                        {section.links.map((link, linkIndex) => (
+                          <a href={link.url ?? briefing.source_url} target="_blank" rel="noreferrer" key={`${link.title}-${linkIndex}`}>
+                            {link.title}
+                            <ExternalLink size={13} aria-hidden="true" />
+                          </a>
+                        ))}
+                      </div>
+                    ) : null}
+                    {section.tables.map((table, tableIndex) => (
+                      <BriefingTable table={table} key={`${table.title ?? section.title}-${tableIndex}`} />
                     ))}
-                  </div>
-                ) : null}
-                {section.tables.map((table, tableIndex) => (
-                  <BriefingTable table={table} key={`${table.title ?? section.title}-${tableIndex}`} />
-                ))}
-              </article>
-            ))
+                  </article>
+                );
+              })}
+            </section>
           )}
           {briefing.diagnostics.length > 0 ? (
             <ul className="risk-diagnostics" aria-label="同花顺总评诊断">

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from astock_backtester.data.briefing import MarketBriefingProvider
+from astock_backtester.data.briefing import MarketBriefingProvider, THS_FUPAN_URL, THS_REFERER
 
 
 class FakeHtmlResponse:
@@ -14,9 +14,141 @@ class FakeHtmlResponse:
         return
 
 
+def test_market_briefing_provider_keeps_full_ths_fupan_summary_and_section_body():
+    summary_sentinel = "复盘摘要尾部哨兵"
+    body_sentinel = "复盘正文尾部哨兵"
+    long_summary = ("复盘长摘要" * 70) + summary_sentinel
+    long_body = ("复盘长章节正文" * 70) + body_sentinel
+    html = f"""
+    <html><body>
+      <div id="fpzj">{long_summary}</div>
+      <div class="fp_item_hd"><h2>长章节</h2></div>
+      <div class="fp_item_cnt"><p>{long_body}</p></div>
+    </body></html>
+    """
+    detail_html = """
+    <html><body>
+      <h1>A股收评：科技股回调</h1>
+      <article><p>A股三大指数集体下跌后，科技股尾盘仍有分化。</p></article>
+    </body></html>
+    """
+
+    def requester(url: str, **kwargs):
+        if url.endswith("test.shtml"):
+            return FakeHtmlResponse(detail_html)
+        return FakeHtmlResponse(html)
+
+    provider = MarketBriefingProvider(requester=requester)
+
+    response = provider.latest_fupan()
+
+    assert response.summary == long_summary
+    assert summary_sentinel in response.summary
+    assert not response.summary.endswith("...")
+    assert response.sections[0].content == long_body
+    assert body_sentinel in (response.sections[0].content or "")
+    assert not (response.sections[0].content or "").endswith("...")
+
+
+def test_market_briefing_provider_keeps_full_ths_zaopan_summary_main_and_sidebar_body():
+    summary_sentinel = "早盘摘要尾部哨兵"
+    main_sentinel = "早盘主栏尾部哨兵"
+    sidebar_sentinel = "早盘侧栏尾部哨兵"
+    long_summary = ("早盘长摘要" * 60) + summary_sentinel
+    long_main_body = ("早盘主栏正文" * 90) + main_sentinel
+    long_sidebar_body = ("早盘侧栏正文" * 60) + sidebar_sentinel
+    html = f"""
+    <html><body>
+      <div class="yestoday">{long_summary}</div>
+      <div class="content-main-fl"><p>{long_main_body}</p></div>
+      <div class="content-main-fr">
+        <div class="table-part">
+          <h2>侧栏观点</h2>
+          <p>{long_sidebar_body}</p>
+        </div>
+      </div>
+    </body></html>
+    """
+
+    provider = MarketBriefingProvider(requester=lambda *args, **kwargs: FakeHtmlResponse(html))
+
+    response = provider.latest_zaopan()
+
+    assert response.summary == long_summary
+    assert summary_sentinel in response.summary
+    assert not response.summary.endswith("...")
+    assert response.sections[0].content == long_main_body
+    assert main_sentinel in (response.sections[0].content or "")
+    assert not (response.sections[0].content or "").endswith("...")
+    assert response.sections[1].content == f"侧栏观点 {long_sidebar_body}"
+    assert sidebar_sentinel in (response.sections[1].content or "")
+    assert not (response.sections[1].content or "").endswith("...")
+
+
+def test_market_briefing_provider_keeps_full_ths_zaopan_summary_when_derived_from_main_body():
+    main_sentinel = "早盘派生摘要尾部哨兵"
+    long_main_body = ("早盘无摘要主栏正文" * 80) + main_sentinel
+    html = f"""
+    <html><body>
+      <div class="content-main-fl"><p>{long_main_body}</p></div>
+    </body></html>
+    """
+
+    detail_html = """
+    <html><body>
+      <h1>A股收评：科技股回调</h1>
+      <article><p>A股三大指数集体下跌后，科技股尾盘仍有分化。</p></article>
+    </body></html>
+    """
+
+    def requester(url: str, **kwargs):
+        if url.endswith("test.shtml"):
+            return FakeHtmlResponse(detail_html)
+        return FakeHtmlResponse(html)
+
+    provider = MarketBriefingProvider(requester=requester)
+
+    response = provider.latest_zaopan()
+
+    assert response.summary == long_main_body
+    assert main_sentinel in response.summary
+    assert not response.summary.endswith("...")
+
+
+def test_market_briefing_provider_prewarms_and_retries_when_ths_returns_empty_body():
+    valid_html = """
+    <html><body>
+      <div id="fpzj">重试后拿到复盘摘要</div>
+      <div class="fp_item_hd"><h2>重试章节</h2></div>
+      <div class="fp_item_cnt"><p>重试后拿到复盘正文</p></div>
+    </body></html>
+    """
+    calls: list[tuple[str, dict]] = []
+
+    def requester(url: str, **kwargs):
+        calls.append((url, kwargs))
+        if len(calls) == 1:
+            return FakeHtmlResponse("")
+        if url == THS_REFERER:
+            return FakeHtmlResponse("<html><body>同花顺入口预热</body></html>")
+        return FakeHtmlResponse(valid_html)
+
+    provider = MarketBriefingProvider(requester=requester)
+
+    response = provider.latest_fupan()
+
+    assert response.source == "ths-fupan"
+    assert response.summary == "重试后拿到复盘摘要"
+    assert [url for url, _ in calls] == [THS_FUPAN_URL, THS_REFERER, THS_FUPAN_URL]
+    request_headers = calls[0][1]["headers"]
+    assert request_headers["Referer"] == THS_REFERER
+    assert "Windows NT" in request_headers["User-Agent"]
+    assert "zh-CN" in request_headers["Accept-Language"]
+
+
 def test_market_briefing_provider_parses_ths_fupan_sections_tables_and_links():
     html = """
-    <html><body>
+    <html><body data-case="fupan-table-link-expansion">
       <div id="fpzj">A股三大指数集体下跌，煤炭、养鸡、AI应用活跃。</div>
       <div class="fp_item_hd"><em>01</em><h2>指数/概念分析</h2></div>
       <div class="fp_item_cnt">
@@ -32,18 +164,91 @@ def test_market_briefing_provider_parses_ths_fupan_sections_tables_and_links():
       </div>
     </body></html>
     """
+    detail_html = """
+    <html><body>
+      <h1>A股收评：科技股回调</h1>
+      <article><p>A股三大指数集体下跌后，科技股尾盘仍有分化。</p></article>
+    </body></html>
+    """
 
-    provider = MarketBriefingProvider(requester=lambda *args, **kwargs: FakeHtmlResponse(html))
+    def requester(url: str, **kwargs):
+        if url.endswith("test.shtml"):
+            return FakeHtmlResponse(detail_html)
+        return FakeHtmlResponse(html)
+
+    provider = MarketBriefingProvider(requester=requester)
 
     response = provider.latest_fupan()
 
     assert response.kind == "fupan"
     assert response.source == "ths-fupan"
     assert response.summary == "A股三大指数集体下跌，煤炭、养鸡、AI应用活跃。"
-    assert [section.title for section in response.sections] == ["指数/概念分析", "同花顺解盘"]
+    assert [section.title for section in response.sections] == ["指数/概念分析", "同花顺解盘", "全文：A股收评：科技股回调"]
     assert response.sections[0].tables[0].columns == ["个股", "涨幅"]
     assert response.sections[0].tables[0].rows == [{"个股": "软通动力", "涨幅": "20.00%"}]
     assert response.sections[1].links[0].title == "A股收评：科技股回调"
+    assert "A股三大指数集体下跌" in (response.sections[2].content or "")
+
+
+def test_market_briefing_provider_expands_article_links_into_full_text_sections():
+    index_html = """
+    <html><body>
+      <div id="fpzj">A股复盘摘要</div>
+      <div class="fp_item_hd"><h2>同花顺解盘</h2></div>
+      <div class="fp_item_cnt">
+        <ul>
+          <li><a href="http://stock.10jqka.com.cn/20260605/c677247169.shtml" title="A股收评：机器人走强">A股收评</a></li>
+          <li><a href="http://q.10jqka.com.cn/gn/detail/code/309000/">减速器</a></li>
+        </ul>
+      </div>
+    </body></html>
+    """
+    detail_html = """
+    <html><body>
+      <h1>A股收评：机器人走强</h1>
+      <article>
+        <p>今日机器人板块午后持续冲高，减速器方向多只个股涨停。</p>
+        <p>尾盘资金仍围绕题材龙头博弈，明日重点观察成交额能否继续放大。</p>
+      </article>
+    </body></html>
+    """
+    calls: list[str] = []
+
+    def requester(url: str, **kwargs):
+        calls.append(url)
+        if url.endswith("c677247169.shtml"):
+            return FakeHtmlResponse(detail_html)
+        return FakeHtmlResponse(index_html)
+
+    response = MarketBriefingProvider(requester=requester).latest_fupan()
+
+    assert calls == [THS_FUPAN_URL, "http://stock.10jqka.com.cn/20260605/c677247169.shtml"]
+    assert [section.title for section in response.sections] == ["同花顺解盘", "全文：A股收评：机器人走强"]
+    assert "今日机器人板块午后持续冲高" in (response.sections[1].content or "")
+    assert "明日重点观察成交额能否继续放大" in (response.sections[1].content or "")
+    assert response.sections[1].links[0].url == "http://stock.10jqka.com.cn/20260605/c677247169.shtml"
+
+
+def test_market_briefing_provider_reports_article_expansion_failures_in_diagnostics():
+    index_html = """
+    <html><body>
+      <div id="fpzj">A股复盘摘要</div>
+      <div class="fp_item_hd"><h2>同花顺解盘</h2></div>
+      <div class="fp_item_cnt">
+        <a href="http://stock.10jqka.com.cn/20260605/c677247169.shtml" title="A股收评：机器人走强">A股收评</a>
+      </div>
+    </body></html>
+    """
+
+    def requester(url: str, **kwargs):
+        if url.endswith("c677247169.shtml"):
+            raise RuntimeError("anti crawler")
+        return FakeHtmlResponse(index_html)
+
+    response = MarketBriefingProvider(requester=requester).latest_fupan()
+
+    assert [section.title for section in response.sections] == ["同花顺解盘"]
+    assert response.diagnostics == ["同花顺文章详情抓取失败：A股收评：机器人走强 - anti crawler"]
 
 
 def test_market_briefing_provider_parses_ths_zaopan_summary_and_tables():

@@ -35,6 +35,143 @@ def test_backtest_respects_max_daily_buys(basic_strategy, basic_settings):
     assert max(buys_by_day.values()) <= 1
 
 
+def test_backtest_result_reports_latest_trade_day_strategy_matches_without_daily_buy_limit():
+    dates = pd.to_datetime(["2024-01-02", "2024-01-03"])
+    rows = []
+    for symbol, name, close, volume, volume_ratio, change_pct in [
+        ("AAA", "Alpha", 10.0, 1000, 1.1, 0.01),
+        ("BBB", "Bravo", 11.0, 9000, 1.5, 0.03),
+        ("CCC", "Charlie", 12.0, 5000, 1.2, -0.01),
+    ]:
+        for trade_date in dates:
+            rows.append(
+                {
+                    "symbol": symbol,
+                    "name": name,
+                    "trade_date": trade_date,
+                    "open": close,
+                    "high": close * 1.01,
+                    "low": close * 0.99,
+                    "close": close,
+                    "change_pct": change_pct,
+                    "volume": volume,
+                    "volume_ratio_2d": volume_ratio,
+                    "is_suspended": False,
+                    "listing_days": 500,
+                    "float_market_cap": 2_000_000_000,
+                    "main_net_inflow": 0.0,
+                }
+            )
+    frame = pd.DataFrame(rows)
+    strategy = StrategyConfig(
+        name="latest-matches",
+        market_filters=[],
+        entry_groups=[
+            ConditionGroup(
+                id="entry",
+                operator=ConditionOperator.AND,
+                conditions=[
+                    ConditionNode(
+                        id="cap",
+                        condition_id="market_cap_between",
+                        params={"min": 1_000_000_000, "max": 3_000_000_000},
+                    )
+                ],
+            )
+        ],
+        exit_rules=[],
+    )
+    settings = BacktestSettings(
+        start_date=dates[0].date(),
+        end_date=dates[-1].date(),
+        initial_cash=100_000,
+        max_positions=10,
+        max_daily_buys=1,
+        min_listing_days=0,
+    )
+
+    events = []
+
+    result = run_backtest(frame, strategy, settings, on_event=lambda event: events.append(event))
+
+    opened_trades = [event["trade"] for event in events if event["type"] == "trade_opened"]
+    assert len(opened_trades) == 1
+    assert opened_trades[0].symbol == "BBB"
+    assert result.latest_strategy_matches is not None
+    assert str(result.latest_strategy_matches.signal_date) == "2024-01-03"
+    assert str(result.latest_strategy_matches.trade_date) == "2024-01-03"
+    assert [match.symbol for match in result.latest_strategy_matches.matches] == ["BBB", "CCC", "AAA"]
+
+    first_match = result.latest_strategy_matches.matches[0]
+    assert first_match.name == "Bravo"
+    assert str(first_match.signal_date) == "2024-01-03"
+    assert str(first_match.trade_date) == "2024-01-03"
+    assert first_match.close == 11.0
+    assert first_match.change_pct == 0.03
+    assert first_match.rank_score == 1.5
+    assert any("float market cap" in reason for reason in first_match.reasons)
+
+
+def test_backtest_result_reports_empty_matches_for_latest_trade_day_without_reusing_older_hits():
+    dates = pd.to_datetime(["2024-01-02", "2024-01-03", "2024-01-04"])
+    rows = []
+    for trade_date, market_cap in [
+        (dates[0], 2_000_000_000),
+        (dates[1], 2_000_000_000),
+        (dates[2], 9_000_000_000),
+    ]:
+        rows.append(
+            {
+                "symbol": "AAA",
+                "name": "Alpha",
+                "trade_date": trade_date,
+                "open": 10.0,
+                "high": 10.2,
+                "low": 9.8,
+                "close": 10.0,
+                "change_pct": 0.01,
+                "volume": 1000,
+                "is_suspended": False,
+                "listing_days": 500,
+                "float_market_cap": market_cap,
+                "main_net_inflow": 0.0,
+            }
+        )
+    frame = pd.DataFrame(rows)
+    strategy = StrategyConfig(
+        name="latest-empty-matches",
+        market_filters=[],
+        entry_groups=[
+            ConditionGroup(
+                id="entry",
+                operator=ConditionOperator.AND,
+                conditions=[
+                    ConditionNode(
+                        id="cap",
+                        condition_id="market_cap_between",
+                        params={"min": 1_000_000_000, "max": 3_000_000_000},
+                    )
+                ],
+            )
+        ],
+        exit_rules=[],
+    )
+    settings = BacktestSettings(
+        start_date=dates[0].date(),
+        end_date=dates[-1].date(),
+        initial_cash=100_000,
+        max_positions=1,
+        max_daily_buys=1,
+        min_listing_days=0,
+    )
+
+    result = run_backtest(frame, strategy, settings)
+
+    assert result.latest_strategy_matches is not None
+    assert str(result.latest_strategy_matches.signal_date) == "2024-01-04"
+    assert result.latest_strategy_matches.matches == []
+
+
 def test_backtest_reports_metrics_and_equity_curve(basic_strategy, basic_settings):
     result = run_backtest(enriched_data(), basic_strategy, basic_settings)
 

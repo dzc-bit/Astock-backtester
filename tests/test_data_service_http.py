@@ -107,6 +107,10 @@ def test_service_run_backtest_uses_sidecar_cache(tmp_path, basic_strategy, basic
 
         assert response["result"]["metrics"]["trade_count"] >= 1
         assert response["result"]["trades"]
+        latest_matches = response["result"]["latest_strategy_matches"]
+        assert latest_matches["signal_date"] == "2024-01-08"
+        assert latest_matches["trade_date"] == "2024-01-08"
+        assert isinstance(latest_matches["matches"], list)
     finally:
         server.shutdown()
         thread.join(timeout=5)
@@ -242,6 +246,10 @@ def test_service_streams_backtest_trade_events_before_final_result(tmp_path, bas
         assert events[opened_index]["trade"]["sell_date"] is None
         assert events[trade_index]["trade"]["symbol"] == "AAA"
         assert events[result_index]["result"]["metrics"]["trade_count"] >= 1
+        latest_matches = events[result_index]["result"]["latest_strategy_matches"]
+        assert latest_matches["signal_date"] == "2024-01-08"
+        assert latest_matches["trade_date"] == "2024-01-08"
+        assert isinstance(latest_matches["matches"], list)
     finally:
         server.shutdown()
         thread.join(timeout=5)
@@ -1089,6 +1097,80 @@ def test_service_market_news_uses_configured_provider(tmp_path):
         assert response["source"] == "fake-news"
         assert response["items"][0]["title"] == "政策利好推动科技板块走强"
         assert response["items"][0]["sentiment"] == "positive"
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_service_market_commentary_uses_configured_provider(tmp_path):
+    class FakeCommentaryProvider:
+        def current_commentary(self):
+            from datetime import date, datetime, timezone
+
+            from astock_backtester.models import MarketCommentaryPoint, MarketCommentaryResponse
+
+            return MarketCommentaryResponse(
+                updated_at=datetime(2026, 6, 5, 14, 30, tzinfo=timezone.utc),
+                trade_date=date(2026, 6, 5),
+                source="fake-commentary",
+                stance="positive",
+                summary="红盘家数占优，AI应用延续。",
+                drivers=[MarketCommentaryPoint(title="强势题材", detail="AI应用+4.20%", weight="high")],
+                risks=["成交量不延续时避免追高。"],
+                next_watch=["继续观察AI应用承接。"],
+            )
+
+    server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
+    server.state.commentary_provider = FakeCommentaryProvider()
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        response = _request_json("GET", f"http://127.0.0.1:{port}/market/commentary")
+
+        assert response["source"] == "fake-commentary"
+        assert response["stance"] == "positive"
+        assert response["drivers"][0]["title"] == "强势题材"
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_service_market_news_summary_uses_configured_provider(tmp_path):
+    class FakeNewsSummaryProvider:
+        def latest_summary(self):
+            from datetime import datetime, timezone
+
+            from astock_backtester.models import MarketNewsSummaryResponse, MarketNewsTheme
+
+            return MarketNewsSummaryResponse(
+                updated_at=datetime(2026, 6, 5, 14, 30, tzinfo=timezone.utc),
+                source="fake-summary",
+                item_count=3,
+                themes=[
+                    MarketNewsTheme(
+                        title="AI",
+                        summary="AI相关消息集中。",
+                        sentiment="positive",
+                        source_count=2,
+                        headlines=["AI应用产业链午后走强"],
+                    )
+                ],
+                highlights=["AI应用产业链午后走强"],
+                risks=["退市风险提示增多"],
+            )
+
+    server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
+    server.state.news_summary_provider = FakeNewsSummaryProvider()
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        response = _request_json("GET", f"http://127.0.0.1:{port}/market/news-summary")
+
+        assert response["source"] == "fake-summary"
+        assert response["item_count"] == 3
+        assert response["themes"][0]["title"] == "AI"
     finally:
         server.shutdown()
         thread.join(timeout=5)

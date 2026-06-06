@@ -225,6 +225,42 @@ class MarketNewsResponse(BaseModel):
     items: list[MarketNewsItem] = Field(default_factory=list)
 
 
+class MarketCommentaryPoint(BaseModel):
+    title: str
+    detail: str
+    weight: Literal["high", "medium", "low"] = "medium"
+
+
+class MarketCommentaryResponse(BaseModel):
+    updated_at: datetime
+    trade_date: date
+    source: str
+    stance: Literal["positive", "neutral", "defensive"]
+    summary: str
+    drivers: list[MarketCommentaryPoint] = Field(default_factory=list)
+    risks: list[str] = Field(default_factory=list)
+    next_watch: list[str] = Field(default_factory=list)
+    diagnostics: list[str] = Field(default_factory=list)
+
+
+class MarketNewsTheme(BaseModel):
+    title: str
+    summary: str
+    sentiment: Literal["positive", "neutral", "negative"] = "neutral"
+    source_count: int = 0
+    headlines: list[str] = Field(default_factory=list)
+
+
+class MarketNewsSummaryResponse(BaseModel):
+    updated_at: datetime
+    source: str
+    item_count: int
+    themes: list[MarketNewsTheme] = Field(default_factory=list)
+    highlights: list[str] = Field(default_factory=list)
+    risks: list[str] = Field(default_factory=list)
+    diagnostics: list[str] = Field(default_factory=list)
+
+
 class MarketBriefingLink(BaseModel):
     title: str
     url: str | None = None
@@ -331,6 +367,23 @@ class Trade(BaseModel):
     pnl_pct: float | None = None
 
 
+class StrategyMatch(BaseModel):
+    symbol: str
+    signal_date: date
+    trade_date: date
+    name: str | None = None
+    close: float
+    change_pct: float | None = None
+    reasons: list[str]
+    rank_score: float
+
+
+class DailyStrategyMatches(BaseModel):
+    signal_date: date
+    trade_date: date
+    matches: list[StrategyMatch]
+
+
 class EquityPoint(BaseModel):
     trade_date: date
     equity: float
@@ -355,3 +408,4 @@ class BacktestResult(BaseModel):
     equity_curve: list[EquityPoint]
     trades: list[Trade]
     preflight_issues: list[PreflightIssue] = Field(default_factory=list)
+    latest_strategy_matches: DailyStrategyMatches | None = None

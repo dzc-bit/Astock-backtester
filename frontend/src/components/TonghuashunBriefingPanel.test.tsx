@@ -65,3 +65,60 @@ it("opens a full briefing dialog from each Tonghuashun card", async () => {
 
   expect(screen.queryByRole("dialog", { name: "同花顺复盘总评全文" })).not.toBeInTheDocument();
 });
+
+it("keeps the end of a long full briefing readable in the dialog", async () => {
+  const user = userEvent.setup();
+  const longBriefing = buildBriefing("fupan");
+  longBriefing.summary = "复盘摘要：先看指数位置，再看主线持续性。";
+  longBriefing.sections = [
+    {
+      title: "指数与情绪",
+      content: [
+        "指数全天震荡，权重护盘但题材分化。",
+        "成交额没有明显放大，追高需要更多确认。",
+        "长文本尾部：明日继续观察量能能否回到万亿上方。"
+      ].join("\n\n"),
+      links: [{ title: "复盘原文", url: "https://stock.10jqka.com.cn/fupan/detail.html" }],
+      tables: []
+    }
+  ];
+
+  render(<TonghuashunBriefingPanel fupan={longBriefing} zaopan={buildBriefing("zaopan")} />);
+
+  await user.click(screen.getByRole("button", { name: "查看同花顺复盘总评全文" }));
+
+  expect(screen.getByText("重点摘要")).toBeInTheDocument();
+  expect(screen.getByText("阅读全文")).toBeInTheDocument();
+  expect(screen.getByText("长文本尾部：明日继续观察量能能否回到万亿上方。")).toBeInTheDocument();
+  expect(screen.getByRole("link", { name: /打开同花顺原文/ })).toHaveAttribute(
+    "href",
+    "https://stock.10jqka.com.cn/fupan/"
+  );
+});
+
+it("highlights crawled article full text separately from the summary", async () => {
+  const user = userEvent.setup();
+  const briefing = buildBriefing("fupan");
+  briefing.sections = [
+    {
+      title: "同花顺解盘",
+      content: "列表页解盘只提供了文章入口。",
+      links: [{ title: "A股收评：机器人走强", url: "https://stock.10jqka.com.cn/20260605/c677247169.shtml" }],
+      tables: []
+    },
+    {
+      title: "全文：A股收评：机器人走强",
+      content: "今日机器人板块午后持续冲高。\n\n明日重点观察成交额能否继续放大。",
+      links: [{ title: "A股收评：机器人走强", url: "https://stock.10jqka.com.cn/20260605/c677247169.shtml" }],
+      tables: []
+    }
+  ];
+
+  render(<TonghuashunBriefingPanel fupan={briefing} zaopan={buildBriefing("zaopan")} />);
+
+  await user.click(screen.getByRole("button", { name: "查看同花顺复盘总评全文" }));
+
+  expect(screen.getByText("抓取到的原文详情")).toBeInTheDocument();
+  expect(screen.getByText("今日机器人板块午后持续冲高。")).toBeInTheDocument();
+  expect(screen.getByText("明日重点观察成交额能否继续放大。")).toBeInTheDocument();
+});

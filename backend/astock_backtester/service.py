@@ -20,7 +20,9 @@ from astock_backtester.data.operations import (
     import_daily_bars_into_cache,
 )
 from astock_backtester.data.providers import ADataProvider, CompositeProvider, HttpAStockProvider
+from astock_backtester.data.market_commentary import MarketCommentaryProvider
 from astock_backtester.data.news import MarketNewsProvider
+from astock_backtester.data.news_summary import MarketNewsSummaryProvider
 from astock_backtester.data.realtime import RealtimeMarketProvider
 from astock_backtester.data.risk import RiskAlertProvider
 from astock_backtester.data.sync import SyncJobManager
@@ -39,6 +41,8 @@ class DataServiceState:
         self.sync_manager = SyncJobManager(warehouse=self.warehouse, provider=self.provider)
         self.realtime_provider = RealtimeMarketProvider(self.warehouse)
         self.news_provider = MarketNewsProvider()
+        self.commentary_provider = MarketCommentaryProvider(self.realtime_provider, self.news_provider)
+        self.news_summary_provider = MarketNewsSummaryProvider(self.news_provider)
         self.briefing_provider = MarketBriefingProvider()
         self.risk_provider = RiskAlertProvider(self.warehouse)
         self.port = port
@@ -159,6 +163,14 @@ class DataServiceHandler(BaseHTTPRequestHandler):
         if self.path == "/market/news":
             news = self.server.state.news_provider.latest_news()
             self._send_json(news.model_dump(mode="json"))
+            return
+        if self.path == "/market/commentary":
+            commentary = self.server.state.commentary_provider.current_commentary()
+            self._send_json(commentary.model_dump(mode="json"))
+            return
+        if self.path == "/market/news-summary":
+            summary = self.server.state.news_summary_provider.latest_summary()
+            self._send_json(summary.model_dump(mode="json"))
             return
         if self.path == "/market/fupan":
             briefing = self.server.state.briefing_provider.latest_fupan()

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from html import unescape
 from typing import Callable, Literal
 from urllib.parse import urljoin
+from urllib.parse import urlparse
 
 import requests
 from bs4 import BeautifulSoup, Tag
@@ -21,6 +22,10 @@ from astock_backtester.models import (
 THS_FUPAN_URL = "https://stock.10jqka.com.cn/fupan/"
 THS_ZAOPAN_URL = "https://stock.10jqka.com.cn/zaopan/"
 THS_REFERER = "https://stock.10jqka.com.cn/"
+THS_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+)
 
 
 def _clean_text(value: str | None, max_length: int | None = None) -> str:
@@ -32,6 +37,18 @@ def _clean_text(value: str | None, max_length: int | None = None) -> str:
 
 def _node_text(node: Tag | None, max_length: int | None = None) -> str:
     return _clean_text(node.get_text(" ", strip=True) if node else "", max_length=max_length)
+
+
+def _ths_headers(referer: str = THS_REFERER) -> dict[str, str]:
+    return {
+        "User-Agent": THS_USER_AGENT,
+        "Referer": referer,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+    }
 
 
 def _section_title(node: Tag, fallback: str) -> str:
@@ -100,10 +117,56 @@ def _remove_non_textual_nodes(node: Tag) -> Tag:
     return root
 
 
+def _is_ths_article_url(url: str | None) -> bool:
+    if not url:
+        return False
+    parsed = urlparse(url)
+    return parsed.netloc.endswith("stock.10jqka.com.cn") and parsed.path.endswith(".shtml")
+
+
+def _article_title(soup: BeautifulSoup, fallback: str) -> str:
+    title = _node_text(soup.select_one("h1"))
+    if title:
+        return title
+    meta_title = soup.select_one('meta[property="og:title"], meta[name="title"]')
+    if meta_title:
+        title = _clean_text(str(meta_title.get("content") or ""))
+        if title:
+            return title
+    page_title = _node_text(soup.title)
+    return re.sub(r"[_-].*$", "", page_title).strip() or fallback
+
+
+def _article_body(soup: BeautifulSoup) -> str | None:
+    selectors = (
+        "article",
+        ".main-text",
+        ".art_context",
+        ".artText",
+        ".detail-content",
+        ".news-content",
+        ".article-content",
+        ".post-content",
+    )
+    container = next((node for selector in selectors for node in soup.select(selector) if isinstance(node, Tag)), None)
+    if container is None:
+        paragraphs = [_node_text(node) for node in soup.select("p")]
+    else:
+        for child in container.select("script,style,a,img,svg,canvas,iframe"):
+            child.decompose()
+        paragraphs = [_node_text(node) for node in container.select("p,li")]
+        if not paragraphs:
+            paragraphs = [_node_text(container)]
+    paragraphs = [paragraph for paragraph in paragraphs if len(paragraph) >= 8]
+    if not paragraphs:
+        return None
+    return "\n\n".join(paragraphs)
+
+
 @dataclass
 class MarketBriefingProvider:
     timeout: float = 8.0
-    requester: Callable[..., requests.Response] = requests.get
+    requester: Callable[..., requests.Response] = field(default_factory=lambda: requests.Session().get)
 
     def latest_fupan(self) -> MarketBriefingResponse:
         try:
@@ -120,22 +183,76 @@ class MarketBriefingProvider:
             return self._fallback("zaopan", THS_ZAOPAN_URL, f"同花顺早盘读取失败：{exc}")
 
     def _fetch_ths_html(self, url: str) -> BeautifulSoup:
-        response = self.requester(
-            url,
-            timeout=self.timeout,
-            headers={
-                "User-Agent": "Mozilla/5.0",
-                "Referer": THS_REFERER,
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            },
-        )
-        response.raise_for_status()
-        response.encoding = getattr(response, "apparent_encoding", None) or response.encoding or "gbk"
-        text = response.text
+        response = self._request_ths(url)
+        text = self._response_text(response)
+        if not _clean_text(text):
+            self._prewarm_ths_session()
+            response = self._request_ths(url)
+            text = self._response_text(response)
+        if not _clean_text(text):
+            raise ValueError(f"同花顺返回空页面：{url}")
         return BeautifulSoup(text, "html.parser")
 
+    def _request_ths(self, url: str) -> requests.Response:
+        return self.requester(url, timeout=self.timeout, headers=_ths_headers())
+
+    def _fetch_article_section(self, link: MarketBriefingLink, referer: str) -> tuple[MarketBriefingSection | None, str | None]:
+        if not _is_ths_article_url(link.url):
+            return None, None
+        try:
+            response = self.requester(link.url, timeout=self.timeout, headers=_ths_headers(referer=referer))
+            text = self._response_text(response)
+            soup = BeautifulSoup(text, "html.parser")
+            body = _article_body(soup)
+            if not body:
+                return None, f"同花顺文章详情未解析到正文：{link.title}"
+            title = _article_title(soup, link.title)
+            return MarketBriefingSection(
+                title=f"全文：{title}",
+                content=body,
+                links=[link],
+                tables=[],
+            ), None
+        except Exception as exc:
+            return None, f"同花顺文章详情抓取失败：{link.title} - {exc}"
+
+    def _expand_article_links(
+        self,
+        sections: list[MarketBriefingSection],
+        referer: str,
+        limit: int = 4,
+    ) -> tuple[list[MarketBriefingSection], list[str]]:
+        expanded = list(sections)
+        diagnostics: list[str] = []
+        seen_urls: set[str] = set()
+        for section in sections:
+            for link in section.links:
+                if not link.url or link.url in seen_urls:
+                    continue
+                seen_urls.add(link.url)
+                detail, diagnostic = self._fetch_article_section(link, referer)
+                if detail is not None:
+                    expanded.append(detail)
+                if diagnostic is not None:
+                    diagnostics.append(diagnostic)
+                if len(expanded) >= len(sections) + limit:
+                    return expanded, diagnostics
+        return expanded, diagnostics
+
+    def _response_text(self, response: requests.Response) -> str:
+        response.raise_for_status()
+        response.encoding = getattr(response, "apparent_encoding", None) or response.encoding or "gbk"
+        return response.text
+
+    def _prewarm_ths_session(self) -> None:
+        try:
+            response = self.requester(THS_REFERER, timeout=self.timeout, headers=_ths_headers())
+            response.raise_for_status()
+        except Exception:
+            return
+
     def _parse_fupan(self, soup: BeautifulSoup) -> MarketBriefingResponse:
-        summary = _node_text(soup.select_one("#fpzj"), max_length=260)
+        summary = _node_text(soup.select_one("#fpzj"))
         sections: list[MarketBriefingSection] = []
         headers = soup.select(".fp_item_hd")
         contents = soup.select(".fp_item_cnt")
@@ -148,20 +265,22 @@ class MarketBriefingProvider:
                 if table is not None
             ]
             links = _links_from_node(content, THS_FUPAN_URL)
-            body = _node_text(content_without_tables, max_length=360)
+            body = _node_text(content_without_tables)
             if body or tables or links:
                 sections.append(MarketBriefingSection(title=title or "复盘板块", content=body or None, links=links, tables=tables))
+        expanded_sections, diagnostics = self._expand_article_links(sections[:8], THS_FUPAN_URL)
         return MarketBriefingResponse(
             kind="fupan",
             updated_at=datetime.now(timezone.utc),
             source="ths-fupan",
             source_url=THS_FUPAN_URL,
             summary=summary or "同花顺复盘已读取，但页面暂未提供摘要。",
-            sections=sections[:8],
+            sections=expanded_sections,
+            diagnostics=diagnostics,
         )
 
     def _parse_zaopan(self, soup: BeautifulSoup) -> MarketBriefingResponse:
-        summary = _node_text(soup.select_one(".yestoday"), max_length=220)
+        summary = _node_text(soup.select_one(".yestoday"))
         sections: list[MarketBriefingSection] = []
         main = soup.select_one(".content-main-fl")
         if main:
@@ -171,7 +290,7 @@ class MarketBriefingProvider:
                 for table in (_table_from_node(node, title="早盘表格") for node in main.select("table")[:3])
                 if table is not None
             ]
-            content = _node_text(main_text_root, max_length=520)
+            content = _node_text(main_text_root)
             if content or tables:
                 sections.append(
                     MarketBriefingSection(
@@ -190,7 +309,7 @@ class MarketBriefingProvider:
                 if table is not None
             ]
             content_root = _remove_non_textual_nodes(part)
-            content = _node_text(content_root, max_length=260)
+            content = _node_text(content_root)
             if content or tables:
                 sections.append(
                     MarketBriefingSection(
@@ -201,13 +320,15 @@ class MarketBriefingProvider:
                     )
                 )
         fallback_summary = "同花顺早盘已读取，重点关注昨日行情、公司事项、机构观点和停复牌信息。"
+        expanded_sections, diagnostics = self._expand_article_links(sections[:8], THS_ZAOPAN_URL)
         return MarketBriefingResponse(
             kind="zaopan",
             updated_at=datetime.now(timezone.utc),
             source="ths-zaopan",
             source_url=THS_ZAOPAN_URL,
-            summary=summary or (sections[0].content[:220] if sections and sections[0].content else fallback_summary),
-            sections=sections[:8],
+            summary=summary or (sections[0].content if sections and sections[0].content else fallback_summary),
+            sections=expanded_sections,
+            diagnostics=diagnostics,
         )
 
     def _fallback(

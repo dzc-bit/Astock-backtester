@@ -22,17 +22,17 @@ function buildSnapshot(overrides: Partial<RealtimeMarketSnapshot> = {}): Realtim
   };
 }
 
-it("renders deterministic closing review wording for stale snapshots", () => {
+it("keeps the realtime market panel focused on structured market data", () => {
   render(<MarketDashboard snapshot={buildSnapshot()} />);
 
-  expect(
-    screen.getByText(
-      "收盘后板块解读：半导体+3.60%、机器人+2.40%领涨；红盘占优，板块强度有扩散。昨日强势延续在半导体，次日先看承接。次日优先看这些方向是否继续放量，否则不要把一日强势当成趋势。"
-    )
-  ).toBeInTheDocument();
+  expect(screen.getByText("红绿家数")).toBeInTheDocument();
+  expect(screen.getByText("强势板块")).toBeInTheDocument();
+  expect(screen.getByText("昨日强势追踪")).toBeInTheDocument();
+  expect(screen.queryByText(/收盘后板块解读：/)).not.toBeInTheDocument();
+  expect(screen.queryByText(/行情评价：/)).not.toBeInTheDocument();
 });
 
-it("hides closing review before the close for live intraday snapshots", () => {
+it("does not mix commentary into live intraday snapshots", () => {
   render(
     <MarketDashboard
       snapshot={buildSnapshot({
@@ -43,4 +43,5 @@ it("hides closing review before the close for live intraday snapshots", () => {
   );
 
   expect(screen.queryByText(/收盘后板块解读：/)).not.toBeInTheDocument();
+  expect(screen.queryByText(/行情评价：/)).not.toBeInTheDocument();
 });

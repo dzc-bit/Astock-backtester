@@ -2,7 +2,9 @@ import { useEffect, useState } from "react";
 import { Activity, Database, Flame, ShieldAlert, TrendingUp } from "lucide-react";
 import {
   loadMarketBriefing,
+  loadMarketCommentary,
   loadMarketNews,
+  loadNewsSummary,
   loadRealtimeMarketSnapshot,
   loadRecommendedStrategies,
   loadRiskAlerts,
@@ -12,7 +14,9 @@ import {
 } from "./api";
 import { DataCenter } from "./components/DataCenter";
 import { MarketDashboard } from "./components/MarketDashboard";
+import { MarketCommentaryPanel } from "./components/MarketCommentaryPanel";
 import { NewsPanel } from "./components/NewsPanel";
+import { NewsSummaryPanel } from "./components/NewsSummaryPanel";
 import { ResultsOverview } from "./components/ResultsOverview";
 import { RiskAlertsModal } from "./components/RiskAlertsModal";
 import {
@@ -37,7 +41,9 @@ import type {
   DatasetCoverage,
   ConditionValidationResult,
   MarketBriefingResponse,
+  MarketCommentaryResponse,
   MarketNewsResponse,
+  NewsSummaryResponse,
   RealtimeMarketSnapshot,
   RecommendedStrategy,
   RiskAlertsResponse,
@@ -141,6 +147,8 @@ export function App() {
   const [marketSnapshot, setMarketSnapshot] = useState<RealtimeMarketSnapshot | null>(null);
   const [isLoadingMarket, setIsLoadingMarket] = useState(false);
   const [marketNews, setMarketNews] = useState<MarketNewsResponse | null>(null);
+  const [marketCommentary, setMarketCommentary] = useState<MarketCommentaryResponse | null>(null);
+  const [newsSummary, setNewsSummary] = useState<NewsSummaryResponse | null>(null);
   const [fupanBriefing, setFupanBriefing] = useState<MarketBriefingResponse | null>(null);
   const [zaopanBriefing, setZaopanBriefing] = useState<MarketBriefingResponse | null>(null);
   const [isLoadingNews, setIsLoadingNews] = useState(false);
@@ -300,14 +308,28 @@ export function App() {
     }
     setIsLoadingNews(true);
     try {
-      const [news, fupan, zaopan] = await Promise.all([
+      const [newsResult, fupanResult, zaopanResult, commentaryResult, summaryResult] = await Promise.allSettled([
         loadMarketNews(dataService.base_url),
         loadMarketBriefing(dataService.base_url, "fupan"),
-        loadMarketBriefing(dataService.base_url, "zaopan")
+        loadMarketBriefing(dataService.base_url, "zaopan"),
+        loadMarketCommentary(dataService.base_url),
+        loadNewsSummary(dataService.base_url)
       ]);
-      setMarketNews(news);
-      setFupanBriefing(fupan);
-      setZaopanBriefing(zaopan);
+      if (newsResult.status === "fulfilled") {
+        setMarketNews(newsResult.value);
+      }
+      if (fupanResult.status === "fulfilled") {
+        setFupanBriefing(fupanResult.value);
+      }
+      if (zaopanResult.status === "fulfilled") {
+        setZaopanBriefing(zaopanResult.value);
+      }
+      if (commentaryResult.status === "fulfilled") {
+        setMarketCommentary(commentaryResult.value);
+      }
+      if (summaryResult.status === "fulfilled") {
+        setNewsSummary(summaryResult.value);
+      }
     } finally {
       setIsLoadingNews(false);
     }
@@ -361,10 +383,12 @@ export function App() {
     }
     let cancelled = false;
     const loadAuxiliaryData = async () => {
-      const [newsResult, fupanResult, zaopanResult, riskResult, recommendedResult] = await Promise.allSettled([
+      const [newsResult, fupanResult, zaopanResult, commentaryResult, summaryResult, riskResult, recommendedResult] = await Promise.allSettled([
         loadMarketNews(dataService.base_url),
         loadMarketBriefing(dataService.base_url, "fupan"),
         loadMarketBriefing(dataService.base_url, "zaopan"),
+        loadMarketCommentary(dataService.base_url),
+        loadNewsSummary(dataService.base_url),
         loadRiskAlerts(dataService.base_url),
         loadRecommendedStrategies(dataService.base_url)
       ]);
@@ -379,6 +403,12 @@ export function App() {
       }
       if (zaopanResult.status === "fulfilled") {
         setZaopanBriefing(zaopanResult.value);
+      }
+      if (commentaryResult.status === "fulfilled") {
+        setMarketCommentary(commentaryResult.value);
+      }
+      if (summaryResult.status === "fulfilled") {
+        setNewsSummary(summaryResult.value);
       }
       if (riskResult.status === "fulfilled") {
         setRiskAlerts(riskResult.value);
@@ -453,6 +483,10 @@ export function App() {
       <div className="market-news-layout">
         <MarketDashboard snapshot={marketSnapshot} isLoading={isLoadingMarket} />
         <NewsPanel news={marketNews} isLoading={isLoadingNews} onRefresh={refreshNews} />
+      </div>
+      <div className="market-insight-layout">
+        <MarketCommentaryPanel commentary={marketCommentary} isLoading={isLoadingNews} />
+        <NewsSummaryPanel summary={newsSummary} isLoading={isLoadingNews} />
       </div>
       <TonghuashunBriefingPanel fupan={fupanBriefing} zaopan={zaopanBriefing} />
       <section className="summary-band" aria-label="工作台概览">

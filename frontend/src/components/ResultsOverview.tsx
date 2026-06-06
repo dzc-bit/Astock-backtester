@@ -1,6 +1,6 @@
 import { Play } from "lucide-react";
 import { Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
-import type { BacktestResult } from "../types";
+import type { BacktestResult, MatchedStock } from "../types";
 
 type Props = {
   result: BacktestResult | null;
@@ -11,6 +11,83 @@ type Props = {
   riskAlertCount?: number;
   onOpenRiskAlerts: () => void;
 };
+
+function formatPrice(value: number | null | undefined): string {
+  if (value == null || Number.isNaN(value)) {
+    return "--";
+  }
+  return value.toFixed(2);
+}
+
+function formatPercent(value: number | null | undefined): string {
+  if (value == null || Number.isNaN(value)) {
+    return "--";
+  }
+  const sign = value > 0 ? "+" : "";
+  return `${sign}${(value * 100).toFixed(2)}%`;
+}
+
+function movementClass(value: number | null | undefined): "up-text" | "down-text" | "flat-text" {
+  if (value == null || Number.isNaN(value) || value === 0) {
+    return "flat-text";
+  }
+  return value > 0 ? "up-text" : "down-text";
+}
+
+function MatchedStocksPanel({ matchedStocks }: { matchedStocks: MatchedStock[] | undefined }) {
+  const hasPayload = Array.isArray(matchedStocks);
+  const items = matchedStocks ?? [];
+  return (
+    <section className="matched-stocks-panel" aria-label="当日符合策略股票">
+      <div className="matched-stocks-head">
+        <div>
+          <span className="section-kicker">今日信号</span>
+          <h3>当日符合策略股票</h3>
+        </div>
+        <strong>{hasPayload ? `${items.length} 只` : "待对接"}</strong>
+      </div>
+      {items.length > 0 ? (
+        <div className="matched-stocks-list">
+          {items.slice(0, 12).map((stock) => (
+            <article className="matched-stock-card" key={`${stock.symbol}-${stock.trade_date ?? ""}`}>
+              <div className="matched-stock-id">
+                <strong>{stock.symbol}</strong>
+                <span>{stock.name || "--"}</span>
+              </div>
+              <div className="matched-stock-quote">
+                <strong className={movementClass(stock.change_pct)}>{formatPercent(stock.change_pct)}</strong>
+                <span>收盘 {formatPrice(stock.close)}</span>
+              </div>
+              <div className="matched-stock-reasons">
+                {stock.reasons.length > 0 ? (
+                  stock.reasons.slice(0, 4).map((reason) => <span key={reason}>{reason}</span>)
+                ) : (
+                  <span>命中策略条件</span>
+                )}
+              </div>
+            </article>
+          ))}
+        </div>
+      ) : (
+        <div className="matched-stocks-empty">
+          <strong>{hasPayload ? "今日没有股票命中当前策略" : "等待后端返回当日命中股票"}</strong>
+          <span>
+            {hasPayload
+              ? "可以放宽入场条件、扩大股票池，或查看数据中心是否缺少行情/资金字段。"
+              : "主线程对接 matched_stocks 后，这里会展示代码、名称、收盘价、涨跌幅和命中原因。"}
+          </span>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function matchesFromResult(result: BacktestResult): MatchedStock[] | undefined {
+  if (result.latest_strategy_matches) {
+    return result.latest_strategy_matches.matches;
+  }
+  return result.matched_stocks;
+}
 
 export function ResultsOverview({
   result,
@@ -83,6 +160,7 @@ export function ResultsOverview({
               <span>{zeroTradeHint}</span>
             </div>
           ) : null}
+          <MatchedStocksPanel matchedStocks={matchesFromResult(result)} />
           <div className="chart">
             <ResponsiveContainer width="100%" height={220}>
               <LineChart data={result.equity_curve}>

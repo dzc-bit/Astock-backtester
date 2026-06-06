@@ -10,9 +10,11 @@ from astock_backtester.models import (
     BacktestMetrics,
     BacktestResult,
     BacktestSettings,
+    DailyStrategyMatches,
     EquityPoint,
     PreflightIssue,
     StrategyConfig,
+    StrategyMatch,
     Trade,
 )
 
@@ -243,6 +245,25 @@ def _stable_symbol_tiebreaker(row: pd.Series) -> float:
     return int.from_bytes(digest, "big") / float(2**64 - 1)
 
 
+def _optional_string(row: pd.Series, column: str) -> str | None:
+    if column not in row.index:
+        return None
+    value = row[column]
+    if pd.isna(value):
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _optional_float(row: pd.Series, column: str) -> float | None:
+    if column not in row.index:
+        return None
+    value = pd.to_numeric(row[column], errors="coerce")
+    if pd.isna(value):
+        return None
+    return float(value)
+
+
 def _candidate_rank(row: pd.Series) -> tuple[float, float, float, float, float, float, float]:
     return (
         _max_numeric_prefix(row, "volume_ratio_"),
@@ -253,6 +274,53 @@ def _candidate_rank(row: pd.Series) -> tuple[float, float, float, float, float, 
         _numeric_value(row, "float_market_cap"),
         _stable_symbol_tiebreaker(row),
     )
+
+
+def _build_daily_strategy_matches(
+    signal_date: pd.Timestamp,
+    candidates: list[tuple[pd.Series, list[str]]],
+) -> DailyStrategyMatches:
+    signal_day = pd.Timestamp(signal_date).date()
+    matches = [
+        StrategyMatch(
+            symbol=str(row["symbol"]),
+            signal_date=signal_day,
+            trade_date=pd.Timestamp(row["trade_date"]).date(),
+            name=_optional_string(row, "name"),
+            close=float(row["close"]),
+            change_pct=_optional_float(row, "change_pct"),
+            reasons=list(reasons),
+            rank_score=_candidate_rank(row)[0],
+        )
+        for row, reasons in candidates
+    ]
+    return DailyStrategyMatches(signal_date=signal_day, trade_date=signal_day, matches=matches)
+
+
+def _scan_entry_candidates(
+    today: pd.DataFrame,
+    data: pd.DataFrame,
+    strategy: StrategyConfig,
+    settings: BacktestSettings,
+) -> list[tuple[pd.Series, list[str]]]:
+    candidates: list[tuple[pd.Series, list[str]]] = []
+    candidate_rows = today[today["_passes_entry_prefilter"]]
+    for _, row in candidate_rows.iterrows():
+        if bool(row["is_suspended"]):
+            continue
+        if settings.exclude_st and "is_st" in row.index and bool(row["is_st"]):
+            continue
+        if int(row["listing_days"]) < settings.min_listing_days:
+            continue
+        market_ok, market_reasons = _passes_market_filters(strategy, row, data)
+        if not market_ok:
+            continue
+        entry_ok, entry_reasons = _passes_entry(strategy, row, data)
+        if entry_ok:
+            candidates.append((row, market_reasons + entry_reasons))
+
+    candidates.sort(key=lambda candidate: _candidate_rank(candidate[0]), reverse=True)
+    return candidates
 
 
 def _build_metrics(
@@ -328,6 +396,7 @@ def run_backtest(
     trades: list[Trade] = []
     open_positions: list[Trade] = []
     equity_curve: list[EquityPoint] = []
+    latest_strategy_matches: DailyStrategyMatches | None = None
     peak_equity = settings.initial_cash
 
     total_trade_days = len(trade_dates)
@@ -391,42 +460,26 @@ def run_backtest(
         open_positions = still_open
 
         next_date = _next_trade_date(trade_dates, signal_date)
-        candidate_count = 0
+        candidates = _scan_entry_candidates(today, data, strategy, settings)
+        candidate_count = len(candidates)
+        latest_strategy_matches = _build_daily_strategy_matches(signal_date, candidates)
+        if on_event is not None:
+            on_event(
+                {
+                    "type": "progress",
+                    "trade_date": pd.Timestamp(signal_date).date(),
+                    "scanned_days": day_index,
+                    "total_days": total_trade_days,
+                    "open_positions": len(open_positions),
+                    "closed_trades": len(trades),
+                    "candidates": candidate_count,
+                    "message": (
+                        f"扫描 {pd.Timestamp(signal_date).date()}：候选 {candidate_count} 只，"
+                        f"持仓 {len(open_positions)} 只"
+                    ),
+                }
+            )
         if next_date is not None and len(open_positions) < settings.max_positions:
-            candidates: list[tuple[pd.Series, list[str]]] = []
-            candidate_rows = today[today["_passes_entry_prefilter"]]
-            for _, row in candidate_rows.iterrows():
-                if bool(row["is_suspended"]):
-                    continue
-                if settings.exclude_st and "is_st" in row.index and bool(row["is_st"]):
-                    continue
-                if int(row["listing_days"]) < settings.min_listing_days:
-                    continue
-                market_ok, market_reasons = _passes_market_filters(strategy, row, data)
-                if not market_ok:
-                    continue
-                entry_ok, entry_reasons = _passes_entry(strategy, row, data)
-                if entry_ok:
-                    candidates.append((row, market_reasons + entry_reasons))
-
-            candidates.sort(key=lambda candidate: _candidate_rank(candidate[0]), reverse=True)
-            candidate_count = len(candidates)
-            if on_event is not None:
-                on_event(
-                    {
-                        "type": "progress",
-                        "trade_date": pd.Timestamp(signal_date).date(),
-                        "scanned_days": day_index,
-                        "total_days": total_trade_days,
-                        "open_positions": len(open_positions),
-                        "closed_trades": len(trades),
-                        "candidates": candidate_count,
-                        "message": (
-                            f"扫描 {pd.Timestamp(signal_date).date()}：候选 {candidate_count} 只，"
-                            f"持仓 {len(open_positions)} 只"
-                        ),
-                    }
-                )
             current_market_value = _mark_to_market(open_positions, today_by_symbol)
             current_equity = cash + current_market_value
             for row, reasons in candidates[: settings.max_daily_buys]:
@@ -481,4 +534,5 @@ def run_backtest(
         equity_curve=equity_curve,
         trades=trades,
         preflight_issues=issues,
+        latest_strategy_matches=latest_strategy_matches,
     )

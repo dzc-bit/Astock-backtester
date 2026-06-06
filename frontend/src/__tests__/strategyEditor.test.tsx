@@ -10,7 +10,10 @@ const apiMocks = vi.hoisted(() => ({
   loadDataServiceHealth: vi.fn(),
   loadDataServiceLogs: vi.fn(),
   loadDailyBarsCoverage: vi.fn(),
+  loadMarketBriefing: vi.fn(),
+  loadMarketCommentary: vi.fn(),
   loadMarketNews: vi.fn(),
+  loadNewsSummary: vi.fn(),
   loadRealtimeMarketSnapshot: vi.fn(),
   loadRecommendedStrategies: vi.fn(),
   loadRiskAlerts: vi.fn(),
@@ -143,6 +146,46 @@ describe("A 股回测工作台界面", () => {
           sentiment: "positive"
         }
       ]
+    });
+    apiMocks.loadMarketBriefing.mockImplementation((_baseUrl, kind) =>
+      Promise.resolve({
+        kind,
+        updated_at: "2026-05-27T10:30:00Z",
+        source: kind === "fupan" ? "ths-fupan" : "ths-zaopan",
+        source_url:
+          kind === "fupan" ? "https://stock.10jqka.com.cn/fupan/" : "https://stock.10jqka.com.cn/zaopan/",
+        summary: kind === "fupan" ? "同花顺复盘摘要" : "同花顺早盘摘要",
+        sections: [],
+        diagnostics: []
+      })
+    );
+    apiMocks.loadMarketCommentary.mockResolvedValue({
+      updated_at: "2026-05-27T10:30:00Z",
+      trade_date: "2026-05-27",
+      source: "test-commentary",
+      stance: "neutral",
+      summary: "指数震荡偏强，但赚钱效应集中在少数主线。",
+      drivers: [{ title: "强势题材", detail: "半导体+3.60%，电力设备+2.40%。", weight: "high" }],
+      risks: ["量能不足时避免追高。"],
+      next_watch: ["明日先看半导体能否继续放量。"],
+      diagnostics: []
+    });
+    apiMocks.loadNewsSummary.mockResolvedValue({
+      updated_at: "2026-05-27T10:30:00Z",
+      source: "test-summary",
+      item_count: 1,
+      themes: [
+        {
+          title: "科技",
+          summary: "科技方向消息集中。",
+          sentiment: "positive",
+          source_count: 1,
+          headlines: ["政策利好推动科技板块走强"]
+        }
+      ],
+      highlights: ["政策利好推动科技板块走强"],
+      risks: ["高位题材分化加快。"],
+      diagnostics: []
     });
     apiMocks.loadRiskAlerts.mockResolvedValue({
       updated_at: "2026-05-27T10:30:00Z",
@@ -329,10 +372,10 @@ describe("A 股回测工作台界面", () => {
     expect(await screen.findByText("上证指数")).toBeInTheDocument();
     expect(screen.getByText("红 3200")).toBeInTheDocument();
     expect(screen.getByText("绿 1700")).toBeInTheDocument();
-    expect(screen.getByText(/行情评价/)).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "行情评价" })).toBeInTheDocument();
     expect(screen.getAllByText("半导体").length).toBeGreaterThan(0);
     expect(await screen.findByRole("heading", { name: "资讯与事件" })).toBeInTheDocument();
-    expect(screen.getByText("政策利好推动科技板块走强")).toBeInTheDocument();
+    expect(screen.getAllByText("政策利好推动科技板块走强").length).toBeGreaterThan(0);
     expect(await screen.findByText("日线行情")).toBeInTheDocument();
   });
 
@@ -721,7 +764,7 @@ describe("A 股回测工作台界面", () => {
     expect(screen.getByText("12项")).toBeInTheDocument();
   });
 
-  it("shows a deterministic closing sector review after market close", async () => {
+  it("shows structured market data and independent commentary after market close", async () => {
     apiMocks.loadRealtimeMarketSnapshot.mockResolvedValue({
       status: "live",
       source: "ashare-sina+local+eastmoney-sector",
@@ -749,8 +792,10 @@ describe("A 股回测工作台界面", () => {
 
     render(<App />);
 
-    expect(await screen.findByText(/收盘后板块解读/)).toBeInTheDocument();
-    expect(screen.getByText(/半导体\+3\.60%/)).toBeInTheDocument();
+    expect(await screen.findByText("行情评价")).toBeInTheDocument();
+    expect(await screen.findByText("指数震荡偏强，但赚钱效应集中在少数主线。")).toBeInTheDocument();
+    expect(screen.getAllByText(/半导体\+3\.60%/).length).toBeGreaterThan(0);
+    expect(screen.queryByText(/收盘后板块解读/)).not.toBeInTheDocument();
   });
 
   it("tracks yesterday's strong sectors in the market panel and commentary", async () => {
@@ -781,12 +826,23 @@ describe("A 股回测工作台界面", () => {
       ],
       message: "实时行情已更新；昨日强势板块追踪来自本地历史。"
     });
+    apiMocks.loadMarketCommentary.mockResolvedValue({
+      updated_at: "2026-05-27T10:30:00Z",
+      trade_date: "2026-05-27",
+      source: "test-commentary",
+      stance: "neutral",
+      summary: "昨日强势延续：机器人仍在榜，说明资金没有完全散场。",
+      drivers: [{ title: "昨日强势延续", detail: "机器人、半导体继续在观察名单。", weight: "medium" }],
+      risks: ["旧热点承接不足时不要追高。"],
+      next_watch: ["明日先看机器人能否继续放量。"],
+      diagnostics: []
+    });
 
     render(<App />);
 
     expect(await screen.findByText("昨日强势追踪")).toBeInTheDocument();
-    expect(await screen.findByText(/机器人/)).toBeInTheDocument();
-    expect(await screen.findByText(/昨日强势延续/)).toBeInTheDocument();
+    expect((await screen.findAllByText(/机器人/)).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText(/昨日强势延续/)).length).toBeGreaterThan(0);
     expect(screen.getAllByText(/半导体/).length).toBeGreaterThan(0);
   });
 

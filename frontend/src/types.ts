@@ -155,6 +155,42 @@ export type MarketBriefingResponse = {
   diagnostics: string[];
 };
 
+export type MarketCommentaryPoint = {
+  title: string;
+  detail: string;
+  weight: "high" | "medium" | "low";
+};
+
+export type MarketCommentaryResponse = {
+  updated_at: string;
+  trade_date: string;
+  source: string;
+  stance: "positive" | "neutral" | "defensive";
+  summary: string;
+  drivers: MarketCommentaryPoint[];
+  risks: string[];
+  next_watch: string[];
+  diagnostics: string[];
+};
+
+export type NewsSummaryTheme = {
+  title: string;
+  summary: string;
+  sentiment: "positive" | "neutral" | "negative";
+  source_count: number;
+  headlines: string[];
+};
+
+export type NewsSummaryResponse = {
+  updated_at: string;
+  source: string;
+  item_count: number;
+  themes: NewsSummaryTheme[];
+  highlights: string[];
+  risks: string[];
+  diagnostics: string[];
+};
+
 export type RiskAlertItem = {
   symbol: string;
   name: string;
@@ -256,10 +292,30 @@ export type Trade = {
   pnl_pct?: number | null;
 };
 
+export type MatchedStock = {
+  symbol: string;
+  name?: string | null;
+  close?: number | null;
+  change?: number | null;
+  change_pct?: number | null;
+  reasons: string[];
+  signal_date?: string | null;
+  trade_date?: string | null;
+  rank_score?: number | null;
+};
+
+export type DailyStrategyMatches = {
+  signal_date: string;
+  trade_date: string;
+  matches: MatchedStock[];
+};
+
 export type BacktestResult = {
   metrics: BacktestMetrics;
   equity_curve: EquityPoint[];
   trades: Trade[];
+  latest_strategy_matches?: DailyStrategyMatches | null;
+  matched_stocks?: MatchedStock[];
   preflight_issues: Array<{ code: string; message: string; severity: "warning" | "error"; dataset?: string | null }>;
 };
 
