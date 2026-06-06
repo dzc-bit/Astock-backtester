@@ -2,10 +2,10 @@
     "platforms":  {
                       "windows-x86_64":  {
                                              "signature":  "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTekhYdjVRcU50eTlHTDNLME51S0ZPaUFFc1VzMTNReXFtemdIdGp0aDJkSEVjSlJrT3kva1hxc2cvMGErY3IvaWJieUJYa0lQNktPajFIRURtOG1nblA4V0l2Z1Z0RUEwPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzgwNzY4Nzc5CWZpbGU6QeiCoeetlueVpeWbnua1i+W3peS9nOWPsF8xLjEuMF94NjQtc2V0dXAuZXhlCnVrSkY3SUJpWTI2UE5aSHc1RlNNTk10bDBVdi9RempUV0pBNDV4NGNkaEhWVm1RT1lsRnVjbFFTTUNiRW4vaUNMSmFkWU5QMHBLckNoMEEvYk9HdUJnPT0K",
-                                             "url":  "https://github.com/dzc-bit/Astock-backtester/releases/download/v1.1.0/A股策略回测工作台_1.1.0_x64-setup.exe"
+                                             "url":  "https://github.com/dzc-bit/Astock-backtester/releases/download/v1.1.0/Astock-backtester_1.1.0_x64-setup.exe"
                                          }
                   },
-    "pub_date":  "2026-06-06T18:00:07Z",
+    "pub_date":  "2026-06-06T18:07:09Z",
     "version":  "1.1.0",
     "notes":  "发布行情无感刷新、复盘/早盘全文、策略命中展示、回测口径校准与桌面更新增强。"
 }

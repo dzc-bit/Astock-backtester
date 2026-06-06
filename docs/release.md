@@ -108,6 +108,8 @@ Remove-Item Env:\TAURI_SIGNING_PRIVATE_KEY
 - `latest.json`
 
 `latest.json` 必须以这个文件名上传，因为应用配置固定读取 `releases/latest/download/latest.json`。
+安装包上传到 GitHub Release 时使用 ASCII 资产名，例如 `Astock-backtester_1.1.0_x64-setup.exe`；
+`latest.json.platforms.windows-x86_64.url` 必须指向这个真实资产名。保留本地中文安装包文件名可以用于归档，但不要让 updater 指向 GitHub 自动转写后的乱码资产名。
 
 ## latest.json
 
@@ -115,9 +117,11 @@ Remove-Item Env:\TAURI_SIGNING_PRIVATE_KEY
 
 ```powershell
 $assetName = "A股策略回测工作台_1.1.0_x64-setup.exe"
+$releaseAssetName = "Astock-backtester_1.1.0_x64-setup.exe"
 powershell -ExecutionPolicy Bypass -File scripts/write-latest-json.ps1 `
   -Version "1.1.0" `
   -AssetName $assetName `
+  -ReleaseAssetName $releaseAssetName `
   -Notes "发布行情无感刷新、复盘/早盘全文、策略命中展示、回测口径校准与桌面更新增强。"
 ```
 
