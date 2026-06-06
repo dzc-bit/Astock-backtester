@@ -1,6 +1,6 @@
 import { ExternalLink, FileText, Sunrise, X } from "lucide-react";
-import { useState } from "react";
-import type { ReactNode } from "react";
+import { useEffect, useRef, useState } from "react";
+import type { ReactNode, RefObject } from "react";
 import type { MarketBriefingResponse, MarketBriefingTable } from "../types";
 
 type Props = {
@@ -21,14 +21,6 @@ function formatTime(value: string | null | undefined): string {
   }).format(new Date(value));
 }
 
-function pickSection(briefing: MarketBriefingResponse | null, pattern: RegExp): string | null {
-  if (!briefing || briefing.sections.length === 0) {
-    return null;
-  }
-  const preferred = briefing.sections.find((section) => pattern.test(section.title));
-  return (preferred ?? briefing.sections[0]).content ?? null;
-}
-
 function splitParagraphs(content: string | null | undefined): string[] {
   return (content ?? "")
     .split(/\n{2,}|\r?\n/)
@@ -40,6 +32,14 @@ function isFullTextSection(title: string): boolean {
   return /^全文[:：]/.test(title.trim());
 }
 
+function compactText(value: string, maxLength = 120): string {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (normalized.length <= maxLength) {
+    return normalized;
+  }
+  return `${normalized.slice(0, maxLength).trimEnd()}...`;
+}
+
 function BriefingCard({
   briefing,
   title,
@@ -47,8 +47,8 @@ function BriefingCard({
   icon,
   accentClass,
   emptyText,
-  sectionPattern,
-  onOpen
+  onOpen,
+  openButtonRef
 }: {
   briefing: MarketBriefingResponse | null;
   title: string;
@@ -56,10 +56,9 @@ function BriefingCard({
   icon: ReactNode;
   accentClass: string;
   emptyText: string;
-  sectionPattern: RegExp;
   onOpen: () => void;
+  openButtonRef: RefObject<HTMLButtonElement>;
 }) {
-  const section = pickSection(briefing, sectionPattern);
   return (
     <article className={`ths-briefing-card ${accentClass}`}>
       <div className="ths-briefing-icon" aria-hidden="true">
@@ -74,7 +73,13 @@ function BriefingCard({
           <div className="ths-briefing-actions">
             {briefing ? (
               <>
-                <button className="secondary-button compact" type="button" onClick={onOpen} aria-label={`查看${title}全文`}>
+                <button
+                  className="secondary-button compact"
+                  type="button"
+                  onClick={onOpen}
+                  aria-label={`查看${title}全文`}
+                  ref={openButtonRef}
+                >
                   查看全文
                 </button>
                 <a href={briefing.source_url} target="_blank" rel="noreferrer" aria-label={`打开${title}原文`}>
@@ -89,9 +94,13 @@ function BriefingCard({
             <div className="ths-briefing-meta">
               <span>{briefing.source}</span>
               <span>{formatTime(briefing.updated_at)}</span>
+              <span>{briefing.sections.length > 0 ? `${briefing.sections.length} 段全文` : "摘要"}</span>
             </div>
-            <strong>{briefing.summary}</strong>
-            {section ? <p>{section}</p> : null}
+            <strong className="ths-briefing-brief">{compactText(briefing.summary)}</strong>
+            <div className="ths-briefing-hints" aria-label={`${title}精要`}>
+              <span>正文已收起</span>
+              <span>点击查看可读完整内容</span>
+            </div>
             {briefing.diagnostics.length > 0 ? <small>{briefing.diagnostics[0]}</small> : null}
           </>
         ) : (
@@ -146,6 +155,22 @@ function BriefingDialog({
   kicker: string;
   onClose: () => void;
 }) {
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    closeButtonRef.current?.focus();
+  }, []);
+
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        onClose();
+      }
+    }
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [onClose]);
+
   return (
     <div className="modal-backdrop">
       <section className="ths-briefing-modal" role="dialog" aria-modal="true" aria-label={`${title}全文`}>
@@ -154,7 +179,7 @@ function BriefingDialog({
             <span className="section-kicker">{kicker}</span>
             <h2>{title}全文</h2>
           </div>
-          <button className="icon-button" type="button" aria-label={`关闭${title}全文`} onClick={onClose}>
+          <button className="icon-button" type="button" aria-label={`关闭${title}全文`} onClick={onClose} ref={closeButtonRef}>
             <X size={18} aria-hidden="true" />
           </button>
         </div>
@@ -233,9 +258,16 @@ function BriefingDialog({
 
 export function TonghuashunBriefingPanel({ fupan, zaopan }: Props) {
   const [openKind, setOpenKind] = useState<MarketBriefingResponse["kind"] | null>(null);
+  const fupanOpenButtonRef = useRef<HTMLButtonElement>(null);
+  const zaopanOpenButtonRef = useRef<HTMLButtonElement>(null);
   const activeBriefing = openKind === "fupan" ? fupan : openKind === "zaopan" ? zaopan : null;
   const activeTitle = openKind === "fupan" ? "同花顺复盘总评" : "同花顺早盘总评";
   const activeKicker = openKind === "fupan" ? "收盘复盘" : "盘前观察";
+  function closeBriefing() {
+    const triggerRef = openKind === "fupan" ? fupanOpenButtonRef : zaopanOpenButtonRef;
+    setOpenKind(null);
+    triggerRef.current?.focus();
+  }
 
   return (
     <>
@@ -247,8 +279,8 @@ export function TonghuashunBriefingPanel({ fupan, zaopan }: Props) {
           icon={<FileText size={20} />}
           accentClass="fupan"
           emptyText="复盘总评暂未返回，行情框仍保留本地收盘评价。"
-          sectionPattern={/指数|概念|个股|解盘/}
           onOpen={() => setOpenKind("fupan")}
+          openButtonRef={fupanOpenButtonRef}
         />
         <BriefingCard
           briefing={zaopan}
@@ -257,12 +289,12 @@ export function TonghuashunBriefingPanel({ fupan, zaopan }: Props) {
           icon={<Sunrise size={20} />}
           accentClass="zaopan"
           emptyText="早盘总评暂未返回，资讯框仍会显示常规市场新闻。"
-          sectionPattern={/早盘|公司|机构|停复牌/}
           onOpen={() => setOpenKind("zaopan")}
+          openButtonRef={zaopanOpenButtonRef}
         />
       </section>
       {activeBriefing ? (
-        <BriefingDialog briefing={activeBriefing} title={activeTitle} kicker={activeKicker} onClose={() => setOpenKind(null)} />
+        <BriefingDialog briefing={activeBriefing} title={activeTitle} kicker={activeKicker} onClose={closeBriefing} />
       ) : null}
     </>
   );

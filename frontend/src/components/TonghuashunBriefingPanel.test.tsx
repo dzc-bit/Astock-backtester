@@ -38,15 +38,15 @@ function buildBriefing(kind: "fupan" | "zaopan"): MarketBriefingResponse {
   };
 }
 
-it("renders fupan and zaopan as standalone Tonghuashun briefing cards", () => {
+it("renders fupan and zaopan as concise standalone Tonghuashun briefing cards", () => {
   render(<TonghuashunBriefingPanel fupan={buildBriefing("fupan")} zaopan={buildBriefing("zaopan")} />);
 
   expect(screen.getByText("同花顺复盘总评")).toBeInTheDocument();
   expect(screen.getByText("同花顺早盘总评")).toBeInTheDocument();
   expect(screen.getByText("A股三大指数集体下跌，煤炭、养鸡、AI应用活跃。")).toBeInTheDocument();
   expect(screen.getByText("昨日收盘指数 上证指数：4068.57 -0.734%")).toBeInTheDocument();
-  expect(screen.getByText("ERP概念、财税数字化和小红书概念涨幅居前。")).toBeInTheDocument();
-  expect(screen.getByText("关注公司事项、机构观点和今日停复牌。")).toBeInTheDocument();
+  expect(screen.queryByText("ERP概念、财税数字化和小红书概念涨幅居前。")).not.toBeInTheDocument();
+  expect(screen.queryByText("关注公司事项、机构观点和今日停复牌。")).not.toBeInTheDocument();
 });
 
 it("opens a full briefing dialog from each Tonghuashun card", async () => {
@@ -64,6 +64,21 @@ it("opens a full briefing dialog from each Tonghuashun card", async () => {
   await user.click(screen.getByRole("button", { name: "关闭同花顺复盘总评全文" }));
 
   expect(screen.queryByRole("dialog", { name: "同花顺复盘总评全文" })).not.toBeInTheDocument();
+});
+
+it("focuses the briefing dialog and closes it with Escape", async () => {
+  const user = userEvent.setup();
+  render(<TonghuashunBriefingPanel fupan={buildBriefing("fupan")} zaopan={buildBriefing("zaopan")} />);
+
+  const openButton = screen.getByRole("button", { name: "查看同花顺复盘总评全文" });
+  await user.click(openButton);
+
+  expect(screen.getByRole("button", { name: "关闭同花顺复盘总评全文" })).toHaveFocus();
+
+  await user.keyboard("{Escape}");
+
+  expect(screen.queryByRole("dialog", { name: "同花顺复盘总评全文" })).not.toBeInTheDocument();
+  expect(openButton).toHaveFocus();
 });
 
 it("keeps the end of a long full briefing readable in the dialog", async () => {
@@ -94,6 +109,31 @@ it("keeps the end of a long full briefing readable in the dialog", async () => {
     "href",
     "https://stock.10jqka.com.cn/fupan/"
   );
+});
+
+it("keeps long briefing body out of the main card and opens it in the dialog", async () => {
+  const user = userEvent.setup();
+  const longBriefing = buildBriefing("fupan");
+  const fullTextOnly = "同花顺长文尾部哨兵：这里只应该在总评全文弹窗出现";
+  longBriefing.summary = `${"复盘主线很多，需要压缩。".repeat(16)}${fullTextOnly}`;
+  longBriefing.sections = [
+    {
+      title: "全文：A股收评",
+      content: `${"指数、题材和资金线索展开说明。".repeat(24)}${fullTextOnly}`,
+      links: [],
+      tables: []
+    }
+  ];
+
+  render(<TonghuashunBriefingPanel fupan={longBriefing} zaopan={buildBriefing("zaopan")} />);
+
+  expect(screen.queryByText(fullTextOnly)).not.toBeInTheDocument();
+
+  await user.click(screen.getByRole("button", { name: "查看同花顺复盘总评全文" }));
+
+  const dialog = screen.getByRole("dialog", { name: "同花顺复盘总评全文" });
+  expect(dialog).toBeInTheDocument();
+  expect(dialog).toHaveTextContent(fullTextOnly);
 });
 
 it("highlights crawled article full text separately from the summary", async () => {
