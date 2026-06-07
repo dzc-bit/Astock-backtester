@@ -30,6 +30,29 @@ class FakeProvider:
         )
 
 
+def test_full_market_job_counts_empty_provider_rows_as_failure(tmp_path):
+    class EmptyProvider(FakeProvider):
+        def fetch_daily_bars(self, symbol, start_date, end_date):
+            if symbol == "000002":
+                return pd.DataFrame()
+            return super().fetch_daily_bars(symbol, start_date, end_date)
+
+    warehouse = Warehouse(tmp_path)
+    manager = SyncJobManager(warehouse=warehouse, provider=EmptyProvider())
+
+    status = manager.run_full_market(
+        symbols=["000001", "000002"],
+        start_date="2015-01-01",
+        end_date="2015-01-05",
+    )
+
+    assert status.completed_symbols == 1
+    assert status.failed_symbols == 1
+    assert status.status == "completed_with_errors"
+    assert status.errors == ["000002: provider returned no daily rows"]
+    assert warehouse.read_daily_bars()["symbol"].tolist() == ["000001"]
+
+
 def test_full_market_job_persists_success_and_failure(tmp_path):
     warehouse = Warehouse(tmp_path)
     manager = SyncJobManager(warehouse=warehouse, provider=FakeProvider(fail_symbols={"000002"}))

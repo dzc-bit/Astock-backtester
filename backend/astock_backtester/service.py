@@ -9,7 +9,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
-from astock_backtester.data.astock_adapter import AStockDataAdapter
+import pandas as pd
+
 from astock_backtester.data.briefing import MarketBriefingProvider
 from astock_backtester.data.cache import LocalCache
 from astock_backtester.data.importer import read_daily_bars
@@ -19,7 +20,7 @@ from astock_backtester.data.operations import (
     fetch_daily_bars_into_cache,
     import_daily_bars_into_cache,
 )
-from astock_backtester.data.providers import ADataProvider, CompositeProvider, HttpAStockProvider
+from astock_backtester.data.providers import ADataProvider, AkshareProvider, CompositeProvider, HttpAStockProvider
 from astock_backtester.data.market_commentary import MarketCommentaryProvider
 from astock_backtester.data.news import MarketNewsProvider
 from astock_backtester.data.news_summary import MarketNewsSummaryProvider
@@ -37,14 +38,18 @@ class DataServiceState:
     def __init__(self, cache_dir: str | Path, port: int) -> None:
         self.cache = LocalCache(cache_dir)
         self.warehouse = Warehouse(cache_dir)
-        self.provider = CompositeProvider([ADataProvider(), HttpAStockProvider()])
+        self.provider = CompositeProvider([ADataProvider(), AkshareProvider(), HttpAStockProvider()])
         self.sync_manager = SyncJobManager(warehouse=self.warehouse, provider=self.provider)
         self.realtime_provider = RealtimeMarketProvider(self.warehouse)
         self.news_provider = MarketNewsProvider()
-        self.commentary_provider = MarketCommentaryProvider(self.realtime_provider, self.news_provider)
         self.news_summary_provider = MarketNewsSummaryProvider(self.news_provider)
         self.briefing_provider = MarketBriefingProvider(
             latest_bars_provider=lambda: self.warehouse.read_latest_daily_bars(days=3)
+        )
+        self.commentary_provider = MarketCommentaryProvider(
+            self.realtime_provider,
+            self.news_provider,
+            briefing_provider=self.briefing_provider,
         )
         self.risk_provider = RiskAlertProvider(self.warehouse)
         self.port = port
@@ -287,7 +292,7 @@ class DataServiceHandler(BaseHTTPRequestHandler):
                 result = fetch_daily_bars_into_cache(
                     cache=self.server.state.cache,
                     warehouse=self.server.state.warehouse,
-                    fetcher=AStockDataAdapter.from_http_sources().fetch_daily_bars,
+                    fetcher=self._fetch_daily_bars_from_provider,
                     symbols=payload["symbols"],
                     start_date=payload["start_date"],
                     end_date=payload["end_date"],
@@ -321,6 +326,16 @@ class DataServiceHandler(BaseHTTPRequestHandler):
 
     def log_message(self, format: str, *args: object) -> None:
         return
+
+    def _fetch_daily_bars_from_provider(self, symbols: list[str], start_date: str, end_date: str) -> pd.DataFrame:
+        frames = [
+            frame
+            for symbol in symbols
+            if not (frame := self.server.state.provider.fetch_daily_bars(symbol, start_date, end_date)).empty
+        ]
+        if not frames:
+            return pd.DataFrame()
+        return pd.concat(frames, ignore_index=True)
 
 
 def create_server(host: str, port: int, cache_dir: str | Path) -> DataServiceServer:

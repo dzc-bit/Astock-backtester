@@ -275,6 +275,59 @@ def test_service_coverage_endpoint_reads_warehouse_when_cache_is_empty(tmp_path)
         thread.join(timeout=5)
 
 
+def test_service_fetch_daily_bars_uses_configured_provider(tmp_path):
+    class FakeProvider:
+        def __init__(self):
+            self.calls = []
+
+        def fetch_daily_bars(self, symbol, start_date, end_date):
+            self.calls.append((symbol, start_date, end_date))
+            if symbol == "000002":
+                return pd.DataFrame()
+            return pd.DataFrame(
+                {
+                    "symbol": [symbol],
+                    "trade_date": ["2026-05-26"],
+                    "open": [10.0],
+                    "high": [10.5],
+                    "low": [9.8],
+                    "close": [10.2],
+                    "volume": [1000],
+                    "amount": [10200.0],
+                    "float_market_cap": [1000000000.0],
+                    "total_market_cap": [1200000000.0],
+                }
+            )
+
+    server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
+    provider = FakeProvider()
+    server.state.provider = provider
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        response = _request_json(
+            "POST",
+            f"http://127.0.0.1:{port}/fetch/daily-bars",
+            {"symbols": ["000001", "000002"], "start_date": "2026-05-26", "end_date": "2026-05-29"},
+        )
+
+        assert provider.calls == [
+            ("000001", "2026-05-26", "2026-05-29"),
+            ("000002", "2026-05-26", "2026-05-29"),
+        ]
+        assert response["status"] == "partial"
+        assert response["requested_symbols"] == ["000001", "000002"]
+        assert response["fetched_symbols"] == ["000001"]
+        assert response["missing_symbols"] == ["000002"]
+        assert response["coverage"][0]["end_date"] == "2026-05-26"
+        stored = server.state.warehouse.read_daily_bars(symbols=["000001"])
+        assert stored["trade_date"].dt.strftime("%Y-%m-%d").tolist() == ["2026-05-26"]
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
 def test_service_streams_backtest_trade_events_before_final_result(tmp_path, basic_strategy, basic_settings):
     server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
     server.state.cache.write_daily_bars(sample_daily_bars())

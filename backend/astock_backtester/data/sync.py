@@ -34,7 +34,10 @@ class SyncJobManager:
                 if not frame.empty:
                     self.warehouse.write_daily_bars(frame)
                     status.imported_rows += int(len(frame))
-                status.completed_symbols += 1
+                    status.completed_symbols += 1
+                else:
+                    status.failed_symbols += 1
+                    status.errors.append(f"{symbol}: provider returned no daily rows")
             except Exception as exc:
                 status.failed_symbols += 1
                 status.errors.append(f"{symbol}: {exc}")
@@ -94,11 +97,15 @@ class SyncJobManager:
                         imported_rows = int(len(frame))
                     current = self.get_job(job_id)
                     if current:
-                        self._mutate(
-                            job_id,
-                            completed_symbols=current.completed_symbols + 1,
-                            imported_rows=current.imported_rows + imported_rows,
-                        )
+                        if imported_rows > 0:
+                            self._mutate(
+                                job_id,
+                                completed_symbols=current.completed_symbols + 1,
+                                imported_rows=current.imported_rows + imported_rows,
+                            )
+                        else:
+                            self._mutate(job_id, failed_symbols=current.failed_symbols + 1)
+                            self._append_error(job_id, f"{symbol}: provider returned no daily rows")
                 except Exception as exc:
                     current = self.get_job(job_id)
                     if current:

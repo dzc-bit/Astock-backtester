@@ -235,6 +235,33 @@ def test_health_falls_back_to_cache_when_warehouse_coverage_fails(tmp_path):
     assert datasets["daily_bars"].symbols == 1
 
 
+def test_daily_bars_coverage_falls_back_to_cache_when_warehouse_read_fails(tmp_path):
+    class BrokenWarehouse:
+        def read_daily_bars(self, **kwargs):
+            raise RuntimeError("bad warehouse parquet")
+
+    cache = LocalCache(tmp_path)
+    cache.write_daily_bars(
+        _bars(
+            [
+                ("AAA", "2026-05-26", 10.0, 11.0, 9.0, 10.5, 1000, 0.1, 9_000_000_000.0, 1_500_000.0, False, False, 90),
+                ("AAA", "2026-06-05", 10.5, 11.5, 10.0, 11.0, 1200, 0.1, 9_100_000_000.0, 1_600_000.0, False, False, 91),
+            ]
+        )
+    )
+
+    details = build_daily_bars_coverage(
+        cache=cache,
+        warehouse=BrokenWarehouse(),
+        symbols=["AAA"],
+        start_date="2026-05-26",
+        end_date="2026-06-05",
+    )
+
+    assert [item.symbol for item in details.items] == ["AAA"]
+    assert details.items[0].end_date.isoformat() == "2026-06-05"
+
+
 def test_coverage_prefers_warehouse_rows_when_available(tmp_path):
     cache = LocalCache(tmp_path)
     warehouse = Warehouse(tmp_path)

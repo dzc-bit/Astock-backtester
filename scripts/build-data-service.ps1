@@ -49,6 +49,7 @@ try {
     --paths backend `
     --add-data "${watchlistCsv};astock_backtester\data" `
     --collect-all adata `
+    --collect-all akshare `
     --hidden-import requests `
     --hidden-import bs4 `
     backend\astock_backtester\service.py

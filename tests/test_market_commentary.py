@@ -5,6 +5,8 @@ from datetime import datetime, timezone
 
 from astock_backtester.data.market_commentary import MarketCommentaryProvider
 from astock_backtester.models import (
+    MarketBriefingResponse,
+    MarketBriefingSection,
     MarketBreadth,
     MarketIndexQuote,
     MarketNewsItem,
@@ -60,6 +62,26 @@ class FakeNewsProvider:
                     sentiment="positive",
                 )
             ],
+        )
+
+
+class FakeFupanProvider:
+    def latest_fupan(self) -> MarketBriefingResponse:
+        return MarketBriefingResponse(
+            kind="fupan",
+            updated_at=datetime(2026, 6, 5, 15, 35, tzinfo=timezone.utc),
+            source="ths-fupan",
+            source_url="https://stock.10jqka.com.cn/fupan/",
+            summary="收盘后复盘：机器人、算力和AI应用方向活跃，指数震荡但题材承接尚可。",
+            sections=[
+                MarketBriefingSection(
+                    title="同花顺解盘",
+                    content="机器人板块午后继续走强，多只个股涨停。算力方向保持资金关注，明日观察成交额能否继续放大。",
+                    links=[],
+                    tables=[],
+                )
+            ],
+            diagnostics=[],
         )
 
 
@@ -194,6 +216,36 @@ def test_market_commentary_uses_news_tags_when_realtime_snapshot_is_slow():
     assert "AI" in response.summary
     assert response.drivers[0].title == "新闻线索"
     assert response.diagnostics == ["行情评价读取实时快照超时：0.001秒"]
+
+
+def test_market_commentary_default_snapshot_timeout_allows_longer_realtime_reads():
+    provider = MarketCommentaryProvider(FakeRealtimeProvider(), FakeNewsProvider())
+
+    assert provider.snapshot_timeout == 10.0
+
+
+def test_market_commentary_uses_fupan_when_realtime_snapshot_is_slow():
+    class SlowRealtimeProvider:
+        def market_snapshot(self) -> RealtimeMarketSnapshot:
+            time.sleep(0.05)
+            return FakeRealtimeProvider().market_snapshot()
+
+    response = MarketCommentaryProvider(
+        SlowRealtimeProvider(),
+        FakeNewsProvider(),
+        briefing_provider=FakeFupanProvider(),
+        snapshot_timeout=0.001,
+    ).current_commentary()
+
+    assert response.mode == "post_close"
+    assert response.source == "ths-fupan+briefing-commentary"
+    assert response.stance == "neutral"
+    assert "收盘后复盘" in response.summary
+    assert "机器人" in response.summary
+    assert "算力" in response.drivers[0].detail
+    assert response.drivers[0].title == "同花顺复盘"
+    assert any("实时盘面读取失败，已用同花顺复盘" in item for item in response.diagnostics)
+    assert not response.summary.startswith("实时盘面暂不可用")
 
 
 def test_market_commentary_reports_diagnostic_when_realtime_source_returns_unavailable():

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import time as monotonic_time
 from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta, timezone
 from typing import Callable, Iterable
@@ -289,6 +290,7 @@ class RealtimeMarketProvider:
     warehouse: Warehouse
     timeout: float = 4.0
     requester: Callable[..., requests.Response] = requests.get
+    breadth_time_budget: float = 2.0
     _last_live_sector_rows: list[dict] = field(default_factory=list, init=False, repr=False)
     _sector_member_cache: dict[str, list[str]] = field(default_factory=dict, init=False, repr=False)
     _ths_concept_rows_cache: list[dict] | None = field(default=None, init=False, repr=False)
@@ -448,6 +450,7 @@ class RealtimeMarketProvider:
         return None
 
     def _fetch_sina_breadth(self) -> MarketBreadth | None:
+        deadline = monotonic_time.monotonic() + self.breadth_time_budget
         symbols = self._latest_local_symbols()
         if not symbols:
             return None
@@ -460,11 +463,14 @@ class RealtimeMarketProvider:
         flat = 0
         seen: set[str] = set()
         for start in range(0, len(sina_symbols), SINA_BREADTH_BATCH_SIZE):
+            remaining = deadline - monotonic_time.monotonic()
+            if remaining <= 0:
+                return None
             batch = sina_symbols[start : start + SINA_BREADTH_BATCH_SIZE]
             try:
                 response = self.requester(
                     "https://hq.sinajs.cn/list=" + ",".join(batch),
-                    timeout=self.timeout,
+                    timeout=min(self.timeout, max(0.2, remaining)),
                     headers=SINA_HEADERS,
                 )
                 response.raise_for_status()

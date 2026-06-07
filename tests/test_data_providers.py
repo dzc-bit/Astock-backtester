@@ -7,6 +7,7 @@ import pandas as pd
 from astock_backtester.data.importer import normalize_daily_bars
 from astock_backtester.data.providers import (
     ADataProvider,
+    AkshareProvider,
     CompositeProvider,
     enrich_market_cap_from_share_history,
 )
@@ -171,3 +172,45 @@ def test_composite_provider_lists_symbols_from_first_available_provider():
     provider = CompositeProvider([EmptyProvider(), FallbackProvider()])
 
     assert provider.list_symbols() == ["000001", "600519"]
+
+
+def test_akshare_provider_normalizes_spot_symbols_and_daily_bars():
+    class FakeAkshare:
+        def stock_zh_a_spot_em(self):
+            return pd.DataFrame({"代码": ["600519", "000001.SZ", "bj430047"]})
+
+        def stock_zh_a_hist(self, symbol, period, start_date, end_date, adjust):
+            assert symbol == "600519"
+            assert period == "daily"
+            assert start_date == "20260601"
+            assert end_date == "20260605"
+            assert adjust == ""
+            return pd.DataFrame(
+                {
+                    "日期": ["2026-06-05"],
+                    "股票代码": ["600519"],
+                    "开盘": [1600.0],
+                    "最高": [1620.0],
+                    "最低": [1588.0],
+                    "收盘": [1612.0],
+                    "成交量": [3215600],
+                    "成交额": [5_440_083_000.0],
+                    "涨跌幅": [1.2],
+                    "涨跌额": [19.1],
+                    "换手率": [0.26],
+                }
+            )
+
+    class FakeAkshareProvider(AkshareProvider):
+        def _akshare(self):
+            return FakeAkshare()
+
+    provider = FakeAkshareProvider()
+
+    assert provider.list_symbols() == ["600519", "000001", "430047"]
+    result = provider.fetch_daily_bars("600519", "2026-06-01", "2026-06-05")
+
+    assert result.loc[0, "symbol"] == "600519"
+    assert result.loc[0, "trade_date"].strftime("%Y-%m-%d") == "2026-06-05"
+    assert result.loc[0, "close"] == 1612.0
+    assert result.loc[0, "source"] == "akshare"

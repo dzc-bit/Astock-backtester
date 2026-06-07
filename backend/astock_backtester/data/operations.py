@@ -33,8 +33,12 @@ def build_daily_bars_coverage(
     bars = pd.DataFrame()
     used_warehouse = False
     if warehouse is not None:
-        bars = warehouse.read_daily_bars(symbols=symbols, start_date=start_date, end_date=end_date)
-        used_warehouse = not bars.empty
+        try:
+            bars = warehouse.read_daily_bars(symbols=symbols, start_date=start_date, end_date=end_date)
+            used_warehouse = not bars.empty
+        except Exception:
+            bars = pd.DataFrame()
+            used_warehouse = False
     if bars.empty:
         bars = cache.read_daily_bars()
     if bars.empty:
@@ -88,7 +92,7 @@ def import_daily_bars_into_cache(
     cache.write_daily_bars(frame)
     if warehouse is not None:
         warehouse.write_daily_bars(frame)
-    coverage = warehouse.coverage() if warehouse is not None else cache.coverage()
+    coverage = _safe_coverage(cache, warehouse)
     return DataOperationResult(
         status="ok",
         imported_rows=int(len(frame)),
@@ -118,7 +122,7 @@ def fetch_daily_bars_into_cache(
     logs = [ServiceLogEntry(level="info", message=f"Fetched {len(frame)} daily bar rows")]
     if missing_symbols:
         logs.append(ServiceLogEntry(level="warning", message=f"Missing symbols: {', '.join(missing_symbols)}"))
-    coverage = warehouse.coverage() if warehouse is not None else cache.coverage()
+    coverage = _safe_coverage(cache, warehouse)
     return DataOperationResult(
         status="partial" if missing_symbols else "ok",
         imported_rows=int(len(frame)),
@@ -128,6 +132,24 @@ def fetch_daily_bars_into_cache(
         coverage=coverage,
         logs=logs,
     )
+
+
+def _safe_coverage(cache: LocalCache, warehouse: Warehouse | None) -> list[DatasetCoverage]:
+    if warehouse is not None:
+        try:
+            coverage = warehouse.coverage()
+            if any(item.symbols > 0 for item in coverage):
+                return coverage
+        except Exception:
+            pass
+    try:
+        return cache.coverage()
+    except Exception:
+        return [
+            DatasetCoverage(dataset="daily_bars", symbols=0, start_date=None, end_date=None),
+            DatasetCoverage(dataset="market_cap", symbols=0, start_date=None, end_date=None),
+            DatasetCoverage(dataset="capital_flow", symbols=0, start_date=None, end_date=None),
+        ]
 
 
 def build_service_health(cache: LocalCache, warehouse: Warehouse, port: int | None = None) -> ServiceHealth:

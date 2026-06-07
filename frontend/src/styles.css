@@ -2712,10 +2712,14 @@ td small {
 .matched-stocks-list {
   display: grid;
   gap: 10px;
+  max-height: 390px;
+  overflow-y: auto;
+  padding-right: 2px;
 }
 
 .matched-stock-card {
   flex-wrap: wrap;
+  min-width: 0;
   border: 1px solid #dbe4ee;
   border-radius: 8px;
   background: #ffffff;
@@ -2726,6 +2730,7 @@ td small {
 .matched-stock-quote {
   display: grid;
   gap: 4px;
+  min-width: 0;
 }
 
 .matched-stock-id strong {
@@ -2739,6 +2744,7 @@ td small {
   color: #64748b;
   font-size: 12px;
   font-weight: 800;
+  overflow-wrap: anywhere;
 }
 
 .matched-stock-quote small {
@@ -2756,6 +2762,7 @@ td small {
   flex: 1 1 100%;
   flex-wrap: wrap;
   gap: 7px;
+  min-width: 0;
 }
 
 .matched-stocks-empty {
@@ -2820,9 +2827,54 @@ select:focus {
   border-color: #0f766e;
 }
 
-.chart {
+.results-surface .chart {
+  display: grid;
+  gap: 10px;
   margin-top: 14px;
-  height: 240px;
+}
+
+.results-surface .chart-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+
+.results-surface .chart-head strong {
+  color: #17212f;
+  font-size: 14px;
+}
+
+.results-surface .chart-head span {
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 800;
+  overflow-wrap: anywhere;
+  text-align: right;
+}
+
+.results-surface .chart-body {
+  height: 220px;
+  min-height: 220px;
+  min-width: 0;
+}
+
+@media (max-width: 760px) {
+  .matched-stocks-head,
+  .matched-stock-card,
+  .results-surface .chart-head {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .matched-stock-quote {
+    text-align: left;
+  }
+
+  .results-surface .chart-head span {
+    text-align: left;
+  }
 }
 
 .error-banner {

@@ -74,12 +74,13 @@ class Warehouse:
             path.parent.mkdir(parents=True, exist_ok=True)
             year_frame = year_frame.drop(columns=["year"])
             if path.exists():
-                current = pd.read_parquet(path)
-                year_frame = (
-                    year_frame.set_index(["symbol", "trade_date"])
-                    .combine_first(current.set_index(["symbol", "trade_date"]))
-                    .reset_index()
-                )
+                current = self._safe_read_parquet(path)
+                if not current.empty and {"symbol", "trade_date"}.issubset(current.columns):
+                    year_frame = (
+                        year_frame.set_index(["symbol", "trade_date"])
+                        .combine_first(current.set_index(["symbol", "trade_date"]))
+                        .reset_index()
+                    )
             year_frame = year_frame.sort_values(["symbol", "trade_date"]).reset_index(drop=True)
             year_frame.to_parquet(path, index=False)
         with sqlite3.connect(self.sqlite_path) as conn:
@@ -94,7 +95,13 @@ class Warehouse:
         paths = self._partition_paths_for_range(start_date, end_date)
         if not paths:
             return pd.DataFrame()
-        frames = [pd.read_parquet(path) for path in paths]
+        frames = []
+        for path in paths:
+            frame = self._safe_read_parquet(path)
+            if not frame.empty:
+                frames.append(frame)
+        if not frames:
+            return pd.DataFrame()
         frame = pd.concat(frames, ignore_index=True)
         frame["trade_date"] = pd.to_datetime(frame["trade_date"])
         if symbols:
@@ -114,7 +121,7 @@ class Warehouse:
         frames: list[pd.DataFrame] = []
         unique_dates: set[pd.Timestamp] = set()
         for path in paths:
-            frame = pd.read_parquet(path)
+            frame = self._safe_read_parquet(path)
             if frame.empty:
                 continue
             frame["trade_date"] = pd.to_datetime(frame["trade_date"])
@@ -155,12 +162,15 @@ class Warehouse:
         capital_flow_missing_rows = 0
 
         for path in paths:
-            available_columns = set(pq.ParquetFile(path).schema_arrow.names)
+            try:
+                available_columns = set(pq.ParquetFile(path).schema_arrow.names)
+            except Exception:
+                continue
             selected_columns = [column for column in wanted_columns if column in available_columns]
             if "symbol" not in selected_columns or "trade_date" not in selected_columns:
                 continue
 
-            frame = pd.read_parquet(path, columns=selected_columns)
+            frame = self._safe_read_parquet(path, columns=selected_columns)
             if frame.empty:
                 continue
             row_count = int(len(frame))
@@ -222,3 +232,9 @@ class Warehouse:
                 missing_rows=capital_flow_missing_rows,
             ),
         ]
+
+    def _safe_read_parquet(self, path: Path, **kwargs) -> pd.DataFrame:
+        try:
+            return pd.read_parquet(path, **kwargs)
+        except Exception:
+            return pd.DataFrame()

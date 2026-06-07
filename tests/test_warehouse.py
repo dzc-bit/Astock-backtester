@@ -126,3 +126,43 @@ def test_warehouse_reads_latest_daily_bars_from_recent_partitions(tmp_path):
 
     assert latest["trade_date"].dt.strftime("%Y-%m-%d").tolist() == ["2016-01-04", "2016-01-04"]
     assert set(latest["symbol"]) == {"000001", "600519"}
+
+
+def test_warehouse_skips_corrupt_recent_partition_for_latest_and_coverage(tmp_path):
+    warehouse = Warehouse(tmp_path)
+    warehouse.write_daily_bars(_bars())
+    corrupt_path = tmp_path / "warehouse" / "daily_bars" / "year=2026" / "daily_bars.parquet"
+    corrupt_path.parent.mkdir(parents=True, exist_ok=True)
+    corrupt_path.write_bytes(b"not a parquet file")
+
+    latest = warehouse.read_latest_daily_bars(days=1)
+    coverage = {item.dataset: item for item in warehouse.coverage()}
+
+    assert set(latest["symbol"]) == {"000001", "600519"}
+    assert coverage["daily_bars"].end_date.isoformat() == "2016-01-04"
+
+
+def test_warehouse_overwrites_corrupt_partition_when_new_rows_arrive(tmp_path):
+    warehouse = Warehouse(tmp_path)
+    corrupt_path = tmp_path / "warehouse" / "daily_bars" / "year=2026" / "daily_bars.parquet"
+    corrupt_path.parent.mkdir(parents=True, exist_ok=True)
+    corrupt_path.write_bytes(b"not a parquet file")
+
+    warehouse.write_daily_bars(
+        pd.DataFrame(
+            {
+                "symbol": ["000001"],
+                "trade_date": ["2026-05-26"],
+                "open": [10.0],
+                "high": [10.5],
+                "low": [9.8],
+                "close": [10.2],
+                "volume": [1000],
+            }
+        )
+    )
+
+    loaded = warehouse.read_daily_bars(symbols=["000001"], start_date="2026-05-26", end_date="2026-05-26")
+
+    assert loaded["trade_date"].dt.strftime("%Y-%m-%d").tolist() == ["2026-05-26"]
+    assert loaded.loc[0, "close"] == 10.2

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Protocol
 
 import pandas as pd
@@ -103,7 +104,10 @@ class ADataProvider:
         frame = frame.rename(columns={"stock_code": "symbol", "turnover_ratio": "turnover_rate"})
         frame["symbol"] = code
         frame["source"] = self.name
-        shares = self.fetch_share_history(code)
+        try:
+            shares = self.fetch_share_history(code)
+        except Exception:
+            shares = pd.DataFrame()
         return normalize_daily_bars(enrich_market_cap_from_share_history(frame, shares))
 
     def fetch_share_history(self, symbol: str) -> pd.DataFrame:
@@ -126,6 +130,63 @@ class HttpAStockProvider:
             return frame
         frame["source"] = self.name
         return frame
+
+    def fetch_share_history(self, symbol: str) -> pd.DataFrame:
+        return pd.DataFrame()
+
+
+def _akshare_date(value: str) -> str:
+    return datetime.strptime(str(value)[:10], "%Y-%m-%d").strftime("%Y%m%d")
+
+
+@dataclass
+class AkshareProvider:
+    name: str = "akshare"
+
+    def _akshare(self):
+        import akshare as ak
+
+        return ak
+
+    def list_symbols(self) -> list[str]:
+        ak = self._akshare()
+        frame = ak.stock_zh_a_spot_em()
+        if frame is None or frame.empty:
+            return []
+        code_column = next((column for column in ["代码", "股票代码", "symbol", "code"] if column in frame.columns), frame.columns[0])
+        return _unique_symbols([str(item) for item in frame[code_column].dropna().tolist()])
+
+    def fetch_daily_bars(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
+        ak = self._akshare()
+        code = normalize_symbol(symbol)
+        frame = ak.stock_zh_a_hist(
+            symbol=code,
+            period="daily",
+            start_date=_akshare_date(start_date),
+            end_date=_akshare_date(end_date),
+            adjust="",
+        )
+        if frame is None or frame.empty:
+            return pd.DataFrame()
+        normalized = frame.rename(
+            columns={
+                "日期": "trade_date",
+                "股票代码": "symbol",
+                "代码": "symbol",
+                "开盘": "open",
+                "最高": "high",
+                "最低": "low",
+                "收盘": "close",
+                "成交量": "volume",
+                "成交额": "amount",
+                "涨跌幅": "change_pct",
+                "涨跌额": "change",
+                "换手率": "turnover_rate",
+            }
+        )
+        normalized["symbol"] = code
+        normalized["source"] = self.name
+        return normalize_daily_bars(normalized)
 
     def fetch_share_history(self, symbol: str) -> pd.DataFrame:
         return pd.DataFrame()

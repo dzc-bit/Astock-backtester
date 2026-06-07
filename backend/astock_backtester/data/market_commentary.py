@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from astock_backtester.models import (
+    MarketBriefingResponse,
     MarketCommentaryPoint,
     MarketCommentaryResponse,
     MarketNewsResponse,
@@ -54,7 +55,8 @@ def _snapshot_missing_reasons(snapshot: RealtimeMarketSnapshot) -> list[str]:
 class MarketCommentaryProvider:
     realtime_provider: object
     news_provider: object | None = None
-    snapshot_timeout: float | None = 3.0
+    briefing_provider: object | None = None
+    snapshot_timeout: float | None = 10.0
 
     def current_commentary(self) -> MarketCommentaryResponse:
         now = datetime.now(timezone.utc)
@@ -69,6 +71,9 @@ class MarketCommentaryProvider:
                 diagnostics.append(f"行情评价读取新闻失败：{exc}")
 
         if snapshot is None:
+            briefing_commentary = self._briefing_fallback(now, news, diagnostics)
+            if briefing_commentary is not None:
+                return briefing_commentary
             return self._news_fallback(now, news, diagnostics)
 
         diagnostics.extend(snapshot.diagnostics)
@@ -80,6 +85,9 @@ class MarketCommentaryProvider:
         missing_reasons = _snapshot_missing_reasons(snapshot)
         if missing_reasons:
             diagnostics.append(f"实时盘面不完整：{'、'.join(missing_reasons)}，未生成确定盘面评价。")
+            briefing_commentary = self._briefing_fallback(now, news, diagnostics, snapshot=snapshot)
+            if briefing_commentary is not None:
+                return briefing_commentary
             return self._news_fallback(now, news, diagnostics, snapshot=snapshot)
 
         return self._commentary_from_snapshot(now, snapshot, news, diagnostics)
@@ -238,6 +246,88 @@ class MarketCommentaryProvider:
         if snapshot.market_phase == "lunch_break":
             return "午间盘面回顾："
         return ""
+
+    def _read_fupan(self, diagnostics: list[str]) -> MarketBriefingResponse | None:
+        if self.briefing_provider is None:
+            return None
+        try:
+            briefing = self.briefing_provider.latest_fupan()
+        except Exception as exc:
+            diagnostics.append(f"行情评价读取同花顺复盘失败：{exc}")
+            return None
+        if not isinstance(briefing, MarketBriefingResponse):
+            diagnostics.append("行情评价读取同花顺复盘失败：返回结构无效。")
+            return None
+        if briefing.source == "fallback" and not briefing.sections:
+            diagnostics.append("行情评价同花顺复盘仅返回空入口，未作为评价依据。")
+            return None
+        if briefing.diagnostics:
+            diagnostics.extend(f"同花顺复盘诊断：{message}" for message in briefing.diagnostics[:3])
+        if not briefing.summary and not briefing.sections:
+            diagnostics.append("行情评价同花顺复盘没有摘要或章节，未作为评价依据。")
+            return None
+        return briefing
+
+    def _briefing_fallback(
+        self,
+        now: datetime,
+        news: MarketNewsResponse | None,
+        diagnostics: list[str],
+        snapshot: RealtimeMarketSnapshot | None = None,
+    ) -> MarketCommentaryResponse | None:
+        briefing = self._read_fupan(diagnostics)
+        if briefing is None:
+            return None
+
+        basis_parts = [briefing.summary.strip()] if briefing.summary.strip() else []
+        for section in briefing.sections[:2]:
+            if section.content:
+                basis_parts.append(section.content.strip())
+        basis = " ".join(part for part in basis_parts if part)
+        if not basis:
+            diagnostics.append("行情评价同花顺复盘没有可读正文，未作为评价依据。")
+            return None
+
+        news_theme = _news_theme_text(news)
+        lead_text = basis[:180].rstrip()
+        if len(basis) > len(lead_text):
+            lead_text = f"{lead_text}..."
+        if lead_text.startswith("收盘后复盘"):
+            summary = lead_text
+        else:
+            summary = f"收盘后复盘：实时盘面读取失败，已改用同花顺复盘总评作为公开复盘依据。{lead_text}"
+        if news_theme:
+            summary = f"{summary} 新闻侧重点为 {news_theme}，仅作为辅助线索，不替代复盘正文。"
+
+        drivers = [
+            MarketCommentaryPoint(
+                title="同花顺复盘",
+                detail=lead_text,
+                weight="high",
+            )
+        ]
+        if news_theme:
+            drivers.append(MarketCommentaryPoint(title="新闻催化", detail=f"辅助线索：{news_theme}", weight="medium"))
+
+        diagnostics.append("实时盘面读取失败，已用同花顺复盘总评生成行情评价。")
+        return MarketCommentaryResponse(
+            updated_at=now,
+            trade_date=(snapshot.updated_at.date() if snapshot is not None else briefing.updated_at.date()),
+            source=f"{briefing.source}+briefing-commentary",
+            mode="post_close",
+            stance="neutral",
+            summary=summary,
+            drivers=drivers,
+            risks=[
+                "该评价来自同花顺复盘公开页面，不含当前实时红绿家数校验，盘中使用前需要重新刷新实时行情。",
+                "新闻只作为辅助线索，不能把消息热度包装成确定行情结论。",
+            ],
+            next_watch=[
+                "优先检查复盘提到的主线是否在下一交易日继续出现在强势题材榜。",
+                "恢复实时行情后复核指数方向、红绿家数和策略命中股票是否同向集中。",
+            ],
+            diagnostics=diagnostics,
+        )
 
     def _news_fallback(
         self,
