@@ -43,7 +43,9 @@ class DataServiceState:
         self.news_provider = MarketNewsProvider()
         self.commentary_provider = MarketCommentaryProvider(self.realtime_provider, self.news_provider)
         self.news_summary_provider = MarketNewsSummaryProvider(self.news_provider)
-        self.briefing_provider = MarketBriefingProvider()
+        self.briefing_provider = MarketBriefingProvider(
+            latest_bars_provider=lambda: self.warehouse.read_latest_daily_bars(days=3)
+        )
         self.risk_provider = RiskAlertProvider(self.warehouse)
         self.port = port
         self.logs: deque[dict[str, str]] = deque(maxlen=100)

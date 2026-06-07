@@ -20,8 +20,47 @@ type Props = {
 
 type BusyAction = "refresh" | "fetch" | "sample" | "file" | "sync" | null;
 
-const defaultStartDate = "2024-01-02";
-const defaultEndDate = "2024-01-08";
+function formatLocalDate(date: Date): string {
+  const year = date.getFullYear();
+  const month = `${date.getMonth() + 1}`.padStart(2, "0");
+  const day = `${date.getDate()}`.padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function previousBusinessDay(date: Date): Date {
+  const next = new Date(date);
+  next.setHours(0, 0, 0, 0);
+  while (next.getDay() === 0 || next.getDay() === 6) {
+    next.setDate(next.getDate() - 1);
+  }
+  return next;
+}
+
+function recentBusinessDateRange(days = 5): { startDate: string; endDate: string } {
+  const end = previousBusinessDay(new Date());
+  const start = new Date(end);
+  let counted = 1;
+  while (counted < days) {
+    start.setDate(start.getDate() - 1);
+    if (start.getDay() !== 0 && start.getDay() !== 6) {
+      counted += 1;
+    }
+  }
+  return { startDate: formatLocalDate(start), endDate: formatLocalDate(end) };
+}
+
+function dailyBarsCoverage(coverage: DatasetCoverage[]): DatasetCoverage | undefined {
+  return coverage.find((item) => item.dataset === "daily_bars");
+}
+
+function coverageFillDateRange(coverage: DatasetCoverage[]): { startDate: string; endDate: string } {
+  const fallback = recentBusinessDateRange();
+  const daily = dailyBarsCoverage(coverage);
+  if (daily?.end_date && daily.symbols >= 100 && daily.end_date < fallback.endDate) {
+    return { startDate: daily.end_date, endDate: fallback.endDate };
+  }
+  return fallback;
+}
 
 const datasetLabels: Record<string, { label: string; source: string }> = {
   daily_bars: { label: "日线行情", source: "a-stock-data / 本地缓存" },
@@ -41,11 +80,24 @@ function isSyncRunning(job: SyncJobStatus | null): boolean {
   return job?.status === "running";
 }
 
+function latestCoverageEndDate(coverage: DatasetCoverage[]): string | null {
+  const dailyEndDate = dailyBarsCoverage(coverage)?.end_date;
+  if (dailyEndDate) {
+    return dailyEndDate;
+  }
+  const dates = coverage
+    .map((item) => item.end_date)
+    .filter((value): value is string => Boolean(value))
+    .sort();
+  return dates.at(-1) ?? null;
+}
+
 export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceReady }: Props) {
   const [service, setService] = useState<DataServiceStatus | null>(null);
   const [symbolsInput, setSymbolsInput] = useState("600519");
-  const [startDate, setStartDate] = useState(defaultStartDate);
-  const [endDate, setEndDate] = useState(defaultEndDate);
+  const [startDate, setStartDate] = useState(() => coverageFillDateRange(coverage).startDate);
+  const [endDate, setEndDate] = useState(() => coverageFillDateRange(coverage).endDate);
+  const [dateRangeTouched, setDateRangeTouched] = useState(false);
   const [importPath, setImportPath] = useState("");
   const [items, setItems] = useState<DailyBarsCoverageItem[]>([]);
   const [logs, setLogs] = useState<ServiceLogEntry[]>([]);
@@ -91,6 +143,16 @@ export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceRead
     setItems(response.items);
   };
 
+  const applyCoverageDateRange = (nextCoverage: DatasetCoverage[]) => {
+    const range = coverageFillDateRange(nextCoverage);
+    if (!dateRangeTouched) {
+      setStartDate(range.startDate);
+      setEndDate(range.endDate);
+      return range;
+    }
+    return { startDate, endDate };
+  };
+
   const refreshServiceState = async (activeService: DataServiceStatus) => {
     const [health, recentLogs] = await Promise.all([
       loadDataServiceHealth(activeService.base_url),
@@ -98,6 +160,7 @@ export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceRead
     ]);
     onCoverageChange(health.coverage);
     setLogs(recentLogs.items);
+    return applyCoverageDateRange(health.coverage);
   };
 
   const refreshLogs = async (activeService: DataServiceStatus) => {
@@ -115,8 +178,8 @@ export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceRead
         setService(status);
         onServiceReady?.(status);
         setMessage(status.message);
-        await refreshServiceState(status);
-        await refreshDetails(status, ["600519"], defaultStartDate, defaultEndDate);
+        const range = await refreshServiceState(status);
+        await refreshDetails(status, ["600519"], range.startDate, range.endDate);
       })
       .catch((error: Error) => {
         if (!cancelled) {
@@ -189,8 +252,12 @@ export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceRead
       const result = await fetchDailyBars(service.base_url, symbols, startDate, endDate);
       setMessage(operationMessage(result.logs));
       onCoverageChange(result.coverage);
+      const fetchedEndDate = latestCoverageEndDate(result.coverage);
+      if (fetchedEndDate && fetchedEndDate > endDate) {
+        setEndDate(fetchedEndDate);
+      }
       await refreshLogs(service);
-      await refreshDetails(service);
+      await refreshDetails(service, symbols, startDate, fetchedEndDate ?? endDate);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "补全缺失数据失败");
       let activeService = service;
@@ -304,11 +371,25 @@ export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceRead
           </label>
           <label>
             开始日期
-            <input type="date" value={startDate} onChange={(event) => setStartDate(event.target.value)} />
+            <input
+              type="date"
+              value={startDate}
+              onChange={(event) => {
+                setDateRangeTouched(true);
+                setStartDate(event.target.value);
+              }}
+            />
           </label>
           <label>
             结束日期
-            <input type="date" value={endDate} onChange={(event) => setEndDate(event.target.value)} />
+            <input
+              type="date"
+              value={endDate}
+              onChange={(event) => {
+                setDateRangeTouched(true);
+                setEndDate(event.target.value);
+              }}
+            />
           </label>
           <label>
             导入文件路径

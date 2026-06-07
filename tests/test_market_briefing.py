@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pandas as pd
+
 from astock_backtester.data.briefing import MarketBriefingProvider, THS_FUPAN_URL, THS_REFERER
 
 
@@ -445,6 +447,165 @@ def test_market_briefing_provider_filters_numeric_soup_and_repeated_timestamps_f
     response = MarketBriefingProvider(requester=lambda *args, **kwargs: FakeHtmlResponse(html)).latest_fupan()
 
     assert response.sections[0].content == "机器人板块午后持续走强，资金围绕题材龙头博弈。"
+
+
+def test_market_briefing_provider_filters_cn_label_numeric_soup_and_percent_symbols():
+    html = """
+    <html><body>
+      <div id="fpzj">复盘摘要：指数小幅反弹。</div>
+      <div class="fp_item_hd"><h2>指数表现</h2></div>
+      <div class="fp_item_cnt">
+        <p>同比指数盈利 2700 0 股票数（只） 同比指数盈利% 计算方式 1293.69 +14.46 +1.13% 363.54亿</p>
+        <p>%</p>
+        <p>% %</p>
+        <p>机器人板块午后持续走强，资金围绕题材龙头博弈。</p>
+      </div>
+    </body></html>
+    """
+
+    response = MarketBriefingProvider(requester=lambda *args, **kwargs: FakeHtmlResponse(html)).latest_fupan()
+
+    assert response.sections[0].content == "机器人板块午后持续走强，资金围绕题材龙头博弈。"
+    assert "同比指数盈利" not in (response.sections[0].content or "")
+    assert "% %" not in (response.sections[0].content or "")
+
+
+def test_market_briefing_provider_uses_market_fallback_when_ths_page_has_no_sections():
+    html = "<html><body><div id='fpzj'></div></body></html>"
+
+    def fallback_provider():
+        return [
+            {
+                "title": "公开行情回顾",
+                "content": "上证指数小幅回升，机器人与算力方向保持活跃。",
+                "links": [{"title": "东方财富行情", "url": "https://quote.eastmoney.com/center/gridlist.html"}],
+                "tables": [
+                    {
+                        "title": "参考指数",
+                        "columns": ["名称", "最新值", "涨跌额", "涨跌幅"],
+                        "rows": [{"名称": "上证指数", "最新值": "3120.00", "涨跌额": "12.50", "涨跌幅": "0.40%"}],
+                    }
+                ],
+            }
+        ]
+
+    response = MarketBriefingProvider(
+        requester=lambda *args, **kwargs: FakeHtmlResponse(html),
+        fallback_provider=fallback_provider,
+    ).latest_fupan()
+
+    assert response.source == "ths-fupan+market-fallback"
+    assert response.summary == "上证指数小幅回升，机器人与算力方向保持活跃。"
+    assert response.sections[0].title == "公开行情回顾"
+    assert response.sections[0].tables[0].columns == ["名称", "最新值", "涨跌额", "涨跌幅"]
+    assert any("同花顺复盘页未解析到有效章节" in item for item in response.diagnostics)
+
+
+def test_market_briefing_provider_adds_user_mode_candidates_from_latest_bars():
+    html = """
+    <html><body>
+      <div id="fpzj">复盘摘要：机器人和算力活跃。</div>
+      <div class="fp_item_hd"><h2>同花顺解盘</h2></div>
+      <div class="fp_item_cnt"><p>机器人板块午后持续走强，算力方向有承接。</p></div>
+    </body></html>
+    """
+    bars = pd.DataFrame(
+        [
+            {
+                "symbol": "300001",
+                "name": "机器人A",
+                "trade_date": "2026-06-04",
+                "open": 9.8,
+                "close": 10.0,
+                "high": 10.1,
+                "low": 9.6,
+                "volume": 1000,
+                "amount": 10000,
+                "turnover": 0.03,
+                "float_market_cap": 8_000_000_000,
+            },
+            {
+                "symbol": "300001",
+                "name": "机器人A",
+                "trade_date": "2026-06-05",
+                "open": 10.1,
+                "close": 10.8,
+                "high": 10.9,
+                "low": 10.0,
+                "volume": 1800,
+                "amount": 19000,
+                "turnover": 0.04,
+                "float_market_cap": 8_500_000_000,
+            },
+            {
+                "symbol": "600002",
+                "name": "低量B",
+                "trade_date": "2026-06-04",
+                "open": 20.0,
+                "close": 20.0,
+                "high": 20.2,
+                "low": 19.8,
+                "volume": 1000,
+                "amount": 20000,
+                "turnover": 0.01,
+                "float_market_cap": 12_000_000_000,
+            },
+            {
+                "symbol": "600002",
+                "name": "低量B",
+                "trade_date": "2026-06-05",
+                "open": 20.0,
+                "close": 20.1,
+                "high": 20.2,
+                "low": 19.9,
+                "volume": 900,
+                "amount": 18000,
+                "turnover": 0.012,
+                "float_market_cap": 12_100_000_000,
+            },
+        ]
+    )
+
+    response = MarketBriefingProvider(
+        requester=lambda *args, **kwargs: FakeHtmlResponse(html),
+        latest_bars_provider=lambda: bars,
+    ).latest_fupan()
+
+    candidate_section = response.sections[-1]
+    assert candidate_section.title == "当日 user 模式匹配个股"
+    table = candidate_section.tables[0]
+    assert table.columns == ["代码", "名称", "收盘价", "涨跌幅", "匹配理由", "rank_score"]
+    assert table.rows[0]["代码"] == "300001"
+    assert table.rows[0]["名称"] == "机器人A"
+    assert "量比" in table.rows[0]["匹配理由"]
+    assert "600002" not in str(table.rows)
+
+
+def test_market_briefing_provider_adds_user_mode_candidates_from_realtime_quotes():
+    html = """
+    <html><body>
+      <div id="fpzj">复盘摘要：机器人和算力活跃。</div>
+      <div class="fp_item_hd"><h2>同花顺解盘</h2></div>
+      <div class="fp_item_cnt"><p>机器人板块午后持续走强，算力方向有承接。</p></div>
+    </body></html>
+    """
+
+    response = MarketBriefingProvider(
+        requester=lambda *args, **kwargs: FakeHtmlResponse(html),
+        realtime_spot_provider=lambda: [
+            {"代码": "300001", "名称": "机器人A", "现价": "10.88", "涨跌额": "0.88", "涨跌幅": "8.80%"},
+            {"代码": "600002", "名称": "低量B", "现价": "20.10", "涨跌额": "0.10", "涨跌幅": "0.50%"},
+        ],
+    ).latest_fupan()
+
+    candidate_section = response.sections[-1]
+    assert candidate_section.title == "当日 user 模式匹配个股"
+    table = candidate_section.tables[0]
+    assert table.columns == ["代码", "名称", "现价", "涨跌幅", "匹配理由", "rank_score"]
+    assert table.rows[0]["代码"] == "300001"
+    assert table.rows[0]["现价"] == "10.88"
+    assert "实时行情" in table.rows[0]["匹配理由"]
+    assert "600002" not in str(table.rows)
 
 
 def test_market_briefing_provider_returns_diagnostics_when_ths_unavailable():

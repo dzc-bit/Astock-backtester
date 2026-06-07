@@ -4,13 +4,15 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from html import unescape
-from typing import Callable, Literal
+from typing import Any, Callable, Literal
 from urllib.parse import urljoin
 from urllib.parse import urlparse
 
+import pandas as pd
 import requests
 from bs4 import BeautifulSoup, Tag
 
+from astock_backtester.data.providers import normalize_symbol
 from astock_backtester.models import (
     MarketBriefingLink,
     MarketBriefingResponse,
@@ -22,10 +24,17 @@ from astock_backtester.models import (
 THS_FUPAN_URL = "https://stock.10jqka.com.cn/fupan/"
 THS_ZAOPAN_URL = "https://stock.10jqka.com.cn/zaopan/"
 THS_REFERER = "https://stock.10jqka.com.cn/"
+EASTMONEY_A_SPOT_URL = "https://82.push2.eastmoney.com/api/qt/clist/get"
+SINA_QUOTE_URL = "https://hq.sinajs.cn/list={symbols}"
 THS_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
 )
+INDEX_SYMBOLS = [
+    ("sh000001", "上证指数"),
+    ("sz399001", "深证成指"),
+    ("sz399006", "创业板指"),
+]
 
 
 def _clean_text(value: str | None, max_length: int | None = None) -> str:
@@ -81,11 +90,16 @@ def _infer_table_columns(rows: list[list[str]], title: str | None) -> list[str]:
     title_text = title or ""
     second_is_percent = len(first_data_row) > 1 and _is_percent_text(first_data_row[1])
     third_is_number = len(first_data_row) > 2 and _is_number_text(first_data_row[2])
+    second_is_number = len(first_data_row) > 1 and _is_number_text(first_data_row[1])
+    fourth_is_percent = len(first_data_row) > 3 and _is_percent_text(first_data_row[3])
     stock_like_title = _is_stock_like_title(title_text)
     rank_like_title = any(keyword in title_text for keyword in ("涨幅榜", "跌幅榜", "排行榜", "榜单"))
 
     if width >= 3 and second_is_percent and third_is_number:
         base = ["个股", "涨幅", "现价"] if stock_like_title else ["名称", "涨跌幅", "最新价"]
+        return base + _neutral_columns(width)[len(base) :]
+    if width >= 4 and second_is_number and third_is_number and fourth_is_percent:
+        base = ["名称", "最新值", "涨跌额", "涨跌幅"]
         return base + _neutral_columns(width)[len(base) :]
     if width == 2 and second_is_percent:
         return ["个股", "涨幅"] if stock_like_title else ["名称", "涨跌幅"]
@@ -98,6 +112,9 @@ def _infer_table_columns(rows: list[list[str]], title: str | None) -> list[str]:
 def _is_noisy_content_line(text: str) -> bool:
     cleaned = _clean_text(text)
     if not cleaned:
+        return True
+    compact = re.sub(r"\s+", "", cleaned)
+    if re.fullmatch(r"[%％]+", compact):
         return True
     timestamp_count = len(_TIMESTAMP_PATTERN.findall(cleaned))
     without_timestamps = _TIMESTAMP_PATTERN.sub("", cleaned).strip()
@@ -115,6 +132,13 @@ def _is_noisy_content_line(text: str) -> bool:
     if digit_count >= 8 and cjk_count <= 6 and digit_count / text_length >= 0.35:
         return True
     if len(numeric_tokens) >= 4 and cjk_count <= 8 and not re.search(r"[，。；、：]", without_timestamps):
+        return True
+    if (
+        len(numeric_tokens) >= 4
+        and digit_count >= 8
+        and digit_count / text_length >= 0.28
+        and not re.search(r"[，。；、：]", without_timestamps)
+    ):
         return True
     return False
 
@@ -138,6 +162,21 @@ def _ths_headers(referer: str = THS_REFERER) -> dict[str, str]:
         "Cache-Control": "no-cache",
         "Connection": "keep-alive",
         "Upgrade-Insecure-Requests": "1",
+    }
+
+
+def _sina_headers() -> dict[str, str]:
+    return {
+        "User-Agent": THS_USER_AGENT,
+        "Referer": "https://finance.sina.com.cn/",
+    }
+
+
+def _eastmoney_headers() -> dict[str, str]:
+    return {
+        "User-Agent": THS_USER_AGENT,
+        "Referer": "https://quote.eastmoney.com/",
+        "Origin": "https://quote.eastmoney.com",
     }
 
 
@@ -270,10 +309,106 @@ def _article_body(soup: BeautifulSoup) -> str | None:
     return "\n\n".join(paragraphs)
 
 
+def _safe_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    text = str(value).strip().replace(",", "").replace("%", "")
+    if not text or text in {"-", "--", "nan", "None"}:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def _format_decimal(value: float | None, digits: int = 2) -> str:
+    if value is None or pd.isna(value):
+        return "--"
+    return f"{float(value):.{digits}f}"
+
+
+def _format_pct(value: float | None) -> str:
+    if value is None or pd.isna(value):
+        return "--"
+    pct = float(value)
+    if abs(pct) <= 1:
+        pct *= 100
+    return f"{pct:.2f}%"
+
+
+def _format_percent_points(value: float | None) -> str:
+    if value is None or pd.isna(value):
+        return "--"
+    return f"{float(value):.2f}%"
+
+
+def _sina_stock_symbol(symbol: str) -> str | None:
+    code = normalize_symbol(symbol)
+    if not code or not code.isdigit():
+        return None
+    if code.startswith(("6", "9")):
+        return f"sh{code}"
+    if code.startswith(("0", "2", "3")):
+        return f"sz{code}"
+    if code.startswith(("4", "8")):
+        return f"bj{code}"
+    return None
+
+
+def _decode_sina_quotes(text: str) -> dict[str, list[str]]:
+    quotes: dict[str, list[str]] = {}
+    for segment in text.split(";"):
+        if "hq_str_" not in segment or "=" not in segment:
+            continue
+        key = segment.split("hq_str_", 1)[1].split("=", 1)[0].strip()
+        raw = segment.split("=", 1)[1].strip().strip('"')
+        if raw:
+            quotes[key] = raw.split(",")
+    return quotes
+
+
+def _market_code(code: str) -> str:
+    return "1" if code.startswith(("6", "9")) else "0"
+
+
+def _section_from_mapping(item: dict[str, Any]) -> MarketBriefingSection | None:
+    title = _clean_text(str(item.get("title") or "公开行情回顾"))
+    content = _clean_text(str(item.get("content") or ""))
+    raw_links = item.get("links") if isinstance(item.get("links"), list) else []
+    links = [
+        MarketBriefingLink(title=_clean_text(str(link.get("title") or "")), url=str(link.get("url") or "") or None)
+        for link in raw_links
+        if isinstance(link, dict) and _clean_text(str(link.get("title") or ""))
+    ]
+    raw_tables = item.get("tables") if isinstance(item.get("tables"), list) else []
+    tables: list[MarketBriefingTable] = []
+    for table in raw_tables:
+        if not isinstance(table, dict):
+            continue
+        rows = table.get("rows") if isinstance(table.get("rows"), list) else []
+        normalized_rows = [row for row in rows if isinstance(row, dict)]
+        if not normalized_rows:
+            continue
+        columns = table.get("columns") if isinstance(table.get("columns"), list) else []
+        tables.append(
+            MarketBriefingTable(
+                title=_clean_text(str(table.get("title") or "")) or None,
+                columns=[_clean_text(str(column)) for column in columns if _clean_text(str(column))],
+                rows=[{_clean_text(str(key)): _clean_text(str(value)) for key, value in row.items()} for row in normalized_rows],
+            )
+        )
+    if not content and not tables and not links:
+        return None
+    return MarketBriefingSection(title=title, content=content or None, links=links, tables=tables)
+
+
 @dataclass
 class MarketBriefingProvider:
     timeout: float = 8.0
     requester: Callable[..., requests.Response] = field(default_factory=lambda: requests.Session().get)
+    fallback_provider: Callable[[], list[dict[str, Any]]] | None = None
+    latest_bars_provider: Callable[[], pd.DataFrame] | None = None
+    realtime_spot_provider: Callable[[], list[dict[str, Any]]] | None = None
 
     def latest_fupan(self) -> MarketBriefingResponse:
         try:
@@ -361,6 +496,7 @@ class MarketBriefingProvider:
     def _parse_fupan(self, soup: BeautifulSoup) -> MarketBriefingResponse:
         summary = _node_text(soup.select_one("#fpzj"))
         sections: list[MarketBriefingSection] = []
+        diagnostics: list[str] = []
         headers = soup.select(".fp_item_hd")
         contents = soup.select(".fp_item_cnt")
         for header, content in zip(headers, contents):
@@ -375,11 +511,26 @@ class MarketBriefingProvider:
             body = _readable_content_from_node(content_without_tables)
             if body or tables or links:
                 sections.append(MarketBriefingSection(title=title or "复盘板块", content=body or None, links=links, tables=tables))
-        expanded_sections, diagnostics = self._expand_article_links(sections[:8], THS_FUPAN_URL)
+        expanded_sections, article_diagnostics = self._expand_article_links(sections[:8], THS_FUPAN_URL)
+        diagnostics.extend(article_diagnostics)
+        source = "ths-fupan"
+        if not summary and not expanded_sections:
+            fallback_sections, fallback_diagnostics = self._market_fallback_sections()
+            diagnostics.append("同花顺复盘页未解析到有效章节。")
+            diagnostics.extend(fallback_diagnostics)
+            if fallback_sections:
+                expanded_sections = fallback_sections
+                summary = fallback_sections[0].content or "同花顺复盘页暂不可用，已使用公开行情与本地最近交易日生成回顾。"
+                source = "ths-fupan+market-fallback"
+        candidate_section, candidate_diagnostic = self._user_mode_candidate_section()
+        if candidate_section is not None:
+            expanded_sections.append(candidate_section)
+        if candidate_diagnostic is not None:
+            diagnostics.append(candidate_diagnostic)
         return MarketBriefingResponse(
             kind="fupan",
             updated_at=datetime.now(timezone.utc),
-            source="ths-fupan",
+            source=source,
             source_url=THS_FUPAN_URL,
             summary=summary or "同花顺复盘已读取，但页面暂未提供摘要。",
             sections=expanded_sections,
@@ -454,3 +605,355 @@ class MarketBriefingProvider:
             sections=[],
             diagnostics=[diagnostic],
         )
+
+    def _market_fallback_sections(self) -> tuple[list[MarketBriefingSection], list[str]]:
+        diagnostics: list[str] = []
+        if self.fallback_provider is not None:
+            try:
+                sections = [
+                    section
+                    for section in (_section_from_mapping(item) for item in self.fallback_provider())
+                    if section is not None
+                ]
+                if sections:
+                    diagnostics.append("已使用注入的公开行情兜底源生成复盘回顾。")
+                return sections, diagnostics
+            except Exception as exc:
+                diagnostics.append(f"公开行情兜底源读取失败：{exc}")
+
+        sections: list[MarketBriefingSection] = []
+        index_table = self._fallback_index_table(diagnostics)
+        spot_rows = self._fallback_spot_rows(diagnostics)
+        content_parts: list[str] = []
+        if index_table is not None and index_table.rows:
+            lead = index_table.rows[0]
+            content_parts.append(
+                f"{lead.get('名称', '主要指数')} 最新值 {lead.get('最新值', '--')}，涨跌幅 {lead.get('涨跌幅', '--')}。"
+            )
+        if spot_rows:
+            content_parts.append(
+                f"公开行情兜底抓取到 {len(spot_rows)} 只当日涨幅靠前个股，只作为复盘线索，不替代同花顺原文。"
+            )
+        tables = [table for table in [index_table] if table is not None]
+        if spot_rows:
+            tables.append(
+                MarketBriefingTable(
+                    title="公开行情活跃个股",
+                    columns=["代码", "名称", "现价", "涨跌额", "涨跌幅"],
+                    rows=spot_rows[:8],
+                )
+            )
+        if tables or content_parts:
+            sections.append(
+                MarketBriefingSection(
+                    title="公开行情回顾",
+                    content=" ".join(content_parts) or "同花顺复盘页暂不可用，已尝试使用公开行情生成回顾线索。",
+                    links=[
+                        MarketBriefingLink(
+                            title="东方财富行情中心",
+                            url="https://quote.eastmoney.com/center/gridlist.html",
+                        )
+                    ],
+                    tables=tables,
+                )
+            )
+        return sections, diagnostics
+
+    def _fallback_index_table(self, diagnostics: list[str]) -> MarketBriefingTable | None:
+        symbols = ",".join(symbol for symbol, _ in INDEX_SYMBOLS)
+        try:
+            response = self.requester(
+                SINA_QUOTE_URL.format(symbols=symbols),
+                timeout=min(self.timeout, 5.0),
+                headers=_sina_headers(),
+            )
+            response.raise_for_status()
+            raw_content = getattr(response, "content", b"")
+            text = raw_content.decode("gbk", errors="ignore") if raw_content else response.text
+        except Exception as exc:
+            diagnostics.append(f"Sina 指数兜底失败：{exc}")
+            return None
+        decoded = _decode_sina_quotes(text)
+        rows: list[dict[str, str]] = []
+        for symbol, name in INDEX_SYMBOLS:
+            values = decoded.get(symbol, [])
+            last = _safe_float(values[3] if len(values) > 3 else None)
+            previous = _safe_float(values[2] if len(values) > 2 else None)
+            if last is None:
+                continue
+            change = None if previous is None else last - previous
+            change_pct = None if previous in (None, 0) or change is None else change / previous
+            rows.append(
+                {
+                    "名称": name,
+                    "最新值": _format_decimal(last),
+                    "涨跌额": _format_decimal(change),
+                    "涨跌幅": _format_pct(change_pct),
+                }
+            )
+        if not rows:
+            diagnostics.append("Sina 指数兜底返回空行情。")
+            return None
+        return MarketBriefingTable(title="参考指数", columns=["名称", "最新值", "涨跌额", "涨跌幅"], rows=rows)
+
+    def _fallback_spot_rows(self, diagnostics: list[str]) -> list[dict[str, str]]:
+        try:
+            response = self.requester(
+                EASTMONEY_A_SPOT_URL,
+                timeout=min(self.timeout, 5.0),
+                headers=_eastmoney_headers(),
+                params={
+                    "pn": "1",
+                    "pz": "20",
+                    "po": "1",
+                    "np": "1",
+                    "fltt": "2",
+                    "invt": "2",
+                    "fid": "f3",
+                    "fs": "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048",
+                    "fields": "f12,f14,f2,f3,f4,f5,f6,f8,f10,f21",
+                },
+            )
+            response.raise_for_status()
+            payload = response.json() or {}
+        except Exception as exc:
+            diagnostics.append(f"东方财富 A 股行情兜底失败：{exc}")
+            return []
+        rows = payload.get("data", {}).get("diff", []) if isinstance(payload, dict) else []
+        if not isinstance(rows, list) or not rows:
+            diagnostics.append("东方财富 A 股行情兜底返回空数据。")
+            return []
+        out: list[dict[str, str]] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            code = normalize_symbol(str(row.get("f12") or ""))
+            name = _clean_text(str(row.get("f14") or ""))
+            last = _safe_float(row.get("f2"))
+            change_pct = _safe_float(row.get("f3"))
+            change = _safe_float(row.get("f4"))
+            volume = _safe_float(row.get("f5"))
+            amount = _safe_float(row.get("f6"))
+            turnover = _safe_float(row.get("f8"))
+            volume_ratio = _safe_float(row.get("f10"))
+            float_market_cap = _safe_float(row.get("f21"))
+            if not code or not name or last is None:
+                continue
+            out.append(
+                {
+                    "代码": code,
+                    "名称": name,
+                    "现价": _format_decimal(last),
+                    "涨跌额": _format_decimal(change),
+                    "涨跌幅": _format_percent_points(change_pct),
+                    "成交量": _format_decimal(volume, digits=0),
+                    "成交额": _format_decimal(amount, digits=0),
+                    "换手率": _format_percent_points(turnover),
+                    "量比": _format_decimal(volume_ratio),
+                    "流通市值": _format_decimal(float_market_cap, digits=0),
+                }
+            )
+        return out
+
+    def _user_mode_candidate_section(self) -> tuple[MarketBriefingSection | None, str | None]:
+        diagnostics: list[str] = []
+        rows = self._user_mode_candidates_from_realtime(diagnostics)
+        source_note = "实时行情"
+        if not rows:
+            rows = self._user_mode_candidates_from_latest_bars()
+            source_note = "本地最近交易日"
+            if rows and diagnostics:
+                diagnostics.append("复盘 user 模式个股：实时行情暂不可用，已回退到本地最近交易日。")
+        price_column = "现价" if rows and "现价" in rows[0] else "收盘价"
+        if not rows:
+            if self.realtime_spot_provider is None and self.latest_bars_provider is None:
+                return None, None
+            diagnostics.append("复盘 user 模式个股未生成：实时行情、本地最近交易日或公开行情暂不可用。")
+            return None, " ".join(diagnostics)
+        return (
+            MarketBriefingSection(
+                title="当日 user 模式匹配个股",
+                content=(
+                    f"结合复盘后的{source_note}，按当前默认 user 模式筛选：流通市值约 10-300 亿、"
+                    "量能温和放大、换手健康；仅作复盘线索，不构成确定结论。"
+                ),
+                links=[],
+                tables=[
+                    MarketBriefingTable(
+                        title="当日 user 模式匹配个股",
+                        columns=["代码", "名称", price_column, "涨跌幅", "匹配理由", "rank_score"],
+                        rows=rows[:8],
+                    )
+                ],
+            ),
+            " ".join(diagnostics) if diagnostics else None,
+        )
+
+    def _realtime_spot_rows(self, diagnostics: list[str]) -> list[dict[str, Any]]:
+        if self.realtime_spot_provider is not None:
+            try:
+                rows = self.realtime_spot_provider()
+            except Exception as exc:
+                diagnostics.append(f"复盘 user 模式实时行情读取失败：{exc}")
+                return []
+            return rows if isinstance(rows, list) else []
+        if self.latest_bars_provider is None:
+            return []
+        return self._fallback_spot_rows(diagnostics)
+
+    def _user_mode_candidates_from_realtime(self, diagnostics: list[str]) -> list[dict[str, str]]:
+        spot_rows = self._realtime_spot_rows(diagnostics)
+        candidates: list[tuple[float, dict[str, str]]] = []
+        for row in spot_rows:
+            if not isinstance(row, dict):
+                continue
+            code = normalize_symbol(str(row.get("代码") or row.get("code") or row.get("symbol") or ""))
+            name = _clean_text(str(row.get("名称") or row.get("name") or ""))
+            price = _safe_float(row.get("现价") or row.get("最新价") or row.get("close") or row.get("price"))
+            change_pct = _safe_float(row.get("涨跌幅") or row.get("change_pct") or row.get("pct_chg"))
+            if not code or not name or price is None or change_pct is None:
+                continue
+            turnover = _safe_float(row.get("换手率") or row.get("turnover_rate") or row.get("turnover"))
+            volume_ratio = _safe_float(row.get("量比") or row.get("volume_ratio"))
+            float_market_cap = _safe_float(row.get("流通市值") or row.get("float_market_cap"))
+            if float_market_cap is not None and float_market_cap < 100_000_000:
+                float_market_cap *= 100_000_000
+
+            if not 2.0 <= change_pct <= 12.0:
+                continue
+            if volume_ratio is not None and not 1.1 <= volume_ratio <= 3.5:
+                continue
+            if turnover is not None and not 1.0 <= turnover <= 12.0:
+                continue
+            if float_market_cap is not None and not 1_000_000_000 <= float_market_cap <= 30_000_000_000:
+                continue
+
+            score = 60 + change_pct * 2
+            reasons = [f"实时行情涨跌幅{_format_percent_points(change_pct)}"]
+            if volume_ratio is not None:
+                score += min(volume_ratio, 3.5) * 8
+                reasons.append(f"量比{_format_decimal(volume_ratio)}")
+            if turnover is not None:
+                score += min(turnover, 12.0)
+                reasons.append(f"换手{_format_percent_points(turnover)}")
+            if float_market_cap is not None:
+                reasons.append(f"流通市值约{_format_decimal(float_market_cap / 100_000_000, digits=1)}亿")
+
+            candidates.append(
+                (
+                    score,
+                    {
+                        "代码": code,
+                        "名称": name,
+                        "现价": _format_decimal(price),
+                        "涨跌幅": _format_percent_points(change_pct),
+                        "匹配理由": "；".join(reasons),
+                        "rank_score": _format_decimal(score, digits=1),
+                    },
+                )
+            )
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        return [row for _, row in candidates[:12]]
+
+    def _latest_bars(self) -> pd.DataFrame:
+        if self.latest_bars_provider is None:
+            return pd.DataFrame()
+        try:
+            frame = self.latest_bars_provider()
+        except Exception:
+            return pd.DataFrame()
+        return frame if isinstance(frame, pd.DataFrame) else pd.DataFrame()
+
+    def _user_mode_candidates_from_latest_bars(self) -> list[dict[str, str]]:
+        frame = self._latest_bars()
+        if frame.empty or "symbol" not in frame or "trade_date" not in frame:
+            return []
+        data = frame.copy()
+        data["symbol"] = data["symbol"].astype(str).map(normalize_symbol)
+        data["trade_date"] = pd.to_datetime(data["trade_date"], errors="coerce")
+        data = data.dropna(subset=["trade_date", "symbol", "close", "volume"])
+        if data.empty:
+            return []
+        latest_date = data["trade_date"].max()
+        previous_dates = sorted(date for date in data["trade_date"].drop_duplicates().tolist() if date < latest_date)
+        if not previous_dates:
+            return []
+        previous_date = previous_dates[-1]
+        latest = data[data["trade_date"] == latest_date].copy()
+        previous = data[data["trade_date"] == previous_date][["symbol", "close", "volume"]].rename(
+            columns={"close": "previous_close", "volume": "previous_volume"}
+        )
+        latest = latest.merge(previous, on="symbol", how="left")
+        latest["close"] = pd.to_numeric(latest["close"], errors="coerce")
+        latest["previous_close"] = pd.to_numeric(latest["previous_close"], errors="coerce")
+        latest["volume"] = pd.to_numeric(latest["volume"], errors="coerce")
+        latest["previous_volume"] = pd.to_numeric(latest["previous_volume"], errors="coerce")
+        latest["change_pct_calc"] = (latest["close"] / latest["previous_close"]) - 1
+        latest["volume_ratio"] = latest["volume"] / latest["previous_volume"]
+        turnover_column = "turnover_rate" if "turnover_rate" in latest else "turnover" if "turnover" in latest else None
+        if turnover_column is not None:
+            latest["turnover_for_filter"] = pd.to_numeric(latest[turnover_column], errors="coerce")
+            latest.loc[latest["turnover_for_filter"] > 1, "turnover_for_filter"] = latest["turnover_for_filter"] / 100.0
+        else:
+            latest["turnover_for_filter"] = pd.NA
+        if "float_market_cap" in latest:
+            latest["float_market_cap_for_filter"] = pd.to_numeric(latest["float_market_cap"], errors="coerce")
+        else:
+            latest["float_market_cap_for_filter"] = pd.NA
+
+        mask = (
+            latest["close"].gt(0)
+            & latest["previous_close"].gt(0)
+            & latest["volume_ratio"].between(1.2, 2.5, inclusive="both")
+            & latest["change_pct_calc"].between(-0.03, 0.12, inclusive="both")
+        )
+        cap_known = latest["float_market_cap_for_filter"].notna()
+        mask &= (~cap_known) | latest["float_market_cap_for_filter"].between(1_000_000_000, 30_000_000_000, inclusive="both")
+        turnover_known = latest["turnover_for_filter"].notna()
+        mask &= (~turnover_known) | latest["turnover_for_filter"].between(0.02, 0.08, inclusive="both")
+        candidates = latest[mask].copy()
+        if candidates.empty:
+            return []
+        candidates["rank_score_num"] = (
+            candidates["volume_ratio"].clip(upper=2.5) * 25
+            + candidates["change_pct_calc"].fillna(0) * 100
+            + candidates["turnover_for_filter"].fillna(0.03) * 120
+        )
+        candidates = candidates.sort_values(["rank_score_num", "change_pct_calc"], ascending=False)
+        rows: list[dict[str, str]] = []
+        for _, item in candidates.head(12).iterrows():
+            name = _clean_text(str(item.get("name") or item.get("stock_name") or "")) or "--"
+            reasons = [
+                f"量比{float(item['volume_ratio']):.2f}",
+                f"涨跌幅{_format_pct(float(item['change_pct_calc']))}",
+            ]
+            if not pd.isna(item.get("turnover_for_filter")):
+                reasons.append(f"换手{_format_pct(float(item['turnover_for_filter']))}")
+            rows.append(
+                {
+                    "代码": str(item["symbol"]),
+                    "名称": name,
+                    "收盘价": _format_decimal(float(item["close"])),
+                    "涨跌幅": _format_pct(float(item["change_pct_calc"])),
+                    "匹配理由": "；".join(reasons),
+                    "rank_score": _format_decimal(float(item["rank_score_num"]), digits=1),
+                }
+            )
+        return rows
+
+    def _user_mode_candidates_from_eastmoney(self) -> list[dict[str, str]]:
+        diagnostics: list[str] = []
+        spot_rows = self._fallback_spot_rows(diagnostics)
+        rows: list[dict[str, str]] = []
+        for index, row in enumerate(spot_rows[:8]):
+            rows.append(
+                {
+                    "代码": row.get("代码", "--"),
+                    "名称": row.get("名称", "--"),
+                    "现价": row.get("现价", "--"),
+                    "涨跌幅": row.get("涨跌幅", "--"),
+                    "匹配理由": "公开实时行情涨幅靠前，缺少本地量比/换手确认",
+                    "rank_score": _format_decimal(60 - index * 2, digits=1),
+                }
+            )
+        return rows
