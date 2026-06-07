@@ -1,11 +1,11 @@
 {
     "platforms":  {
                       "windows-x86_64":  {
-                                             "signature":  "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTekhYdjVRcU50eXpsbWxSVHhVODZ5cXVPZCtybG0vVVJOSXYzYjJTTktaVUs0aHRPaS8rMTJLY2NCdzBQLy9ZSXYrdVMzWDZuR0syK2poQWk5em1OOHNuMlBWdE45ZlFVPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzgwNzcxNDM4CWZpbGU6QeiCoeetlueVpeWbnua1i+W3peS9nOWPsF8xLjEuMF94NjQtc2V0dXAuZXhlCmVvYkdPOG5MbHQ2ZU5Bd0tHanpROStkSUxaY0JKeGRRZlNSRmFqTC9wVHpQUThNNElIclJodWxsRWJIZ2RiMFlXU3FxbHJ4Y0hhaVJkNFIyd25uQUR3PT0K",
+                                             "signature":  "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTekhYdjVRcU50eTh5NzBzTHR2RjIxTDAvemgrT2ZOR1VLZFUwMTNhY2FyQTI3TUU0V0hWQ05GUlUvaDN1UjlvQ3dZZEQ5eEJTaFdmaHkvQTBKbUhmdTJZSHZzUys3dlE0PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzgwNzk2NjU2CWZpbGU6QeiCoeetlueVpeWbnua1i+W3peS9nOWPsF8xLjEuMF94NjQtc2V0dXAuZXhlCkx4U2hXaGNBYmtRQm1taVZBa2oya21jaUFhaG9ZYThNcHVGVW14TVVJTm1HZlRRalg4NkZnSHZ1dkFhdE9sb0V6WXVQbXFOTE1wTzE0UzBoeWJiNUNRPT0K",
                                              "url":  "https://github.com/dzc-bit/Astock-backtester/releases/download/v1.1.0/Astock-backtester_1.1.0_x64-setup.exe"
                                          }
                   },
-    "pub_date":  "2026-06-06T18:45:08Z",
+    "pub_date":  "2026-06-07T01:44:49Z",
     "version":  "1.1.0",
     "notes":  "发布行情无感刷新、复盘/早盘全文、策略命中展示、回测口径校准与桌面更新增强。"
 }
