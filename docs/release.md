@@ -61,11 +61,11 @@ v1.1.0
 2. Build the sidecar with `scripts/build-data-service.ps1`.
 3. Build the signed NSIS installer.
 4. Confirm the installer contains the latest `src-tauri\bin\astock-data-service.exe`; for a same-version local reinstall, also verify the installed `bin\astock-data-service.exe` was actually overwritten.
-5. Generate `release-assets/latest.json` with `scripts/write-latest-json.ps1` from the real `.sig`.
-6. Create the GitHub Release and upload the installer plus `latest.json`.
+5. Generate a fresh `latest.json` with `scripts/write-latest-json.ps1` from the real `.sig`.
+6. Create the GitHub Release and upload the installer plus the freshly generated `latest.json`.
 7. Verify `https://github.com/dzc-bit/Astock-backtester/releases/latest/download/latest.json` returns the new version.
 
-`latest.json` must be generated from the real `.sig` file produced next to the installer. Do not hand-edit a future version into `release-assets/latest.json` before the installer and signature exist, because the app updater verifies that signature.
+`latest.json` must be generated from the real `.sig` file produced next to the installer. Do not hand-edit a future version into `release-assets/latest.json` before the installer and signature exist, because the app updater verifies that signature. The `release-assets` directory is ignored by Git; treat files there as local staging artifacts and upload the verified `latest.json` to the GitHub Release instead of keeping stale updater manifests in the repository.
 
 If `npm run tauri -- build --ci` creates the NSIS `.exe` but exits with `A public key has been found, but no private key`, the local installer can be used for manual installation checks only. Do not upload that installer as an updater release, do not reuse an older `.sig`, and do not regenerate `latest.json` until `TAURI_SIGNING_PRIVATE_KEY` is available and the matching `.sig` is produced by the same build.
 
