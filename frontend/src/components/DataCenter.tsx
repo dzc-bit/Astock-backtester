@@ -252,12 +252,19 @@ export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceRead
       const result = await fetchDailyBars(service.base_url, symbols, startDate, endDate);
       setMessage(operationMessage(result.logs));
       onCoverageChange(result.coverage);
+      const nextRange = coverageFillDateRange(result.coverage);
       const fetchedEndDate = latestCoverageEndDate(result.coverage);
-      if (fetchedEndDate && fetchedEndDate > endDate) {
+      const detailRange = dateRangeTouched
+        ? { startDate, endDate: fetchedEndDate && fetchedEndDate > endDate ? fetchedEndDate : endDate }
+        : nextRange;
+      if (!dateRangeTouched) {
+        setStartDate(nextRange.startDate);
+        setEndDate(nextRange.endDate);
+      } else if (fetchedEndDate && fetchedEndDate > endDate) {
         setEndDate(fetchedEndDate);
       }
       await refreshLogs(service);
-      await refreshDetails(service, symbols, startDate, fetchedEndDate ?? endDate);
+      await refreshDetails(service, symbols, detailRange.startDate, detailRange.endDate);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "补全缺失数据失败");
       let activeService = service;
@@ -484,7 +491,7 @@ export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceRead
           <article key={item.symbol} className="coverage-item">
             <strong>{item.symbol}</strong>
             <span>{item.start_date ?? "-"} 至 {item.end_date ?? "-"}，{item.rows} 行</span>
-            <span>缺失日期: {formatList(item.missing_trade_dates)}</span>
+            <span>缺失交易日: {formatList(item.missing_trade_dates)}</span>
             <span>缺失资金流: {formatList(item.missing_capital_flow_dates)}</span>
             <span>缺失市值: {formatList(item.missing_market_cap_dates)}</span>
           </article>

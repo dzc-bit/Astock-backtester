@@ -5,6 +5,7 @@ from collections.abc import Callable, Sequence
 import pandas as pd
 
 from astock_backtester.data.cache import LocalCache
+from astock_backtester.data.trading_calendar import a_share_trade_dates
 from astock_backtester.data.warehouse import Warehouse
 from astock_backtester.models import (
     DailyBarsCoverageItem,
@@ -20,7 +21,7 @@ DailyBarsFetcher = Callable[[Sequence[str], str, str], pd.DataFrame]
 
 
 def _date_range(start_date: pd.Timestamp, end_date: pd.Timestamp) -> set[pd.Timestamp]:
-    return set(pd.date_range(start=start_date, end=end_date, freq="B"))
+    return a_share_trade_dates(start_date, end_date)
 
 
 def build_daily_bars_coverage(

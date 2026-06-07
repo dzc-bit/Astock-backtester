@@ -38,14 +38,13 @@ class DataServiceState:
     def __init__(self, cache_dir: str | Path, port: int) -> None:
         self.cache = LocalCache(cache_dir)
         self.warehouse = Warehouse(cache_dir)
-        self.provider = CompositeProvider([ADataProvider(), AkshareProvider(), HttpAStockProvider()])
+        self.akshare_provider = AkshareProvider()
+        self.provider = CompositeProvider([ADataProvider(), self.akshare_provider, HttpAStockProvider()])
         self.sync_manager = SyncJobManager(warehouse=self.warehouse, provider=self.provider)
         self.realtime_provider = RealtimeMarketProvider(self.warehouse)
         self.news_provider = MarketNewsProvider()
         self.news_summary_provider = MarketNewsSummaryProvider(self.news_provider)
-        self.briefing_provider = MarketBriefingProvider(
-            latest_bars_provider=lambda: self.warehouse.read_latest_daily_bars(days=3)
-        )
+        self.briefing_provider = MarketBriefingProvider()
         self.commentary_provider = MarketCommentaryProvider(
             self.realtime_provider,
             self.news_provider,

@@ -77,12 +77,13 @@ it("lists today's matched stocks after a strategy run", () => {
   );
 
   expect(screen.getByRole("region", { name: "策略命中" })).toBeInTheDocument();
-  expect(screen.getByText("今日策略命中")).toBeInTheDocument();
-  expect(screen.getByText(`信号日 ${today} / 展示日 ${today}`)).toBeInTheDocument();
+  expect(screen.getByText("今日 user 模式候选")).toBeInTheDocument();
+  expect(screen.getByText("当日符合用户策略的个股")).toBeInTheDocument();
+  expect(screen.getByText(`信号日 ${today} / 展示日 ${today} / 本地回测快照`)).toBeInTheDocument();
   expect(screen.getByText("600519")).toBeInTheDocument();
   expect(screen.getByText("贵州茅台")).toBeInTheDocument();
   expect(screen.getByText("+2.13%")).toBeInTheDocument();
-  expect(screen.getByText("收盘 1688.80")).toBeInTheDocument();
+  expect(screen.getByText("本地收盘价 1688.80")).toBeInTheDocument();
   expect(screen.getByText("收盘价站上20日均线")).toBeInTheDocument();
   expect(screen.getByText("主力净流入放大")).toBeInTheDocument();
 });
@@ -129,7 +130,7 @@ it("shows a friendly empty state when no stocks match today", () => {
     />
   );
 
-  expect(screen.getByText("今日策略命中")).toBeInTheDocument();
+  expect(screen.getByText("今日 user 模式候选")).toBeInTheDocument();
   expect(screen.getByText("今日没有股票命中当前策略")).toBeInTheDocument();
 });
 
@@ -161,8 +162,8 @@ it("does not label old backtest matches as today's hits and separates the equity
   );
 
   expect(screen.getByRole("region", { name: "策略命中" })).toBeInTheDocument();
-  expect(screen.getByText("回测末日策略命中")).toBeInTheDocument();
-  expect(screen.queryByText("今日策略命中")).not.toBeInTheDocument();
+  expect(screen.getByText("本地最近交易日候选")).toBeInTheDocument();
+  expect(screen.queryByText("今日 user 模式候选")).not.toBeInTheDocument();
   expect(screen.getByText("历史权益曲线")).toBeInTheDocument();
   expect(screen.getByText("回测区间 2024-01-04 至 2024-03-13")).toBeInTheDocument();
 });

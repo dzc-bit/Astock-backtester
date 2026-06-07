@@ -9,7 +9,7 @@ Windows 桌面版 A 股策略回测工具。项目使用 React 构建界面，Ta
 - 流式回测：回测过程返回阶段进度、交易事件和最终收益统计。
 - 实时行情看板：聚合指数、红绿家数、强势板块、昨日强势追踪、行情评价、新闻汇总、资讯和风险提示。
 - 复盘阅读：独立展示同花顺复盘/早盘总评，支持摘要、分段全文、表格和原文跳转。
-- 策略命中：回测结果直接展示当日符合策略的股票、收盘价、涨跌幅和命中原因。
+- 策略候选：回测结果通过 `latest_strategy_matches.matches` 展示当日符合用户策略的个股；本地回测快照明确标注为非实时。
 - 策略保存：回测后可保存用户策略，并保留基础内置策略。
 - 桌面更新：通过 Tauri updater 读取 GitHub Release 更新信息。
 
@@ -33,6 +33,8 @@ Windows 桌面版 A 股策略回测工具。项目使用 React 构建界面，Ta
 | 行情、资讯与风险 | `GET /realtime/market-snapshot`、`GET /market/commentary`、`GET /market/news-summary`、`GET /market/news`、`GET /market/fupan`、`GET /market/zaopan`、`GET /risk/alerts` |
 | 策略校验与推荐 | `POST /strategy/conditions/validate`、`GET /strategy/recommended` |
 | 回测执行 | `POST /run/backtest/stream` |
+
+实时行情、复盘和候选股保持独立模块：行情宽度在后端 provider 中按同花顺、Sina、Tencent、AKShare、重型公开行情爬虫链路校验，东方财富轻量 spot 只能作为受控备选；同花顺复盘/早盘只展示原文和结构化表格，不拼入 user 模式候选。
 
 更完整的设计、接口、数据源和运行配置细节见 [项目说明书.md](./项目说明书.md)。
 

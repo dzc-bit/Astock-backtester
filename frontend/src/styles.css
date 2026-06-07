@@ -227,7 +227,7 @@ body {
 
 .market-news-layout {
   display: grid;
-  grid-template-columns: minmax(0, 1.35fr) minmax(380px, 0.95fr);
+  grid-template-columns: minmax(620px, 1.45fr) minmax(360px, 0.9fr);
   gap: 16px;
   padding: 18px 30px 0;
   align-items: stretch;
@@ -244,7 +244,7 @@ body {
 .market-dashboard,
 .news-panel {
   min-width: 0;
-  height: clamp(440px, 42vw, 620px);
+  height: clamp(500px, 45vw, 680px);
   min-height: 0;
   overflow: hidden;
 }
@@ -306,6 +306,10 @@ body {
 .breadth-panel,
 .sector-panel {
   grid-column: 1 / -1;
+}
+
+.index-quote {
+  grid-column: auto;
 }
 
 .index-quote,
@@ -2855,8 +2859,9 @@ select:focus {
 }
 
 .results-surface .chart-body {
-  height: 220px;
-  min-height: 220px;
+  position: relative;
+  height: clamp(240px, 28vw, 340px);
+  min-height: 240px;
   min-width: 0;
 }
 

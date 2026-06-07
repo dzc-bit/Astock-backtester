@@ -143,6 +143,34 @@ def test_coverage_filters_symbols_dates_and_ignores_weekends(tmp_path):
     assert [day.isoformat() for day in aaa.missing_trade_dates] == ["2024-01-03", "2024-01-04"]
 
 
+def test_coverage_uses_a_share_trading_calendar_for_2026_holidays(tmp_path):
+    cache = LocalCache(tmp_path)
+    cache.write_daily_bars(
+        _bars(
+            [
+                ("AAA", "2026-02-13", 10.0, 11.0, 9.0, 10.5, 1000, 0.1, 9_000_000_000.0, 1_500_000.0, False, False, 90),
+                ("AAA", "2026-02-23", 10.5, 11.5, 10.0, 11.0, 1200, 0.1, 9_100_000_000.0, 1_600_000.0, False, False, 91),
+                ("AAA", "2026-04-03", 11.0, 11.8, 10.8, 11.4, 1300, 0.1, 9_200_000_000.0, 1_700_000.0, False, False, 92),
+                ("AAA", "2026-04-07", 11.4, 12.0, 11.2, 11.7, 1400, 0.1, 9_300_000_000.0, 1_800_000.0, False, False, 93),
+                ("AAA", "2026-04-30", 11.7, 12.2, 11.4, 11.9, 1500, 0.1, 9_400_000_000.0, 1_900_000.0, False, False, 94),
+                ("AAA", "2026-05-06", 11.9, 12.4, 11.6, 12.1, 1600, 0.1, 9_500_000_000.0, 2_000_000.0, False, False, 95),
+            ]
+        )
+    )
+
+    details = build_daily_bars_coverage(
+        cache=cache,
+        symbols=["AAA"],
+        start_date="2026-02-13",
+        end_date="2026-05-06",
+    )
+
+    missing = {day.isoformat() for day in details.items[0].missing_trade_dates}
+    assert not (missing & {"2026-02-16", "2026-02-17", "2026-02-18", "2026-02-19", "2026-02-20"})
+    assert "2026-04-06" not in missing
+    assert not (missing & {"2026-05-01", "2026-05-04", "2026-05-05"})
+
+
 def test_fetch_result_reports_partial_success(tmp_path):
     cache = LocalCache(tmp_path)
 

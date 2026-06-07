@@ -52,7 +52,7 @@ npm run tauri -- signer generate -w "$env:USERPROFILE\.tauri\a-stock-receiver.ke
 Git tag 使用 `v版本号`，例如：
 
 ```text
-v1.1.0
+v1.1.1
 ```
 
 ## Release Order
@@ -60,7 +60,7 @@ v1.1.0
 1. Bump `package.json`, `pyproject.toml`, `src-tauri/Cargo.toml`, and `src-tauri/tauri.conf.json` to the same version.
 2. Build the sidecar with `scripts/build-data-service.ps1`.
 3. Build the signed NSIS installer.
-4. Confirm the installer contains the latest `src-tauri\bin\astock-data-service.exe`; for a same-version local reinstall, also verify the installed `bin\astock-data-service.exe` was actually overwritten.
+4. Confirm the installer contains the latest `src-tauri\bin\astock-data-service.exe`; for a same-version local reinstall, also verify the installed `bin\astock-data-service.exe` was actually overwritten by comparing hashes.
 5. Generate a fresh `latest.json` with `scripts/write-latest-json.ps1` from the real `.sig`.
 6. Create the GitHub Release and upload the installer plus the freshly generated `latest.json`.
 7. Verify `https://github.com/dzc-bit/Astock-backtester/releases/latest/download/latest.json` returns the new version.
@@ -103,6 +103,20 @@ Remove-Item Env:\TAURI_SIGNING_PRIVATE_KEY
 `.sig` 文件的内容要写入 `latest.json`，不是把 `.sig` 文件路径写进去。
 如果本机没有 `%USERPROFILE%\.tauri\a-stock-receiver.key` 或对应环境变量，Tauri 仍可能先生成 `.exe`，但会在 updater 签名阶段失败。此时应记录为“安装包构建完成、签名发布阻塞”，而不是把旧 `.sig` 或旧 `latest.json` 当成本次发布资产。
 
+## 安装后 sidecar 验证
+
+安装包退出码为 0 不代表 sidecar 已替换。覆盖安装后先停止旧桌面进程和旧数据服务，再比较工作区与安装目录 sidecar 的 SHA256：
+
+```powershell
+Get-Process | Where-Object { $_.Path -like '*A股策略回测工作台*' -or $_.ProcessName -like '*astock*' -or $_.ProcessName -like '*a-stock*' } | Stop-Process -Force
+Get-FileHash "$env:LOCALAPPDATA\A股策略回测工作台\bin\astock-data-service.exe"
+Get-FileHash "D:\New project 6\src-tauri\bin\astock-data-service.exe"
+```
+
+临时探针启动 sidecar 时，`D:\New project 6\运行产物\本地数据仓` 包含空格和中文。PowerShell `Start-Process -ArgumentList @(..., $cacheDir)` 容易拆参；应使用已加引号的单个参数字符串，或用 Python `subprocess.Popen([...])` 参数数组。
+
+安装后至少探测 `/ping`、`/health`、`/coverage/daily-bars`、`/realtime/market-snapshot`、`/market/commentary`、`/market/fupan`、`/market/zaopan` 和 `/run/backtest/stream`。`/run/backtest/stream` 是 NDJSON 流，探针应逐行 `json.loads`，并断言最后一个事件为 `{"type":"result", ...}`，不能用 `Invoke-RestMethod` 当普通 JSON 判断。
+
 ## GitHub Release 资产
 
 在 `dzc-bit/Astock-backtester` 创建 GitHub Release，并上传：
@@ -111,7 +125,7 @@ Remove-Item Env:\TAURI_SIGNING_PRIVATE_KEY
 - `latest.json`
 
 `latest.json` 必须以这个文件名上传，因为应用配置固定读取 `releases/latest/download/latest.json`。
-安装包上传到 GitHub Release 时使用 ASCII 资产名，例如 `Astock-backtester_1.1.0_x64-setup.exe`；
+安装包上传到 GitHub Release 时使用 ASCII 资产名，例如 `Astock-backtester_1.1.1_x64-setup.exe`；
 `latest.json.platforms.windows-x86_64.url` 必须指向这个真实资产名。保留本地中文安装包文件名可以用于归档，但不要让 updater 指向 GitHub 自动转写后的乱码资产名。
 
 ## latest.json
@@ -119,13 +133,13 @@ Remove-Item Env:\TAURI_SIGNING_PRIVATE_KEY
 用发布版本、安装包 URL 和签名内容生成 `latest.json`：
 
 ```powershell
-$assetName = "A股策略回测工作台_1.1.0_x64-setup.exe"
-$releaseAssetName = "Astock-backtester_1.1.0_x64-setup.exe"
+$assetName = "A股策略回测工作台_1.1.1_x64-setup.exe"
+$releaseAssetName = "Astock-backtester_1.1.1_x64-setup.exe"
 powershell -ExecutionPolicy Bypass -File scripts/write-latest-json.ps1 `
-  -Version "1.1.0" `
+  -Version "1.1.1" `
   -AssetName $assetName `
   -ReleaseAssetName $releaseAssetName `
-  -Notes "发布行情无感刷新、复盘/早盘全文、策略命中展示、回测口径校准与桌面更新增强。"
+  -Notes "发布实时行情完整性校验、行情评价严格降级、复盘候选分离、A 股交易日历覆盖和安装后 sidecar 验证增强。"
 ```
 
 不要提前加入 macOS 或 Linux 平台字段。静态 JSON 会被 updater 整体解析，只有真实可用的平台资产才应该写入。

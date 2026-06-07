@@ -11,6 +11,7 @@ from astock_backtester.models import (
     MarketNewsResponse,
     RealtimeMarketSnapshot,
 )
+from astock_backtester.data.realtime import is_valid_full_market_breadth
 
 
 def _format_pct(value: float | None) -> str:
@@ -46,6 +47,8 @@ def _snapshot_missing_reasons(snapshot: RealtimeMarketSnapshot) -> list[str]:
         reasons.append("缺少指数")
     if snapshot.breadth is None or snapshot.breadth.total <= 0:
         reasons.append("缺少红绿家数")
+    elif not is_valid_full_market_breadth(snapshot.breadth):
+        reasons.append(f"红绿家数不完整({snapshot.breadth.source} total={snapshot.breadth.total})")
     if not snapshot.strong_sectors:
         reasons.append("缺少强势题材")
     return reasons

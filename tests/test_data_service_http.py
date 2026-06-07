@@ -1,16 +1,17 @@
 from __future__ import annotations
 
 import json
+import time
 import threading
 from urllib.request import Request, urlopen
 
 import pandas as pd
 
 from astock_backtester.sample_data import sample_daily_bars
-from astock_backtester.data.realtime import RealtimeMarketProvider
+from astock_backtester.data.realtime import HeavyMarketCrawlerProvider, RealtimeMarketProvider
 from astock_backtester.data.warehouse import Warehouse
 from astock_backtester.data.news import _parse_time
-from astock_backtester.models import MarketBreadth, MarketIndexQuote, RealtimeMarketSnapshot, SectorMover
+from astock_backtester.models import DatasetCoverage, MarketBreadth, MarketIndexQuote, RealtimeMarketSnapshot, SectorMover
 from astock_backtester.service import create_server
 
 
@@ -963,7 +964,7 @@ def test_service_realtime_market_snapshot_uses_ths_market_summary_breadth_when_a
         thread.join(timeout=5)
 
 
-def test_service_realtime_market_snapshot_prefers_sina_breadth_before_eastmoney_fallback(tmp_path):
+def test_service_realtime_market_snapshot_rejects_partial_sina_breadth_before_fallback(tmp_path):
     import pandas as pd
 
     class FakeResponse:
@@ -1033,8 +1034,196 @@ def test_service_realtime_market_snapshot_prefers_sina_breadth_before_eastmoney_
         port = server.server_address[1]
         response = _request_json("GET", f"http://127.0.0.1:{port}/realtime/market-snapshot")
 
-        assert response["breadth"] == {"up": 1, "down": 1, "flat": 1, "total": 3, "source": "sina-a-share-live"}
-        assert "红绿家数来自新浪实时个股" in response["message"]
+        assert response["breadth"] is None
+        assert response["status"] == "stale"
+        assert any("sina-a-share-live" in item and "全市场红绿家数不完整" in item for item in response["diagnostics"])
+        assert any("local-latest" in item and "全市场红绿家数不完整" in item for item in response["diagnostics"])
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_realtime_provider_rejects_partial_live_breadth_with_diagnostics(tmp_path):
+    warehouse = Warehouse(tmp_path)
+    provider = RealtimeMarketProvider(warehouse)
+    diagnostics: list[str] = []
+
+    provider._latest_local_symbol_count = lambda: 5100
+    provider._fetch_ths_market_summary_breadth = lambda: None
+    provider._fetch_sina_breadth = lambda: MarketBreadth(
+        up=107,
+        down=80,
+        flat=5,
+        total=192,
+        source="sina-a-share-live",
+    )
+    provider._fetch_tencent_breadth = lambda diagnostics: None
+    provider._fetch_akshare_breadth = lambda diagnostics: None
+    provider._fetch_heavy_breadth = lambda diagnostics: None
+    provider._fetch_eastmoney_breadth = lambda diagnostics: None
+
+    breadth = provider._fetch_live_breadth(diagnostics)
+
+    assert breadth is None
+    assert any("sina-a-share-live" in item and "total=192" in item for item in diagnostics)
+    assert any("全市场红绿家数不完整" in item for item in diagnostics)
+
+
+def test_realtime_provider_rejects_breadth_below_local_pool_ratio(tmp_path):
+    warehouse = Warehouse(tmp_path)
+    provider = RealtimeMarketProvider(warehouse)
+    diagnostics: list[str] = []
+
+    provider._latest_local_symbol_count = lambda: 5100
+
+    accepted = provider._breadth_is_complete(
+        MarketBreadth(up=1800, down=1200, flat=100, total=3100, source="sina-a-share-live"),
+        5100,
+        diagnostics,
+    )
+
+    assert accepted is False
+    assert any("sina-a-share-live" in item and "total=3100" in item and "比例=60.8%" in item for item in diagnostics)
+
+
+def test_realtime_provider_rejects_partial_local_breadth_against_warehouse_coverage():
+    from datetime import date, datetime, timezone
+
+    bars = pd.DataFrame(
+        [
+            {
+                "symbol": f"{index:06d}",
+                "trade_date": pd.Timestamp("2026-06-05"),
+                "open": 10.0,
+                "high": 10.5,
+                "low": 9.8,
+                "close": 10.0,
+                "volume": 1000,
+            }
+            for index in range(1, 193)
+        ]
+    )
+
+    class PartialLatestWarehouse:
+        def read_latest_daily_bars(self, days=3):
+            return bars
+
+        def coverage(self):
+            return [
+                DatasetCoverage(
+                    dataset="daily_bars",
+                    symbols=5100,
+                    start_date=date(2015, 1, 5),
+                    end_date=date(2026, 6, 5),
+                    missing_rows=0,
+                )
+            ]
+
+    provider = RealtimeMarketProvider(PartialLatestWarehouse())
+    provider._skip_local_topic_fetch_once = True
+
+    snapshot = provider._snapshot_from_local(datetime(2026, 6, 7, tzinfo=timezone.utc))
+
+    assert snapshot.breadth is None
+    assert any("local-latest" in item and "total=192" in item for item in snapshot.diagnostics)
+
+
+def test_realtime_provider_heavy_breadth_uses_browser_provider_after_public_html_failure(tmp_path):
+    warehouse = Warehouse(tmp_path)
+    provider = RealtimeMarketProvider(warehouse)
+    provider._latest_local_symbol_count = lambda: 5100
+
+    def requester(*args, **kwargs):
+        raise RuntimeError("public html blocked")
+
+    provider.requester = requester
+
+    class FakeBrowserProvider:
+        def fetch_breadth_from_dom(self, url):
+            return MarketBreadth(up=3300, down=1500, flat=300, total=5100, source="browser-market-provider")
+
+    provider._heavy_market_provider = HeavyMarketCrawlerProvider(
+        requester=requester,
+        timeout=0.01,
+        browser_provider=FakeBrowserProvider(),
+    )
+
+    diagnostics: list[str] = []
+    breadth = provider._fetch_live_breadth(diagnostics)
+
+    assert breadth is not None
+    assert breadth.source == "browser-market-provider"
+
+
+def test_realtime_provider_live_message_labels_heavy_breadth_source(tmp_path):
+    provider = RealtimeMarketProvider(Warehouse(tmp_path))
+
+    message = provider._build_live_message(
+        MarketBreadth(up=3300, down=1500, flat=300, total=5100, source="browser-market-provider"),
+        [],
+    )
+
+    assert "浏览器公开行情爬虫" in message
+
+
+def test_realtime_provider_live_message_does_not_claim_local_breadth_when_breadth_missing(tmp_path):
+    provider = RealtimeMarketProvider(Warehouse(tmp_path))
+
+    message = provider._build_live_message(
+        None,
+        [SectorMover(name="半导体", change_pct=0.025, source="sina-sector")],
+    )
+
+    assert "红绿家数暂不可用" in message
+    assert "红绿家数暂回退" not in message
+
+
+def test_service_market_fupan_keeps_user_mode_candidates_out_of_briefing(tmp_path):
+    class FakeResponse:
+        text = ""
+        encoding = "utf-8"
+        content = b""
+        apparent_encoding = "utf-8"
+
+        def __init__(self, payload=None, text=""):
+            self._payload = payload or {}
+            self.text = text
+            self.content = text.encode("utf-8")
+
+        def raise_for_status(self):
+            return
+
+        def json(self):
+            return self._payload
+
+    requested_urls = []
+
+    def requester(url, **kwargs):
+        requested_urls.append(url)
+        if "stock.10jqka.com.cn/fupan/" in url:
+            return FakeResponse(
+                text="""
+                <html><body>
+                  <div id="fpzj">复盘摘要：机器人和算力活跃。</div>
+                  <div class="fp_item_hd"><h2>同花顺解盘</h2></div>
+                  <div class="fp_item_cnt"><p>机器人板块午后持续走强，算力方向有承接。</p></div>
+                </body></html>
+                """
+            )
+        raise AssertionError(f"unexpected network request: {url}")
+
+    server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
+    server.state.briefing_provider.requester = requester
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        response = _request_json("GET", f"http://127.0.0.1:{port}/market/fupan")
+
+        assert response["source"] == "ths-fupan"
+        assert [section["title"] for section in response["sections"]] == ["同花顺解盘"]
+        assert "当日 user 模式匹配个股" not in json.dumps(response, ensure_ascii=False)
+        assert not any("eastmoney.com" in url for url in requested_urls)
     finally:
         server.shutdown()
         thread.join(timeout=5)
@@ -1117,7 +1306,8 @@ def test_service_realtime_market_snapshot_uses_local_breadth_without_eastmoney_w
         port = server.server_address[1]
         response = _request_json("GET", f"http://127.0.0.1:{port}/realtime/market-snapshot")
 
-        assert response["breadth"]["source"] == "local-latest"
+        assert response["breadth"] is None
+        assert any("local-latest" in item and "全市场红绿家数不完整" in item for item in response["diagnostics"])
         assert not any("eastmoney.com" in url for url in requested_urls)
     finally:
         server.shutdown()
@@ -1164,6 +1354,54 @@ def test_realtime_provider_sina_breadth_batches_are_bounded(tmp_path):
     assert breadth is not None
     assert breadth.up == 405
     assert requested_symbol_counts == [400, 5]
+
+
+def test_realtime_provider_returns_breadth_without_waiting_for_slow_sector_sources(tmp_path):
+    warehouse = Warehouse(tmp_path)
+    provider = RealtimeMarketProvider(warehouse)
+    provider.sector_time_budget = 0.02
+    provider._fetch_indexes = lambda: [
+        MarketIndexQuote(
+            symbol="sh000001",
+            name="上证指数",
+            last=3100.0,
+            previous_close=3080.0,
+            change=20.0,
+            change_pct=0.0064935,
+            source="fake-live",
+        )
+    ]
+    provider._fetch_live_breadth = lambda: MarketBreadth(up=3200, down=1700, flat=200, total=5100, source="fast-breadth")
+
+    def slow_sectors():
+        time.sleep(0.2)
+        return [SectorMover(name="慢板块", change_pct=0.05, source="slow-sector")]
+
+    provider._fetch_live_sectors = slow_sectors
+
+    def local_snapshot(now):
+        return RealtimeMarketSnapshot(
+            status="stale",
+            source="local-latest",
+            updated_at=now,
+            indexes=[],
+            breadth=MarketBreadth(up=1, down=1, flat=0, total=2, source="local-latest"),
+            strong_sectors=[SectorMover(name="本地题材", change_pct=0.02, source="local-market-group")],
+            yesterday_strong_sectors=[],
+            message="local",
+        )
+
+    provider._snapshot_from_local = local_snapshot
+
+    started_at = time.perf_counter()
+    snapshot = provider.market_snapshot()
+    elapsed = time.perf_counter() - started_at
+
+    assert elapsed < 0.15
+    assert snapshot.breadth is not None
+    assert snapshot.breadth.source == "fast-breadth"
+    assert snapshot.strong_sectors[0].source == "local-market-group"
+    assert any("实时强势题材接口超时" in item for item in snapshot.diagnostics)
 
 
 def test_service_realtime_market_snapshot_tracks_yesterday_strong_sectors_from_local_history(tmp_path):

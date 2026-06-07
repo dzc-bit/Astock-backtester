@@ -310,4 +310,41 @@ describe("DataCenter", () => {
       "2026-06-05"
     ));
   });
+
+  it("keeps manually edited dates aligned with coverage details after a successful fetch", async () => {
+    const user = setupUser();
+    const updatedCoverage = [
+      { dataset: "daily_bars", symbols: 5000, start_date: "2015-01-05", end_date: "2026-06-05", missing_rows: 0 }
+    ];
+    apiMocks.fetchDailyBars.mockResolvedValue({
+      status: "ok",
+      imported_rows: 12,
+      requested_symbols: ["600519"],
+      fetched_symbols: ["600519"],
+      missing_symbols: [],
+      coverage: updatedCoverage,
+      logs: [{ level: "info", message: "Fetched manual date range rows" }]
+    });
+
+    render(<DataCenter cacheDir=".astock-cache" coverage={coverage} onCoverageChange={vi.fn()} />);
+
+    await screen.findByText(/http:\/\/127\.0\.0\.1:9011/);
+    await user.clear(screen.getByLabelText("开始日期"));
+    await user.type(screen.getByLabelText("开始日期"), "2026-05-26");
+    await user.click(screen.getByRole("button", { name: "补全缺失数据" }));
+
+    await waitFor(() => expect(apiMocks.fetchDailyBars).toHaveBeenCalledWith(
+      "http://127.0.0.1:9011",
+      ["600519"],
+      "2026-05-26",
+      "2026-06-05"
+    ));
+    expect(screen.getByLabelText("开始日期")).toHaveValue("2026-05-26");
+    await waitFor(() => expect(apiMocks.loadDailyBarsCoverage).toHaveBeenLastCalledWith(
+      "http://127.0.0.1:9011",
+      ["600519"],
+      "2026-05-26",
+      "2026-06-05"
+    ));
+  });
 });

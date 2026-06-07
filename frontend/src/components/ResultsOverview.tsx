@@ -52,11 +52,12 @@ function MatchedStocksPanel({ dailyMatches, legacyMatches }: { dailyMatches?: Da
   const rawItems = dailyMatches?.matches ?? legacyMatches ?? [];
   const items = [...rawItems].sort((left, right) => (right.rank_score ?? 0) - (left.rank_score ?? 0));
   const matchesAreToday = isToday(dailyMatches?.trade_date);
-  const title = matchesAreToday ? "今日策略命中" : "回测末日策略命中";
-  const kicker = matchesAreToday ? "今日符合条件个股" : "回测末日符合条件个股";
+  const title = matchesAreToday ? "今日 user 模式候选" : "本地最近交易日候选";
+  const kicker = matchesAreToday ? "当日符合用户策略的个股" : "本地最近交易日/非实时";
   const dateLabel = dailyMatches
-    ? `信号日 ${dailyMatches.signal_date} / 展示日 ${dailyMatches.trade_date}`
+    ? `信号日 ${dailyMatches.signal_date} / 展示日 ${dailyMatches.trade_date} / 本地回测快照`
     : "兼容旧字段 matched_stocks";
+  const priceLabel = matchesAreToday ? "本地收盘价" : "本地最近收盘价";
   return (
     <section className="matched-stocks-panel" aria-label="策略命中">
       <div className="matched-stocks-head">
@@ -77,7 +78,7 @@ function MatchedStocksPanel({ dailyMatches, legacyMatches }: { dailyMatches?: Da
               </div>
               <div className="matched-stock-quote">
                 <strong className={movementClass(stock.change_pct)}>{formatPercent(stock.change_pct)}</strong>
-                <span>收盘 {formatPrice(stock.close)}</span>
+                <span>{priceLabel} {formatPrice(stock.close)}</span>
                 {stock.rank_score != null ? <small>评分 {stock.rank_score.toFixed(2)}</small> : null}
               </div>
               <div className="matched-stock-reasons">
@@ -92,11 +93,11 @@ function MatchedStocksPanel({ dailyMatches, legacyMatches }: { dailyMatches?: Da
         </div>
       ) : (
         <div className="matched-stocks-empty">
-          <strong>{hasPayload ? `${matchesAreToday ? "今日" : "回测末日"}没有股票命中当前策略` : "等待后端返回当日命中股票"}</strong>
+          <strong>{hasPayload ? `${matchesAreToday ? "今日" : "本地最近交易日"}没有股票命中当前策略` : "等待回测结果返回策略候选"}</strong>
           <span>
             {hasPayload
               ? "可以放宽入场条件、扩大股票池，或查看数据中心是否缺少行情/资金字段。"
-              : "主线程对接 matched_stocks 后，这里会展示代码、名称、收盘价、涨跌幅和命中原因。"}
+              : "回测完成后，这里会展示代码、名称、本地收盘价、涨跌幅、匹配理由和 rank_score。"}
           </span>
         </div>
       )}

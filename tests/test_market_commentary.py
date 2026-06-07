@@ -318,10 +318,9 @@ def test_market_commentary_does_not_build_definite_view_from_unavailable_snapsho
     assert not any(point.title == "强势题材" for point in response.drivers)
     assert any("实时数据缺失" in item for item in response.risks)
     assert any("恢复实时快照后复核" in item for item in response.next_watch)
-    assert response.diagnostics == [
-        "行情评价实时快照不可用：实时行情不可用，已使用本地最近交易日数据。",
-        "实时盘面不完整：快照状态为 unavailable，未生成确定盘面评价。",
-    ]
+    assert response.diagnostics[0] == "行情评价实时快照不可用：实时行情不可用，已使用本地最近交易日数据。"
+    assert "快照状态为 unavailable" in response.diagnostics[1]
+    assert "红绿家数不完整" in response.diagnostics[1]
 
 
 def test_market_commentary_does_not_build_definite_view_from_empty_live_snapshot():
@@ -347,3 +346,39 @@ def test_market_commentary_does_not_build_definite_view_from_empty_live_snapshot
     assert response.drivers[0].title == "新闻线索"
     assert any("实时数据缺失" in item for item in response.risks)
     assert response.diagnostics == ["实时盘面不完整：缺少指数、缺少红绿家数、缺少强势题材，未生成确定盘面评价。"]
+
+
+def test_market_commentary_rejects_live_snapshot_with_partial_breadth_total():
+    class PartialBreadthRealtimeProvider:
+        def market_snapshot(self) -> RealtimeMarketSnapshot:
+            return RealtimeMarketSnapshot(
+                status="live",
+                source="ashare-sina+sina-a-share-live+ths-concept",
+                updated_at=datetime(2026, 6, 5, 14, 50, tzinfo=timezone.utc),
+                indexes=[
+                    MarketIndexQuote(
+                        symbol="sh000001",
+                        name="上证指数",
+                        last=3100.0,
+                        previous_close=3080.0,
+                        change=20.0,
+                        change_pct=0.0065,
+                        source="ashare-sina",
+                    )
+                ],
+                breadth=MarketBreadth(up=107, down=80, flat=5, total=192, source="sina-a-share-live"),
+                strong_sectors=[
+                    SectorMover(name="AI应用", change_pct=0.042, leading_symbol="300001", source="ths-concept")
+                ],
+                yesterday_strong_sectors=[],
+                message="局部实时宽度",
+                diagnostics=["红绿家数来源 sina-a-share-live 不完整：total=192，低于全市场阈值。"],
+            )
+
+    response = MarketCommentaryProvider(PartialBreadthRealtimeProvider(), FakeNewsProvider()).current_commentary()
+
+    assert response.source == "news-fallback+commentary"
+    assert response.mode == "news_fallback"
+    assert "实时盘面暂不可用，以下仅为新闻线索候选" in response.summary
+    assert not any("实时盘面数据完整" in item for item in response.diagnostics)
+    assert any("红绿家数不完整" in item for item in response.diagnostics)

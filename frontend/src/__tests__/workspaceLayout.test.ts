@@ -15,4 +15,9 @@ describe("workspace desktop layout", () => {
   it("lets the data center span the full workspace width", () => {
     expect(styles).toMatch(/\.data-center\s*\{[^}]*grid-column:\s*1\s*\/\s*-1;/s);
   });
+
+  it("keeps realtime market index quotes in a compact row instead of stacking full width", () => {
+    expect(styles).toMatch(/\.market-news-layout\s*\{[^}]*grid-template-columns:\s*minmax\(620px,\s*1\.45fr\)\s*minmax\(360px,\s*0\.9fr\);/s);
+    expect(styles).toMatch(/\.index-quote\s*\{\s*grid-column:\s*auto;\s*\}/s);
+  });
 });

@@ -126,6 +126,17 @@ For a normal Windows checkout, install:
 - Rust with rustup, using the `x86_64-pc-windows-msvc` toolchain.
 - Visual Studio Build Tools 2022 with the C++ workload (`Microsoft.VisualStudio.Workload.VCTools`) and Windows 10/11 SDK.
 
+For this `D:\New project 6` workspace, prefer the project-local tools when PATH is incomplete:
+
+```powershell
+& 'D:\New project 6\.tools\node-v20.18.1-win-x64\node.exe' 'D:\New project 6\node_modules\vitest\vitest.mjs' --config frontend/vitest.config.ts --run
+& 'D:\New project 6\.tools\node-v20.18.1-win-x64\node.exe' 'D:\New project 6\node_modules\typescript\bin\tsc' --noEmit
+& 'D:\New project 6\.tools\node-v20.18.1-win-x64\node.exe' 'D:\New project 6\node_modules\vite\bin\vite.js' build --config frontend/vite.config.ts
+& 'D:\New project 6\.tools\rustup-home\toolchains\stable-x86_64-pc-windows-msvc\bin\cargo.exe' test --manifest-path src-tauri\Cargo.toml
+```
+
+Keep all upstream market URLs and scraping logic inside backend provider modules. React components should consume structured service responses only. `/coverage/daily-bars` uses the A 股交易日历; do not replace it with plain weekday `freq="B"` logic because legal holidays such as Spring Festival, Qingming, Labor Day and National Day must not appear as missing trade dates.
+
 The app is configured for NSIS bundles. `bundle.useLocalToolsDir` is enabled in `src-tauri\tauri.conf.json`, so Tauri caches NSIS under `src-tauri\target\.tauri` instead of the user profile cache. If the first installer build runs on a network-restricted machine, allow access to Tauri's GitHub binary releases or pre-populate that cache.
 
 This Codex workspace used a gitignored project-local Rust/npm setup under `.tools`. Because the elevated Codex sandbox maps the workspace through `C:\Users\CodexSandboxOffline\.codex\.sandbox\cwd\...`, MSVC debug PDB writes can fail in debug builds. For this environment only, load the MSVC environment and disable dev debug symbols for the build process:

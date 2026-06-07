@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import time as monotonic_time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta, timezone
 from typing import Callable, Iterable
@@ -41,11 +42,15 @@ SINA_HEADERS = {
     "User-Agent": "Mozilla/5.0",
 }
 SINA_BREADTH_BATCH_SIZE = 400
+MIN_FULL_MARKET_BREADTH_TOTAL = 3000
+MIN_LOCAL_BREADTH_RATIO = 0.65
 THS_MARKET_SUMMARY_URL = "https://q.10jqka.com.cn/index/index/board/all/"
 THS_CONCEPT_SECTION_URL = "https://q.10jqka.com.cn/gn/"
 THS_INDUSTRY_HTML_URL = "https://q.10jqka.com.cn/thshy/index/field/199112/order/desc/page/{page}/"
 THS_INDUSTRY_DETAIL_URL = "https://q.10jqka.com.cn/thshy/detail/code/{board_code}/"
 THS_HOT_TOPIC_URL = "http://zx.10jqka.com.cn/event/api/getharden/date/{date}/orderby/date/orderway/desc/charset/GBK/"
+TENCENT_QUOTE_URL = "https://qt.gtimg.cn/q={symbols}"
+EASTMONEY_A_SPOT_URL = "https://82.push2.eastmoney.com/api/qt/clist/get"
 THS_TOPIC_SPLIT_RE = re.compile(r"[+＋/、,，;；|]+")
 THS_BREADTH_RE = re.compile(r"上涨[：:\s]*(\d+)\D+下跌[：:\s]*(\d+)\D+平盘[：:\s]*(\d+)")
 THS_BOARD_CODE_RE = re.compile(r"/code/(\d+)")
@@ -273,6 +278,17 @@ def _is_renderable_snapshot(snapshot: RealtimeMarketSnapshot) -> bool:
     return bool(snapshot.indexes and snapshot.breadth and snapshot.breadth.total > 0 and snapshot.strong_sectors)
 
 
+def is_valid_full_market_breadth(breadth: MarketBreadth | None, local_symbol_count: int = 0) -> bool:
+    if breadth is None or breadth.total <= 0:
+        return False
+    if local_symbol_count >= MIN_FULL_MARKET_BREADTH_TOTAL:
+        return (
+            breadth.total >= MIN_FULL_MARKET_BREADTH_TOTAL
+            and breadth.total >= int(local_symbol_count * MIN_LOCAL_BREADTH_RATIO)
+        )
+    return breadth.total >= MIN_FULL_MARKET_BREADTH_TOTAL
+
+
 def unavailable_market_snapshot(message: str, *, diagnostics: list[str] | None = None) -> RealtimeMarketSnapshot:
     now = datetime.now(timezone.utc)
     return RealtimeMarketSnapshot(
@@ -286,16 +302,83 @@ def unavailable_market_snapshot(message: str, *, diagnostics: list[str] | None =
 
 
 @dataclass
+class BrowserMarketProvider:
+    timeout: float = 2.5
+
+    def fetch_breadth_from_dom(self, url: str) -> MarketBreadth | None:
+        try:
+            from playwright.sync_api import sync_playwright
+        except Exception:
+            return None
+        try:
+            with sync_playwright() as playwright:
+                browser = playwright.chromium.launch(headless=True)
+                page = browser.new_page()
+                page.goto(url, wait_until="domcontentloaded", timeout=int(self.timeout * 1000))
+                text = page.locator("body").inner_text(timeout=int(self.timeout * 1000))
+                browser.close()
+        except Exception:
+            return None
+        match = THS_BREADTH_RE.search(text)
+        if not match:
+            return None
+        up, down, flat = (int(item) for item in match.groups())
+        return MarketBreadth(up=up, down=down, flat=flat, total=up + down + flat, source="browser-market-provider")
+
+
+@dataclass
+class HeavyMarketCrawlerProvider:
+    requester: Callable[..., requests.Response] = requests.get
+    timeout: float = 2.5
+    browser_provider: BrowserMarketProvider | None = None
+    _last_successful_breadth: MarketBreadth | None = field(default=None, init=False, repr=False)
+
+    def fetch_breadth(self) -> MarketBreadth | None:
+        for url in [
+            THS_MARKET_SUMMARY_URL,
+            "https://q.10jqka.com.cn/",
+        ]:
+            breadth = self._fetch_public_html_breadth(url)
+            if breadth is not None:
+                self._last_successful_breadth = breadth
+                return breadth
+        if self.browser_provider is not None:
+            breadth = self.browser_provider.fetch_breadth_from_dom(THS_MARKET_SUMMARY_URL)
+            if breadth is not None:
+                self._last_successful_breadth = breadth
+                return breadth
+        return self._last_successful_breadth
+
+    def _fetch_public_html_breadth(self, url: str) -> MarketBreadth | None:
+        try:
+            response = self.requester(url, timeout=self.timeout, headers=THS_HEADERS)
+            response.raise_for_status()
+            response.encoding = response.encoding or "gbk"
+        except Exception:
+            return None
+        text = BeautifulSoup(response.text, "html.parser").get_text(" ", strip=True)
+        match = THS_BREADTH_RE.search(text)
+        if not match:
+            return None
+        up, down, flat = (int(item) for item in match.groups())
+        return MarketBreadth(up=up, down=down, flat=flat, total=up + down + flat, source="heavy-market-crawler")
+
+
+@dataclass
 class RealtimeMarketProvider:
     warehouse: Warehouse
     timeout: float = 4.0
     requester: Callable[..., requests.Response] = requests.get
     breadth_time_budget: float = 2.0
+    sector_time_budget: float = 3.0
+    allow_eastmoney_breadth_fallback: bool = False
     _last_live_sector_rows: list[dict] = field(default_factory=list, init=False, repr=False)
     _sector_member_cache: dict[str, list[str]] = field(default_factory=dict, init=False, repr=False)
     _ths_concept_rows_cache: list[dict] | None = field(default=None, init=False, repr=False)
     _ths_industry_rows_cache: list[dict] | None = field(default=None, init=False, repr=False)
     _last_successful_snapshot: RealtimeMarketSnapshot | None = field(default=None, init=False, repr=False)
+    _skip_local_topic_fetch_once: bool = field(default=False, init=False, repr=False)
+    _heavy_market_provider: HeavyMarketCrawlerProvider | None = field(default=None, init=False, repr=False)
 
     def market_snapshot(self) -> RealtimeMarketSnapshot:
         now = datetime.now(timezone.utc)
@@ -307,18 +390,26 @@ class RealtimeMarketProvider:
         self._ths_concept_rows_cache = None
         self._ths_industry_rows_cache = None
         self._last_live_sector_rows = []
+        self._skip_local_topic_fetch_once = False
         indexes = self._fetch_indexes()
-        live_sectors = self._fetch_live_sectors()
-        live_breadth = self._fetch_live_breadth()
+        try:
+            live_breadth = self._fetch_live_breadth(diagnostics)
+        except TypeError:
+            live_breadth = self._fetch_live_breadth()
+        live_sectors = self._fetch_live_sectors_with_budget(diagnostics)
         local_snapshot = self._snapshot_from_local(now)
         strong_sectors = live_sectors or local_snapshot.strong_sectors
         yesterday_sectors = local_snapshot.yesterday_strong_sectors
         breadth = live_breadth or local_snapshot.breadth
-        status = "live" if indexes else local_snapshot.status
+        status = "live" if indexes and live_breadth else local_snapshot.status
+        if not live_breadth and local_snapshot.diagnostics:
+            diagnostics.extend(local_snapshot.diagnostics)
         if not indexes:
             diagnostics.append("实时指数接口暂不可用，尝试使用最近成功快照或本地最近交易日。")
         if indexes and not live_breadth and local_snapshot.breadth:
             diagnostics.append("实时红绿家数接口暂不可用，已回退到本地最近交易日统计。")
+        if indexes and not live_breadth and local_snapshot.breadth is None:
+            diagnostics.append("实时红绿家数接口暂不可用，本地最近交易日红绿宽度也不完整，已隐藏该宽度统计。")
         if indexes and not live_sectors and local_snapshot.strong_sectors:
             diagnostics.append("实时强势题材接口暂不可用，已回退到本地最近交易日题材聚合。")
         source_parts: list[str] = []
@@ -376,6 +467,25 @@ class RealtimeMarketProvider:
         if snapshot.status == "stale" and _is_renderable_snapshot(snapshot):
             self._last_successful_snapshot = snapshot.model_copy(deep=True)
         return snapshot
+
+    def _fetch_live_sectors_with_budget(self, diagnostics: list[str]) -> list[SectorMover]:
+        if self.sector_time_budget is None:
+            return self._fetch_live_sectors()
+        executor = ThreadPoolExecutor(max_workers=1)
+        future = executor.submit(self._fetch_live_sectors)
+        try:
+            return future.result(timeout=self.sector_time_budget)
+        except TimeoutError:
+            future.cancel()
+            self._skip_local_topic_fetch_once = True
+            diagnostics.append(f"实时强势题材接口超时：{self.sector_time_budget:g}秒，已先返回红绿家数并回退本地题材。")
+            return []
+        except Exception as exc:
+            self._skip_local_topic_fetch_once = True
+            diagnostics.append(f"实时强势题材接口失败：{exc}，已回退本地题材。")
+            return []
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
 
     def _fetch_indexes(self) -> list[MarketIndexQuote]:
         symbols = ",".join(symbol for symbol, _ in INDEXES)
@@ -440,14 +550,46 @@ class RealtimeMarketProvider:
             )
         return sectors
 
-    def _fetch_live_breadth(self) -> MarketBreadth | None:
-        ths_breadth = self._fetch_ths_market_summary_breadth()
-        if ths_breadth:
-            return ths_breadth
-        sina_breadth = self._fetch_sina_breadth()
-        if sina_breadth:
-            return sina_breadth
+    def _fetch_live_breadth(self, diagnostics: list[str]) -> MarketBreadth | None:
+        local_symbol_count = max(self._latest_local_symbol_count(), self._coverage_symbol_count())
+        fetchers: list[tuple[str, Callable[[], MarketBreadth | None]]] = [
+            ("同花顺市场总览", self._fetch_ths_market_summary_breadth),
+            ("Sina 批量实时个股", self._fetch_sina_breadth),
+            ("Tencent 批量实时个股", lambda: self._fetch_tencent_breadth(diagnostics)),
+            ("AKShare 实时个股", lambda: self._fetch_akshare_breadth(diagnostics)),
+            ("重型公开行情爬虫", lambda: self._fetch_heavy_breadth(diagnostics)),
+        ]
+        if self.allow_eastmoney_breadth_fallback:
+            fetchers.append(("东方财富轻量 spot 兜底", lambda: self._fetch_eastmoney_breadth(diagnostics)))
+        for label, fetcher in fetchers:
+            try:
+                breadth = fetcher()
+            except Exception as exc:
+                diagnostics.append(f"{label}红绿家数读取失败：{exc}")
+                continue
+            if breadth is None:
+                continue
+            if self._breadth_is_complete(breadth, local_symbol_count, diagnostics):
+                return breadth
         return None
+
+    def _breadth_is_complete(
+        self,
+        breadth: MarketBreadth,
+        local_symbol_count: int,
+        diagnostics: list[str],
+    ) -> bool:
+        if is_valid_full_market_breadth(breadth, local_symbol_count):
+            return True
+        ratio_text = (
+            f"，本地股票池={local_symbol_count}，比例={breadth.total / local_symbol_count:.1%}"
+            if local_symbol_count > 0
+            else "，本地股票池不可用"
+        )
+        diagnostics.append(
+            f"全市场红绿家数不完整：source={breadth.source} total={breadth.total}{ratio_text}，已判定该来源失败。"
+        )
+        return False
 
     def _fetch_sina_breadth(self) -> MarketBreadth | None:
         deadline = monotonic_time.monotonic() + self.breadth_time_budget
@@ -541,6 +683,159 @@ class RealtimeMarketProvider:
         if code.startswith(("4", "8")):
             return f"bj{code}"
         return None
+
+    def _tencent_stock_symbol(self, symbol: str) -> str | None:
+        code = normalize_symbol(symbol)
+        if not code:
+            return None
+        if code.startswith(("6", "9")):
+            return f"sh{code}"
+        if code.startswith(("0", "2", "3")):
+            return f"sz{code}"
+        if code.startswith(("4", "8")):
+            return f"bj{code}"
+        return None
+
+    def _fetch_tencent_breadth(self, diagnostics: list[str]) -> MarketBreadth | None:
+        deadline = monotonic_time.monotonic() + self.breadth_time_budget
+        symbols = self._latest_local_symbols()
+        if not symbols:
+            return None
+        quote_symbols = [quote for symbol in symbols if (quote := self._tencent_stock_symbol(symbol))]
+        up = 0
+        down = 0
+        flat = 0
+        seen: set[str] = set()
+        for start in range(0, len(quote_symbols), SINA_BREADTH_BATCH_SIZE):
+            remaining = deadline - monotonic_time.monotonic()
+            if remaining <= 0:
+                diagnostics.append("Tencent 批量实时个股红绿家数超时。")
+                return None
+            batch = quote_symbols[start : start + SINA_BREADTH_BATCH_SIZE]
+            try:
+                response = self.requester(
+                    TENCENT_QUOTE_URL.format(symbols=",".join(batch)),
+                    timeout=min(self.timeout, max(0.2, remaining)),
+                    headers={"Referer": "https://stockapp.finance.qq.com/", "User-Agent": "Mozilla/5.0"},
+                )
+                response.raise_for_status()
+            except Exception as exc:
+                diagnostics.append(f"Tencent 批量实时个股请求失败：{exc}")
+                return None
+            response.encoding = response.encoding or "gbk"
+            for segment in response.text.split(";"):
+                if '="' not in segment or "~" not in segment:
+                    continue
+                key = segment.split("v_", 1)[-1].split("=", 1)[0].strip()
+                values = segment.split("=", 1)[1].strip().strip('"').split("~")
+                if len(values) < 5:
+                    continue
+                last = _parse_float(values[3])
+                previous_close = _parse_float(values[4])
+                symbol = normalize_symbol(key[-6:])
+                if not symbol or symbol in seen or last is None or previous_close is None or previous_close <= 0:
+                    continue
+                seen.add(symbol)
+                if last > previous_close:
+                    up += 1
+                elif last < previous_close:
+                    down += 1
+                else:
+                    flat += 1
+        total = up + down + flat
+        if total == 0:
+            return None
+        return MarketBreadth(up=up, down=down, flat=flat, total=total, source="tencent-a-share-live")
+
+    def _fetch_akshare_breadth(self, diagnostics: list[str]) -> MarketBreadth | None:
+        try:
+            import akshare as ak
+
+            frame = ak.stock_zh_a_spot_em()
+        except Exception as exc:
+            diagnostics.append(f"AKShare 实时个股红绿家数读取失败：{exc}")
+            return None
+        if frame is None or frame.empty:
+            diagnostics.append("AKShare 实时个股红绿家数返回空数据。")
+            return None
+        change_column = next((column for column in ["涨跌幅", "change_pct", "pct_chg"] if column in frame.columns), None)
+        code_column = next((column for column in ["代码", "股票代码", "symbol", "code"] if column in frame.columns), None)
+        if change_column is None or code_column is None:
+            diagnostics.append("AKShare 实时个股红绿家数字段不完整。")
+            return None
+        data = frame[[code_column, change_column]].copy()
+        data[code_column] = data[code_column].astype(str).map(normalize_symbol)
+        data[change_column] = pd.to_numeric(data[change_column], errors="coerce")
+        data = data.dropna(subset=[code_column, change_column])
+        data = data[data[code_column].astype(str).str.fullmatch(r"\d{6}")]
+        if data.empty:
+            return None
+        up = int((data[change_column] > 0).sum())
+        down = int((data[change_column] < 0).sum())
+        flat = int((data[change_column] == 0).sum())
+        return MarketBreadth(up=up, down=down, flat=flat, total=up + down + flat, source="akshare-a-share-live")
+
+    def _fetch_heavy_breadth(self, diagnostics: list[str]) -> MarketBreadth | None:
+        if self._heavy_market_provider is None:
+            self._heavy_market_provider = HeavyMarketCrawlerProvider(
+                requester=self.requester,
+                timeout=min(self.timeout, 2.5),
+                browser_provider=BrowserMarketProvider(timeout=min(self.timeout, 2.5)),
+            )
+        breadth = self._heavy_market_provider.fetch_breadth()
+        if breadth is None:
+            diagnostics.append("重型公开行情爬虫未取得完整红绿家数。")
+        return breadth
+
+    def _fetch_eastmoney_breadth(self, diagnostics: list[str]) -> MarketBreadth | None:
+        try:
+            response = self.requester(
+                EASTMONEY_A_SPOT_URL,
+                timeout=min(self.timeout, 2.5),
+                headers={"Referer": "https://quote.eastmoney.com/", "User-Agent": "Mozilla/5.0"},
+                params={
+                    "pn": "1",
+                    "pz": "6000",
+                    "po": "1",
+                    "np": "1",
+                    "fltt": "2",
+                    "invt": "2",
+                    "fid": "f3",
+                    "fs": "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048",
+                    "fields": "f12,f14,f2,f3",
+                },
+            )
+            response.raise_for_status()
+            payload = response.json() or {}
+        except Exception as exc:
+            diagnostics.append(f"东方财富轻量 spot 红绿家数读取失败：{exc}")
+            return None
+        rows = payload.get("data", {}).get("diff", []) if isinstance(payload, dict) else []
+        if not isinstance(rows, list) or not rows:
+            diagnostics.append("东方财富轻量 spot 红绿家数返回空数据。")
+            return None
+        up = 0
+        down = 0
+        flat = 0
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            code = normalize_symbol(str(row.get("f12") or ""))
+            change_pct = _parse_float(row.get("f3"))
+            price = _parse_float(row.get("f2"))
+            if not code or change_pct is None or price is None or price <= 0:
+                continue
+            if change_pct > 0:
+                up += 1
+            elif change_pct < 0:
+                down += 1
+            else:
+                flat += 1
+        total = up + down + flat
+        if total == 0:
+            diagnostics.append("东方财富轻量 spot 红绿家数字段校验后为空。")
+            return None
+        return MarketBreadth(up=up, down=down, flat=flat, total=total, source="eastmoney-a-share-spot")
 
     def _fetch_sina_sectors(self) -> list[SectorMover]:
         try:
@@ -787,6 +1082,16 @@ class RealtimeMarketProvider:
         latest = data[data["trade_date"] == latest_date]
         return int(latest["symbol"].astype(str).nunique())
 
+    def _coverage_symbol_count(self) -> int:
+        try:
+            coverage = self.warehouse.coverage()
+        except Exception:
+            return 0
+        for item in coverage:
+            if getattr(item, "dataset", None) == "daily_bars":
+                return int(getattr(item, "symbols", 0) or 0)
+        return 0
+
     def _build_live_message(
         self,
         live_breadth: MarketBreadth | None,
@@ -795,6 +1100,11 @@ class RealtimeMarketProvider:
         breadth_label = {
             "ths-market-summary": "同花顺市场总览",
             "sina-a-share-live": "新浪实时个股",
+            "tencent-a-share-live": "腾讯实时个股",
+            "akshare-a-share-live": "AKShare 实时个股",
+            "heavy-market-crawler": "重型公开行情爬虫",
+            "browser-market-provider": "浏览器公开行情爬虫",
+            "eastmoney-a-share-spot": "东方财富轻量 spot 备选",
         }.get(live_breadth.source if live_breadth else None)
         sector_label = {
             "ths-hot-reason": "同花顺热点归因",
@@ -806,10 +1116,10 @@ class RealtimeMarketProvider:
         if sector_label and breadth_label:
             return f"实时指数来自 Ashare/Sina，强势题材来自{sector_label}，红绿家数来自{breadth_label}。"
         if sector_label:
-            return f"实时指数来自 Ashare/Sina，强势题材来自{sector_label}，红绿家数暂回退到本地最近交易日。"
+            return f"实时指数来自 Ashare/Sina，强势题材来自{sector_label}，红绿家数暂不可用，未展示全市场宽度。"
         if breadth_label:
             return f"实时指数来自 Ashare/Sina，红绿家数来自{breadth_label}，强势题材暂不可用。"
-        return "实时指数来自 Ashare/Sina，红绿家数与强势题材暂回退到本地最近交易日。"
+        return "实时指数来自 Ashare/Sina，红绿家数与强势题材暂不可用，已保留可用的最近数据。"
 
     def _snapshot_from_local(self, now: datetime) -> RealtimeMarketSnapshot:
         try:
@@ -850,6 +1160,18 @@ class RealtimeMarketProvider:
         down = int((latest["change_pct"] < 0).sum())
         flat = int((latest["change_pct"] == 0).sum())
         breadth = MarketBreadth(up=up, down=down, flat=flat, total=int(len(latest)), source="local-latest")
+        diagnostics = [f"已使用本地最近交易日 {latest_date.date()} 作为兜底快照。"]
+        coverage_symbol_count = self._coverage_symbol_count()
+        if not is_valid_full_market_breadth(breadth, coverage_symbol_count):
+            ratio_text = (
+                f"，本地股票池={coverage_symbol_count}，比例={breadth.total / coverage_symbol_count:.1%}"
+                if coverage_symbol_count > 0
+                else "，本地股票池不可用"
+            )
+            diagnostics.append(
+                f"全市场红绿家数不完整：source=local-latest total={breadth.total}{ratio_text}，已隐藏该宽度统计。"
+            )
+            breadth = None
 
         pseudo_index = MarketIndexQuote(
             symbol="local-market",
@@ -877,7 +1199,7 @@ class RealtimeMarketProvider:
             strong_sectors=local_sectors,
             yesterday_strong_sectors=yesterday_sectors,
             message=message,
-            diagnostics=[f"已使用本地最近交易日 {latest_date.date()} 作为兜底快照。"],
+            diagnostics=diagnostics,
         )
 
     def _with_previous_close(
@@ -904,6 +1226,8 @@ class RealtimeMarketProvider:
         if latest.empty:
             return []
         if not sector_rows:
+            if self._skip_local_topic_fetch_once:
+                return []
             sector_rows = self._fetch_ths_hot_topic_rows()
         if not sector_rows:
             return []

@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import pandas as pd
-
 from astock_backtester.data.briefing import MarketBriefingProvider, THS_FUPAN_URL, THS_REFERER
 
 
@@ -470,6 +468,33 @@ def test_market_briefing_provider_filters_cn_label_numeric_soup_and_percent_symb
     assert "% %" not in (response.sections[0].content or "")
 
 
+def test_market_briefing_provider_filters_div_numeric_soup_and_keeps_readable_sentences():
+    html = """
+    <html><body>
+      <div id="fpzj">复盘摘要：指数小幅反弹。</div>
+      <div class="fp_item_hd"><h2>行业表现</h2></div>
+      <div class="fp_item_cnt">
+        <div>
+          半导体 1293.69 +14.46 +1.13% 363.54亿 2026-06-05 15:00:00
+          机器人 1102.18 +22.40 +2.07% 251.11亿 2026-06-05 15:00:00
+          % %
+        </div>
+        <div>机器人板块午后持续走强，资金围绕题材龙头博弈。</div>
+        <span>算力方向尾盘承接改善，仍需观察成交额能否延续。</span>
+      </div>
+    </body></html>
+    """
+
+    response = MarketBriefingProvider(requester=lambda *args, **kwargs: FakeHtmlResponse(html)).latest_fupan()
+
+    content = response.sections[0].content or ""
+    assert "1293.69" not in content
+    assert "2026-06-05" not in content
+    assert "% %" not in content
+    assert "机器人板块午后持续走强，资金围绕题材龙头博弈。" in content
+    assert "算力方向尾盘承接改善，仍需观察成交额能否延续。" in content
+
+
 def test_market_briefing_provider_uses_market_fallback_when_ths_page_has_no_sections():
     html = "<html><body><div id='fpzj'></div></body></html>"
 
@@ -501,7 +526,7 @@ def test_market_briefing_provider_uses_market_fallback_when_ths_page_has_no_sect
     assert any("同花顺复盘页未解析到有效章节" in item for item in response.diagnostics)
 
 
-def test_market_briefing_provider_adds_user_mode_candidates_from_latest_bars():
+def test_market_briefing_provider_does_not_mix_user_mode_candidates_from_legacy_latest_bars_hook():
     html = """
     <html><body>
       <div id="fpzj">复盘摘要：机器人和算力活跃。</div>
@@ -509,79 +534,17 @@ def test_market_briefing_provider_adds_user_mode_candidates_from_latest_bars():
       <div class="fp_item_cnt"><p>机器人板块午后持续走强，算力方向有承接。</p></div>
     </body></html>
     """
-    bars = pd.DataFrame(
-        [
-            {
-                "symbol": "300001",
-                "name": "机器人A",
-                "trade_date": "2026-06-04",
-                "open": 9.8,
-                "close": 10.0,
-                "high": 10.1,
-                "low": 9.6,
-                "volume": 1000,
-                "amount": 10000,
-                "turnover": 0.03,
-                "float_market_cap": 8_000_000_000,
-            },
-            {
-                "symbol": "300001",
-                "name": "机器人A",
-                "trade_date": "2026-06-05",
-                "open": 10.1,
-                "close": 10.8,
-                "high": 10.9,
-                "low": 10.0,
-                "volume": 1800,
-                "amount": 19000,
-                "turnover": 0.04,
-                "float_market_cap": 8_500_000_000,
-            },
-            {
-                "symbol": "600002",
-                "name": "低量B",
-                "trade_date": "2026-06-04",
-                "open": 20.0,
-                "close": 20.0,
-                "high": 20.2,
-                "low": 19.8,
-                "volume": 1000,
-                "amount": 20000,
-                "turnover": 0.01,
-                "float_market_cap": 12_000_000_000,
-            },
-            {
-                "symbol": "600002",
-                "name": "低量B",
-                "trade_date": "2026-06-05",
-                "open": 20.0,
-                "close": 20.1,
-                "high": 20.2,
-                "low": 19.9,
-                "volume": 900,
-                "amount": 18000,
-                "turnover": 0.012,
-                "float_market_cap": 12_100_000_000,
-            },
-        ]
-    )
+    provider = MarketBriefingProvider(requester=lambda *args, **kwargs: FakeHtmlResponse(html))
+    provider.latest_bars_provider = lambda: [{"symbol": "300001", "name": "机器人A", "close": 10.8}]
 
-    response = MarketBriefingProvider(
-        requester=lambda *args, **kwargs: FakeHtmlResponse(html),
-        latest_bars_provider=lambda: bars,
-    ).latest_fupan()
+    response = provider.latest_fupan()
 
-    candidate_section = response.sections[-1]
-    assert candidate_section.title == "当日 user 模式匹配个股"
-    table = candidate_section.tables[0]
-    assert table.columns == ["代码", "名称", "收盘价", "涨跌幅", "匹配理由", "rank_score"]
-    assert table.rows[0]["代码"] == "300001"
-    assert table.rows[0]["名称"] == "机器人A"
-    assert "量比" in table.rows[0]["匹配理由"]
-    assert "600002" not in str(table.rows)
+    assert [section.title for section in response.sections] == ["同花顺解盘"]
+    assert response.sections[0].content == "机器人板块午后持续走强，算力方向有承接。"
+    assert "当日 user 模式匹配个股" not in str(response.model_dump(mode="json"))
 
 
-def test_market_briefing_provider_adds_user_mode_candidates_from_realtime_quotes():
+def test_market_briefing_provider_does_not_mix_user_mode_candidates_from_legacy_realtime_hook():
     html = """
     <html><body>
       <div id="fpzj">复盘摘要：机器人和算力活跃。</div>
@@ -590,22 +553,37 @@ def test_market_briefing_provider_adds_user_mode_candidates_from_realtime_quotes
     </body></html>
     """
 
-    response = MarketBriefingProvider(
-        requester=lambda *args, **kwargs: FakeHtmlResponse(html),
-        realtime_spot_provider=lambda: [
-            {"代码": "300001", "名称": "机器人A", "现价": "10.88", "涨跌额": "0.88", "涨跌幅": "8.80%"},
-            {"代码": "600002", "名称": "低量B", "现价": "20.10", "涨跌额": "0.10", "涨跌幅": "0.50%"},
-        ],
-    ).latest_fupan()
+    provider = MarketBriefingProvider(requester=lambda *args, **kwargs: FakeHtmlResponse(html))
+    provider.realtime_spot_provider = lambda: [
+        {"代码": "300001", "名称": "机器人A", "现价": "10.88", "涨跌额": "0.88", "涨跌幅": "8.80%"},
+        {"代码": "600002", "名称": "低量B", "现价": "20.10", "涨跌额": "0.10", "涨跌幅": "0.50%"},
+    ]
 
-    candidate_section = response.sections[-1]
-    assert candidate_section.title == "当日 user 模式匹配个股"
-    table = candidate_section.tables[0]
-    assert table.columns == ["代码", "名称", "现价", "涨跌幅", "匹配理由", "rank_score"]
-    assert table.rows[0]["代码"] == "300001"
-    assert table.rows[0]["现价"] == "10.88"
-    assert "实时行情" in table.rows[0]["匹配理由"]
-    assert "600002" not in str(table.rows)
+    response = provider.latest_fupan()
+
+    assert [section.title for section in response.sections] == ["同花顺解盘"]
+    assert "当日 user 模式匹配个股" not in str(response.model_dump(mode="json"))
+
+
+def test_market_briefing_provider_does_not_mix_akshare_realtime_spot_candidates_from_legacy_hook():
+    html = """
+    <html><body>
+      <div id="fpzj">复盘摘要：机器人和算力活跃。</div>
+      <div class="fp_item_hd"><h2>同花顺解盘</h2></div>
+      <div class="fp_item_cnt"><p>机器人板块午后持续走强，算力方向有承接。</p></div>
+    </body></html>
+    """
+
+    provider = MarketBriefingProvider(requester=lambda *args, **kwargs: FakeHtmlResponse(html))
+    provider.realtime_spot_provider = lambda: [
+        {"代码": "300001", "名称": "机器人A", "最新价": 10.88, "涨跌幅": 8.8, "换手率": 4.2, "量比": 1.8, "流通市值": 85.0},
+        {"代码": "600002", "名称": "低涨幅B", "最新价": 20.10, "涨跌幅": 0.5, "换手率": 2.0, "量比": 1.4, "流通市值": 120.0},
+    ]
+
+    response = provider.latest_fupan()
+
+    assert [section.title for section in response.sections] == ["同花顺解盘"]
+    assert "当日 user 模式匹配个股" not in str(response.model_dump(mode="json"))
 
 
 def test_market_briefing_provider_returns_diagnostics_when_ths_unavailable():
