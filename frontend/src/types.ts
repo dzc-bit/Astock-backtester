@@ -179,7 +179,7 @@ export type MarketCommentaryResponse = {
   updated_at: string;
   trade_date: string;
   source: string;
-  mode?: "intraday" | "lunch_break_review" | "post_close" | "non_trading_review" | "news_fallback";
+  mode?: "intraday" | "lunch_break_review" | "post_close" | "non_trading_review" | "news_fallback" | "local_brief_review";
   stance: "positive" | "neutral" | "defensive";
   summary: string;
   drivers: MarketCommentaryPoint[];

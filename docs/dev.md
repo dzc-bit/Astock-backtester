@@ -135,7 +135,7 @@ For this `D:\New project 6` workspace, prefer the project-local tools when PATH 
 & 'D:\New project 6\.tools\rustup-home\toolchains\stable-x86_64-pc-windows-msvc\bin\cargo.exe' test --manifest-path src-tauri\Cargo.toml
 ```
 
-Keep all upstream market URLs and scraping logic inside backend provider modules. React components should consume structured service responses only. `/coverage/daily-bars` uses the A 股交易日历; do not replace it with plain weekday `freq="B"` logic because legal holidays such as Spring Festival, Qingming, Labor Day and National Day must not appear as missing trade dates.
+Keep all upstream market URLs and scraping logic inside backend provider modules. React components should consume structured service responses only. `/coverage/daily-bars` uses the A 股交易日历; do not replace it with plain weekday `freq="B"` logic because legal holidays such as Spring Festival, Qingming, Labor Day and National Day must not appear as missing trade dates. Version 1.1.1 ships 2024, 2025, and 2026 holiday ranges; refresh `backend/astock_backtester/data/trading_calendar.py` from exchange notices before a later cross-year release.
 
 The app is configured for NSIS bundles. `bundle.useLocalToolsDir` is enabled in `src-tauri\tauri.conf.json`, so Tauri caches NSIS under `src-tauri\target\.tauri` instead of the user profile cache. If the first installer build runs on a network-restricted machine, allow access to Tauri's GitHub binary releases or pre-populate that cache.
 

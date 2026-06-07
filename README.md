@@ -35,6 +35,7 @@ Windows 桌面版 A 股策略回测工具。项目使用 React 构建界面，Ta
 | 回测执行 | `POST /run/backtest/stream` |
 
 实时行情、复盘和候选股保持独立模块：行情宽度在后端 provider 中按同花顺、Sina、Tencent、AKShare、重型公开行情爬虫链路校验，东方财富轻量 spot 只能作为受控备选；同花顺复盘/早盘只展示原文和结构化表格，不拼入 user 模式候选。
+资金流 crawler 纳入 1.1.1 后仍是后端只读 provider 边界：它返回 `main_net_inflow` 行和 failures diagnostics，不直接写本地仓；UI 只看数据中心覆盖和回测结果里的结构化字段。
 
 更完整的设计、接口、数据源和运行配置细节见 [项目说明书.md](./项目说明书.md)。
 
@@ -52,5 +53,6 @@ npm run tauri -- build
 ## 文档
 
 - [项目说明书.md](./项目说明书.md)：完整项目细节、按钮接口映射、行情上游来源、运行配置和清理边界。
+- [docs/pitfall-guide.md](./docs/pitfall-guide.md)：接手避坑清单，覆盖路径、行情、复盘、数据仓、sidecar、发布和探针高风险点。
 - [docs/dev.md](./docs/dev.md)：开发环境和构建补充说明。
 - [docs/release.md](./docs/release.md)：桌面版本发布和更新流程。

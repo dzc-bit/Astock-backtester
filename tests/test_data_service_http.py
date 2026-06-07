@@ -620,10 +620,10 @@ def test_service_realtime_market_snapshot_prefers_ths_concept_page_and_skips_eas
         def json(self):
             return self._payload
 
-    requested_urls = []
+    requested_requests = []
 
     def requester(url, **kwargs):
-        requested_urls.append(url)
+        requested_requests.append((url, kwargs.get("params", {})))
         if "hq.sinajs.cn" in url:
             return FakeResponse(
                 text='var hq_str_sh000001="上证指数,0,100,101,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2026-05-27,10:30:00";'
@@ -652,7 +652,7 @@ def test_service_realtime_market_snapshot_prefers_ths_concept_page_and_skips_eas
         assert response["strong_sectors"][0]["name"] == "电力设备"
         assert response["strong_sectors"][0]["source"] == "ths-concept-section"
         assert "沪市主板" not in [item["name"] for item in response["strong_sectors"]]
-        assert not any("eastmoney.com" in url for url in requested_urls)
+        assert not any("eastmoney.com" in url for url, _ in requested_requests)
     finally:
         server.shutdown()
         thread.join(timeout=5)
@@ -722,7 +722,7 @@ def test_service_realtime_market_snapshot_prefers_ths_concept_quotes_over_indust
         thread.join(timeout=5)
 
 
-def test_service_realtime_market_snapshot_does_not_fall_back_to_eastmoney_concept_api(tmp_path):
+def test_service_realtime_market_snapshot_falls_back_to_eastmoney_sector_api_without_using_it_for_breadth(tmp_path):
     class FakeResponse:
         text = ""
         encoding = "utf-8"
@@ -737,14 +737,29 @@ def test_service_realtime_market_snapshot_does_not_fall_back_to_eastmoney_concep
         def json(self):
             return self._payload
 
-    requested_urls = []
+    requested_requests = []
 
     def requester(url, **kwargs):
-        requested_urls.append(url)
+        requested_requests.append((url, kwargs.get("params", {})))
         if "hq.sinajs.cn" in url:
             return FakeResponse(
                 text='var hq_str_sh000001="上证指数,0,100,101,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2026-06-06,10:30:00";'
             )
+        params = kwargs.get("params", {})
+        fs = str(params.get("fs", ""))
+        if "m:90+t:3" in fs:
+            return FakeResponse(
+                {
+                    "data": {
+                        "diff": [
+                            {"f12": "BK1036", "f14": "半导体", "f3": 2.5, "f128": "688001"},
+                            {"f12": "BK0985", "f14": "机器人概念", "f3": 1.8, "f128": "300024"},
+                        ]
+                    }
+                }
+            )
+        if "m:90+t:2" in fs:
+            return FakeResponse({"data": {"diff": [{"f12": "BK0473", "f14": "电力行业", "f3": 1.2}]}})
         return FakeResponse({"data": {"diff": []}})
 
     server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
@@ -756,11 +771,191 @@ def test_service_realtime_market_snapshot_does_not_fall_back_to_eastmoney_concep
         port = server.server_address[1]
         response = _request_json("GET", f"http://127.0.0.1:{port}/realtime/market-snapshot")
 
-        assert response["strong_sectors"] == []
-        assert not any("eastmoney.com" in url for url in requested_urls)
+        assert response["strong_sectors"][0]["name"] == "半导体"
+        assert response["strong_sectors"][0]["source"] == "eastmoney-sector"
+        assert abs(response["strong_sectors"][0]["change_pct"] - 0.025) < 0.000001
+        assert response["breadth"] is None
+        assert response["message"].endswith("红绿家数暂不可用，未展示全市场宽度。")
+        assert any("eastmoney.com" in url for url, _ in requested_requests)
+        assert not any(
+            "eastmoney.com" in url
+            and params.get("fs") == "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048"
+            for url, params in requested_requests
+        )
     finally:
         server.shutdown()
         thread.join(timeout=5)
+
+
+def test_realtime_provider_retries_eastmoney_sector_hosts_before_giving_up(tmp_path):
+    class FakeResponse:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            return
+
+        def json(self):
+            return self._payload
+
+    requested_urls = []
+
+    def requester(url, **kwargs):
+        requested_urls.append(url)
+        if "push2.eastmoney.com/api/qt/clist/get" in url and "82.push2" not in url:
+            raise OSError("remote disconnected")
+        return FakeResponse(
+            {
+                "data": {
+                    "diff": [
+                        {"f12": "BK1036", "f14": "半导体", "f3": 2.5, "f128": "688001"},
+                    ]
+                }
+            }
+        )
+
+    provider = RealtimeMarketProvider(Warehouse(tmp_path), requester=requester)
+
+    sectors = provider._parse_sector_rows(
+        provider._fetch_eastmoney_sector_rows(["m:90+t:3+f:!50", "m:90+t:3"]),
+        "eastmoney-sector",
+    )
+
+    assert sectors[0].name == "半导体"
+    assert sectors[0].source == "eastmoney-sector"
+    assert any(url.startswith("https://push2.eastmoney.com") for url in requested_urls)
+    assert any(url.startswith("https://82.push2.eastmoney.com") for url in requested_urls)
+
+
+def test_realtime_provider_treats_eastmoney_sub_one_sector_changes_as_percent_units(tmp_path):
+    class FakeResponse:
+        def raise_for_status(self):
+            return
+
+        def json(self):
+            return {
+                "data": {
+                    "diff": [
+                        {"f12": "BK1036", "f14": "半导体", "f3": 0.8, "f128": "688001"},
+                    ]
+                }
+            }
+
+    provider = RealtimeMarketProvider(Warehouse(tmp_path), requester=lambda url, **kwargs: FakeResponse())
+
+    sectors = provider._parse_sector_rows(
+        provider._fetch_eastmoney_sector_rows(["m:90+t:3+f:!50"]),
+        "eastmoney-sector",
+    )
+
+    assert sectors[0].name == "半导体"
+    assert abs(sectors[0].change_pct - 0.008) < 0.000001
+
+
+def test_realtime_provider_bounds_slow_ths_sector_sources_before_eastmoney_fallback(tmp_path):
+    class FakeResponse:
+        text = ""
+        encoding = "utf-8"
+
+        def __init__(self, payload=None):
+            self._payload = payload or {}
+
+        def raise_for_status(self):
+            return
+
+        def json(self):
+            return self._payload
+
+    requested_requests = []
+
+    def requester(url, **kwargs):
+        params = kwargs.get("params", {})
+        requested_requests.append((url, kwargs.get("timeout"), params))
+        if "q.10jqka.com.cn/gn/" in url or "q.10jqka.com.cn/thshy/" in url:
+            raise TimeoutError("ths sector source timed out quickly")
+        if "eastmoney.com/api/qt/clist/get" in url:
+            return FakeResponse(
+                {
+                    "data": {
+                        "diff": [
+                            {"f12": "BK1036", "f14": "半导体", "f3": 2.5, "f128": "688001"},
+                        ]
+                    }
+                }
+            )
+        return FakeResponse({"data": {"diff": []}})
+
+    provider = RealtimeMarketProvider(Warehouse(tmp_path), requester=requester)
+    provider.timeout = 4.0
+    provider.sector_time_budget = 3.0
+
+    sectors = provider._fetch_live_sectors()
+
+    assert sectors[0].source == "eastmoney-sector"
+    ths_timeouts = [
+        timeout
+        for url, timeout, _ in requested_requests
+        if "q.10jqka.com.cn/gn/" in url or "q.10jqka.com.cn/thshy/" in url
+    ]
+    assert ths_timeouts
+    assert max(ths_timeouts) <= 1.0
+    assert not any(
+        "eastmoney.com" in url
+        and params.get("fs") == "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048"
+        for url, _, params in requested_requests
+    )
+
+
+def test_realtime_provider_uses_akshare_sector_fallback_when_eastmoney_sector_unavailable(tmp_path, monkeypatch):
+    class FakeAkshare:
+        def stock_board_concept_name_em(self):
+            return pd.DataFrame(
+                [
+                    {"板块代码": "BK1036", "板块名称": "半导体", "涨跌幅": 2.5, "领涨股票": "688001"},
+                    {"板块代码": "BK0985", "板块名称": "机器人概念", "涨跌幅": 1.8, "领涨股票": "300024"},
+                ]
+            )
+
+        def stock_board_industry_name_em(self):
+            return pd.DataFrame([])
+
+    import sys
+
+    monkeypatch.setitem(sys.modules, "akshare", FakeAkshare())
+    provider = RealtimeMarketProvider(Warehouse(tmp_path))
+    provider._fetch_ths_concept_section_rows = lambda: []
+    provider._fetch_ths_industry_html_rows = lambda: []
+    provider._fetch_eastmoney_sector_rows = lambda fs_values: []
+    provider._fetch_sina_sectors = lambda: []
+
+    sectors = provider._fetch_live_sectors()
+
+    assert sectors[0].name == "半导体"
+    assert sectors[0].source == "akshare-sector"
+    assert abs(sectors[0].change_pct - 0.025) < 0.000001
+
+
+def test_realtime_provider_prefers_sina_sector_before_akshare_fallback(tmp_path, monkeypatch):
+    class FakeAkshare:
+        def stock_board_concept_name_em(self):
+            return pd.DataFrame([{"板块代码": "BK1036", "板块名称": "半导体", "涨跌幅": 9.9}])
+
+        def stock_board_industry_name_em(self):
+            return pd.DataFrame([])
+
+    import sys
+
+    monkeypatch.setitem(sys.modules, "akshare", FakeAkshare())
+    provider = RealtimeMarketProvider(Warehouse(tmp_path))
+    provider._fetch_ths_concept_section_rows = lambda: []
+    provider._fetch_ths_industry_html_rows = lambda: []
+    provider._fetch_eastmoney_sector_rows = lambda fs_values: []
+    provider._fetch_sina_sectors = lambda: [SectorMover(name="机器人行业", change_pct=0.03, source="sina-sector")]
+
+    sectors = provider._fetch_live_sectors()
+
+    assert sectors[0].name == "机器人行业"
+    assert sectors[0].source == "sina-sector"
 
 
 def test_service_realtime_market_snapshot_parses_sub_one_ths_concept_pct_as_percent_unit(tmp_path):
@@ -874,10 +1069,10 @@ def test_service_realtime_market_snapshot_falls_back_to_ths_industry_page_when_c
         def json(self):
             return self._payload
 
-    requested_urls = []
+    requested_requests = []
 
     def requester(url, **kwargs):
-        requested_urls.append(url)
+        requested_requests.append((url, kwargs.get("params", {})))
         if "hq.sinajs.cn" in url:
             return FakeResponse(
                 text='var hq_str_sh000001="上证指数,0,100,101,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2026-05-27,10:30:00";'
@@ -914,7 +1109,11 @@ def test_service_realtime_market_snapshot_falls_back_to_ths_industry_page_when_c
         assert response["strong_sectors"][0]["name"] == "小金属"
         assert response["strong_sectors"][0]["source"] == "ths-industry-html"
         assert "同花顺行业板块总览" in response["message"]
-        assert not any("eastmoney.com" in url for url in requested_urls)
+        assert not any(
+            "eastmoney.com" in url
+            and params.get("fs") == "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048"
+            for url, params in requested_requests
+        )
     finally:
         server.shutdown()
         thread.join(timeout=5)
@@ -935,10 +1134,10 @@ def test_service_realtime_market_snapshot_uses_ths_market_summary_breadth_when_a
         def json(self):
             return self._payload
 
-    requested_urls = []
+    requested_requests = []
 
     def requester(url, **kwargs):
-        requested_urls.append(url)
+        requested_requests.append((url, kwargs.get("params", {})))
         if "hq.sinajs.cn" in url:
             return FakeResponse(
                 text='var hq_str_sh000001="上证指数,0,100,101,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2026-05-27,10:30:00";'
@@ -958,7 +1157,11 @@ def test_service_realtime_market_snapshot_uses_ths_market_summary_breadth_when_a
 
         assert response["breadth"] == {"up": 3210, "down": 1820, "flat": 120, "total": 5150, "source": "ths-market-summary"}
         assert "红绿家数来自同花顺市场总览" in response["message"]
-        assert not any("eastmoney.com" in url for url in requested_urls)
+        assert not any(
+            "eastmoney.com" in url
+            and params.get("fs") == "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048"
+            for url, params in requested_requests
+        )
     finally:
         server.shutdown()
         thread.join(timeout=5)
@@ -1196,10 +1399,10 @@ def test_service_market_fupan_keeps_user_mode_candidates_out_of_briefing(tmp_pat
         def json(self):
             return self._payload
 
-    requested_urls = []
+    requested_requests = []
 
     def requester(url, **kwargs):
-        requested_urls.append(url)
+        requested_requests.append((url, kwargs.get("params", {})))
         if "stock.10jqka.com.cn/fupan/" in url:
             return FakeResponse(
                 text="""
@@ -1223,7 +1426,11 @@ def test_service_market_fupan_keeps_user_mode_candidates_out_of_briefing(tmp_pat
         assert response["source"] == "ths-fupan"
         assert [section["title"] for section in response["sections"]] == ["同花顺解盘"]
         assert "当日 user 模式匹配个股" not in json.dumps(response, ensure_ascii=False)
-        assert not any("eastmoney.com" in url for url in requested_urls)
+        assert not any(
+            "eastmoney.com" in url
+            and params.get("fs") == "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048"
+            for url, params in requested_requests
+        )
     finally:
         server.shutdown()
         thread.join(timeout=5)
@@ -1287,10 +1494,10 @@ def test_service_realtime_market_snapshot_uses_local_breadth_without_eastmoney_w
         def json(self):
             return self._payload
 
-    requested_urls = []
+    requested_requests = []
 
     def requester(url, **kwargs):
-        requested_urls.append(url)
+        requested_requests.append((url, kwargs.get("params", {})))
         if "hq.sinajs.cn" in url:
             return FakeResponse(
                 text='var hq_str_sh000001="上证指数,0,100,101,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2026-05-27,10:30:00";'
@@ -1308,7 +1515,11 @@ def test_service_realtime_market_snapshot_uses_local_breadth_without_eastmoney_w
 
         assert response["breadth"] is None
         assert any("local-latest" in item and "全市场红绿家数不完整" in item for item in response["diagnostics"])
-        assert not any("eastmoney.com" in url for url in requested_urls)
+        assert not any(
+            "eastmoney.com" in url
+            and params.get("fs") == "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048"
+            for url, params in requested_requests
+        )
     finally:
         server.shutdown()
         thread.join(timeout=5)
@@ -1419,10 +1630,10 @@ def test_service_realtime_market_snapshot_tracks_yesterday_strong_sectors_from_l
         def json(self):
             return self._payload
 
-    requested_urls = []
+    requested_requests = []
 
     def requester(url, **kwargs):
-        requested_urls.append(url)
+        requested_requests.append((url, kwargs.get("params", {})))
         if "hq.sinajs.cn" in url:
             return FakeResponse(
                 text='var hq_str_sh000001="上证指数,0,100,101,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2026-05-27,10:30:00";'
@@ -1514,7 +1725,11 @@ def test_service_realtime_market_snapshot_tracks_yesterday_strong_sectors_from_l
         assert response["yesterday_strong_sectors"][0]["name"] == "电力设备"
         assert response["yesterday_strong_sectors"][0]["source"] == "local-yesterday-group"
         assert response["message"].endswith("昨日强势板块追踪来自本地历史。")
-        assert not any("eastmoney.com" in url for url in requested_urls)
+        assert not any(
+            "eastmoney.com" in url
+            and params.get("fs") == "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048"
+            for url, params in requested_requests
+        )
     finally:
         server.shutdown()
         thread.join(timeout=5)
@@ -1937,6 +2152,51 @@ def test_service_market_commentary_uses_configured_provider(tmp_path):
         assert response["source"] == "fake-commentary"
         assert response["stance"] == "positive"
         assert response["drivers"][0]["title"] == "强势题材"
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_service_market_commentary_returns_backend_brief_fallback_when_provider_raises(tmp_path):
+    class BrokenCommentaryProvider:
+        def current_commentary(self):
+            raise TimeoutError("commentary upstream timeout")
+
+    server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
+    server.state.commentary_provider = BrokenCommentaryProvider()
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        response = _request_json("GET", f"http://127.0.0.1:{port}/market/commentary")
+
+        assert response["source"] == "local-brief-commentary"
+        assert response["mode"] == "local_brief_review"
+        assert response["stance"] == "defensive"
+        assert "后端简短判断" in response["summary"]
+        assert "commentary upstream timeout" in response["diagnostics"][0]
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_service_market_commentary_does_not_hide_programming_errors(tmp_path):
+    class BrokenCommentaryProvider:
+        def current_commentary(self):
+            raise AttributeError("bad field access")
+
+    server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
+    server.state.commentary_provider = BrokenCommentaryProvider()
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        try:
+            _request_json("GET", f"http://127.0.0.1:{port}/market/commentary")
+        except Exception as exc:
+            assert "Remote end closed connection" in str(exc) or "bad field access" in str(exc)
+        else:
+            raise AssertionError("programming error was hidden behind commentary fallback")
     finally:
         server.shutdown()
         thread.join(timeout=5)

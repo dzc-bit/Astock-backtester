@@ -171,6 +171,71 @@ def test_coverage_uses_a_share_trading_calendar_for_2026_holidays(tmp_path):
     assert not (missing & {"2026-05-01", "2026-05-04", "2026-05-05"})
 
 
+def test_coverage_uses_a_share_trading_calendar_for_2024_holidays(tmp_path):
+    cache = LocalCache(tmp_path)
+    cache.write_daily_bars(
+        _bars(
+            [
+                ("AAA", "2024-02-08", 10.0, 11.0, 9.0, 10.5, 1000, 0.1, 9_000_000_000.0, 1_500_000.0, False, False, 90),
+                ("AAA", "2024-02-19", 10.5, 11.5, 10.0, 11.0, 1200, 0.1, 9_100_000_000.0, 1_600_000.0, False, False, 91),
+                ("AAA", "2024-04-03", 11.0, 11.8, 10.8, 11.4, 1300, 0.1, 9_200_000_000.0, 1_700_000.0, False, False, 92),
+                ("AAA", "2024-04-08", 11.4, 12.0, 11.2, 11.7, 1400, 0.1, 9_300_000_000.0, 1_800_000.0, False, False, 93),
+                ("AAA", "2024-04-30", 11.7, 12.2, 11.4, 11.9, 1500, 0.1, 9_400_000_000.0, 1_900_000.0, False, False, 94),
+                ("AAA", "2024-05-06", 11.9, 12.4, 11.6, 12.1, 1600, 0.1, 9_500_000_000.0, 2_000_000.0, False, False, 95),
+                ("AAA", "2024-09-14", 12.1, 12.4, 11.9, 12.2, 1600, 0.1, 9_600_000_000.0, 2_100_000.0, False, False, 96),
+                ("AAA", "2024-09-18", 12.2, 12.5, 12.0, 12.3, 1600, 0.1, 9_700_000_000.0, 2_200_000.0, False, False, 97),
+                ("AAA", "2024-09-30", 12.3, 12.6, 12.1, 12.4, 1600, 0.1, 9_800_000_000.0, 2_300_000.0, False, False, 98),
+                ("AAA", "2024-10-08", 12.4, 12.7, 12.2, 12.5, 1600, 0.1, 9_900_000_000.0, 2_400_000.0, False, False, 99),
+            ]
+        )
+    )
+
+    details = build_daily_bars_coverage(
+        cache=cache,
+        symbols=["AAA"],
+        start_date="2024-02-08",
+        end_date="2024-10-08",
+    )
+
+    missing = {day.isoformat() for day in details.items[0].missing_trade_dates}
+    assert not (missing & {"2024-02-09", "2024-02-12", "2024-02-13", "2024-02-14", "2024-02-15", "2024-02-16"})
+    assert not (missing & {"2024-04-04", "2024-04-05"})
+    assert not (missing & {"2024-05-01", "2024-05-02", "2024-05-03"})
+    assert not (missing & {"2024-09-16", "2024-09-17"})
+    assert not (missing & {"2024-10-01", "2024-10-02", "2024-10-03", "2024-10-04", "2024-10-07"})
+
+
+def test_coverage_uses_a_share_trading_calendar_for_2025_holidays(tmp_path):
+    cache = LocalCache(tmp_path)
+    cache.write_daily_bars(
+        _bars(
+            [
+                ("AAA", "2025-01-27", 10.0, 11.0, 9.0, 10.5, 1000, 0.1, 9_000_000_000.0, 1_500_000.0, False, False, 90),
+                ("AAA", "2025-02-05", 10.5, 11.5, 10.0, 11.0, 1200, 0.1, 9_100_000_000.0, 1_600_000.0, False, False, 91),
+                ("AAA", "2025-04-03", 11.0, 11.8, 10.8, 11.4, 1300, 0.1, 9_200_000_000.0, 1_700_000.0, False, False, 92),
+                ("AAA", "2025-04-07", 11.4, 12.0, 11.2, 11.7, 1400, 0.1, 9_300_000_000.0, 1_800_000.0, False, False, 93),
+                ("AAA", "2025-04-30", 11.7, 12.2, 11.4, 11.9, 1500, 0.1, 9_400_000_000.0, 1_900_000.0, False, False, 94),
+                ("AAA", "2025-05-06", 11.9, 12.4, 11.6, 12.1, 1600, 0.1, 9_500_000_000.0, 2_000_000.0, False, False, 95),
+                ("AAA", "2025-09-30", 12.1, 12.4, 11.9, 12.2, 1600, 0.1, 9_600_000_000.0, 2_100_000.0, False, False, 96),
+                ("AAA", "2025-10-09", 12.2, 12.5, 12.0, 12.3, 1600, 0.1, 9_700_000_000.0, 2_200_000.0, False, False, 97),
+            ]
+        )
+    )
+
+    details = build_daily_bars_coverage(
+        cache=cache,
+        symbols=["AAA"],
+        start_date="2025-01-27",
+        end_date="2025-10-09",
+    )
+
+    missing = {day.isoformat() for day in details.items[0].missing_trade_dates}
+    assert not (missing & {"2025-01-28", "2025-01-29", "2025-01-30", "2025-01-31", "2025-02-03", "2025-02-04"})
+    assert not (missing & {"2025-04-04"})
+    assert not (missing & {"2025-05-01", "2025-05-02", "2025-05-05"})
+    assert not (missing & {"2025-10-01", "2025-10-02", "2025-10-03", "2025-10-06", "2025-10-07", "2025-10-08"})
+
+
 def test_fetch_result_reports_partial_success(tmp_path):
     cache = LocalCache(tmp_path)
 

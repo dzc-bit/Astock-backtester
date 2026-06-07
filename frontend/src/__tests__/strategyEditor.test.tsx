@@ -812,6 +812,36 @@ describe("A 股回测工作台界面", () => {
     expect(screen.getByText("12项")).toBeInTheDocument();
   });
 
+  it("labels stale local breadth as non-realtime in the top summary", async () => {
+    apiMocks.loadRealtimeMarketSnapshot.mockResolvedValue({
+      status: "stale",
+      source: "local-latest",
+      updated_at: "2026-05-26T07:30:00Z",
+      indexes: [
+        {
+          symbol: "local-market",
+          name: "本地全市场",
+          last: 12.5,
+          previous_close: 12.3,
+          change: 0.2,
+          change_pct: 0.0162601,
+          source: "local-latest",
+          updated_at: "2026-05-26T07:30:00Z"
+        }
+      ],
+      breadth: { up: 3200, down: 1700, flat: 200, total: 5100, source: "local-latest" },
+      strong_sectors: [{ name: "半导体", change_pct: 0.036, leading_symbol: "688001", source: "local-market-group" }],
+      yesterday_strong_sectors: [],
+      message: "实时行情源暂不可用，已使用本地最近交易日 2026-05-26 数据。",
+      diagnostics: ["已使用本地最近交易日 2026-05-26 作为兜底快照。"]
+    });
+
+    render(<App />);
+
+    expect(await screen.findByText("本地最近交易日/非实时 红盘 3200 / 样本 5100")).toBeInTheDocument();
+    expect(screen.queryByText(/今日实时红盘 3200/)).not.toBeInTheDocument();
+  });
+
   it("shows structured market data and independent commentary after market close", async () => {
     apiMocks.loadRealtimeMarketSnapshot.mockResolvedValue({
       status: "live",

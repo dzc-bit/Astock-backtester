@@ -168,15 +168,18 @@ def test_market_commentary_explains_unavailable_realtime_source_without_crashing
 
     response = MarketCommentaryProvider(BrokenRealtimeProvider(), FakeNewsProvider()).current_commentary()
 
-    assert response.mode == "news_fallback"
+    assert response.mode == "local_brief_review"
     assert response.stance == "defensive"
     assert response.drivers
-    assert response.drivers[0].title == "新闻线索"
-    assert "实时盘面暂不可用，以下仅为新闻线索候选" in response.summary
+    assert response.drivers[0].title == "后端防守判断"
+    assert "后端简短判断" in response.summary
     assert response.risks
-    assert any("实时数据缺失" in item for item in response.risks)
-    assert any("实时盘面暂不可用" in item for item in response.next_watch)
-    assert response.diagnostics == ["行情评价读取实时快照失败：network closed"]
+    assert any("不能把新闻或局部数据包装成确定结论" in item for item in response.risks)
+    assert any("完整红绿家数" in item for item in response.next_watch)
+    assert response.diagnostics == [
+        "行情评价读取实时快照失败：network closed",
+        "后端已生成简短防守判断，避免前端 fallback 或局部数据被包装成确定行情结论。",
+    ]
 
 
 def test_market_commentary_uses_news_tags_when_realtime_snapshot_fails():
@@ -186,18 +189,20 @@ def test_market_commentary_uses_news_tags_when_realtime_snapshot_fails():
 
     response = MarketCommentaryProvider(BrokenRealtimeProvider(), FakeNewsProvider()).current_commentary()
 
-    assert response.mode == "news_fallback"
-    assert response.source == "news-fallback+commentary"
+    assert response.mode == "local_brief_review"
+    assert response.source == "local-brief-commentary"
     assert response.stance == "defensive"
     assert "AI" in response.summary
     assert "算力" in response.summary
     assert len(response.drivers) == 1
-    assert response.drivers[0].title == "新闻线索"
+    assert response.drivers[0].title == "后端防守判断"
     assert "AI" in response.drivers[0].detail
-    assert "候选" in response.drivers[0].detail
-    assert any("盘面确认" in item for item in response.risks)
-    assert any("AI" in item for item in response.next_watch)
-    assert response.diagnostics == ["行情评价读取实时快照失败：snapshot timeout"]
+    assert any("不能把新闻或局部数据包装成确定结论" in item for item in response.risks)
+    assert any("完整红绿家数" in item for item in response.next_watch)
+    assert response.diagnostics == [
+        "行情评价读取实时快照失败：snapshot timeout",
+        "后端已生成简短防守判断，避免前端 fallback 或局部数据被包装成确定行情结论。",
+    ]
 
 
 def test_market_commentary_uses_news_tags_when_realtime_snapshot_is_slow():
@@ -212,10 +217,13 @@ def test_market_commentary_uses_news_tags_when_realtime_snapshot_is_slow():
         snapshot_timeout=0.001,
     ).current_commentary()
 
-    assert response.source == "news-fallback+commentary"
+    assert response.source == "local-brief-commentary"
     assert "AI" in response.summary
-    assert response.drivers[0].title == "新闻线索"
-    assert response.diagnostics == ["行情评价读取实时快照超时：0.001秒"]
+    assert response.drivers[0].title == "后端防守判断"
+    assert response.diagnostics == [
+        "行情评价读取实时快照超时：0.001秒",
+        "后端已生成简短防守判断，避免前端 fallback 或局部数据被包装成确定行情结论。",
+    ]
 
 
 def test_market_commentary_default_snapshot_timeout_allows_longer_realtime_reads():
@@ -248,6 +256,110 @@ def test_market_commentary_uses_fupan_when_realtime_snapshot_is_slow():
     assert not response.summary.startswith("实时盘面暂不可用")
 
 
+def test_market_commentary_labels_market_fallback_briefing_as_public_market_fallback():
+    class BrokenRealtimeProvider:
+        def market_snapshot(self) -> RealtimeMarketSnapshot:
+            raise TimeoutError("snapshot timeout")
+
+    class MarketFallbackFupanProvider:
+        def latest_fupan(self) -> MarketBriefingResponse:
+            return MarketBriefingResponse(
+                kind="fupan",
+                updated_at=datetime(2026, 6, 5, 15, 35, tzinfo=timezone.utc),
+                source="ths-fupan+market-fallback",
+                source_url="https://stock.10jqka.com.cn/fupan/",
+                summary="公开行情回顾：指数震荡，半导体方向保持活跃。",
+                sections=[MarketBriefingSection(title="公开行情回顾", content="半导体涨幅靠前，只作为复盘线索。")],
+                diagnostics=["同花顺复盘读取失败：network closed"],
+            )
+
+    response = MarketCommentaryProvider(
+        BrokenRealtimeProvider(),
+        FakeNewsProvider(),
+        briefing_provider=MarketFallbackFupanProvider(),
+        snapshot_timeout=None,
+    ).current_commentary()
+
+    assert response.source == "ths-fupan+market-fallback+briefing-commentary"
+    assert response.drivers[0].title == "公开行情复盘兜底"
+    assert "公开行情复盘兜底" in response.summary
+    assert any("公开行情复盘兜底" in item for item in response.risks)
+    assert not any("同花顺复盘公开页面" in item for item in response.risks)
+
+
+def test_market_commentary_labels_local_briefing_as_local_brief_review():
+    class BrokenRealtimeProvider:
+        def market_snapshot(self) -> RealtimeMarketSnapshot:
+            raise TimeoutError("snapshot timeout")
+
+    class LocalBriefFupanProvider:
+        def latest_fupan(self) -> MarketBriefingResponse:
+            return MarketBriefingResponse(
+                kind="fupan",
+                updated_at=datetime(2026, 6, 5, 15, 35, tzinfo=timezone.utc),
+                source="ths-fupan+local-brief",
+                source_url="https://stock.10jqka.com.cn/fupan/",
+                summary="本地简短复盘：当前只给防守口径。",
+                sections=[MarketBriefingSection(title="本地简短复盘", content="不包装成确定行情结论。")],
+                diagnostics=["同花顺复盘和公开行情兜底均不可用"],
+            )
+
+    response = MarketCommentaryProvider(
+        BrokenRealtimeProvider(),
+        FakeNewsProvider(),
+        briefing_provider=LocalBriefFupanProvider(),
+        snapshot_timeout=None,
+    ).current_commentary()
+
+    assert response.source == "ths-fupan+local-brief+briefing-commentary"
+    assert response.drivers[0].title == "本地简短复盘"
+    assert "本地简短复盘" in response.summary
+    assert any("本地简短复盘" in item for item in response.risks)
+    assert not any("同花顺复盘公开页面" in item for item in response.risks)
+
+
+def test_market_commentary_builds_backend_brief_review_when_realtime_and_fupan_are_unavailable():
+    class EmptyLiveRealtimeProvider:
+        def market_snapshot(self) -> RealtimeMarketSnapshot:
+            return RealtimeMarketSnapshot(
+                status="unavailable",
+                source="fake-live-empty",
+                updated_at=datetime(2026, 6, 5, 14, 50, tzinfo=timezone.utc),
+                indexes=[],
+                breadth=None,
+                strong_sectors=[],
+                yesterday_strong_sectors=[],
+                message="实时源返回空快照",
+            )
+
+    class EmptyFupanProvider:
+        def latest_fupan(self) -> MarketBriefingResponse:
+            return MarketBriefingResponse(
+                kind="fupan",
+                updated_at=datetime(2026, 6, 5, 15, 35, tzinfo=timezone.utc),
+                source="fallback",
+                source_url=None,
+                summary="",
+                sections=[],
+                diagnostics=["同花顺复盘页面没有可解析正文"],
+            )
+
+    response = MarketCommentaryProvider(
+        EmptyLiveRealtimeProvider(),
+        FakeNewsProvider(),
+        briefing_provider=EmptyFupanProvider(),
+    ).current_commentary()
+
+    assert response.source == "local-brief-commentary"
+    assert response.mode == "local_brief_review"
+    assert response.stance == "defensive"
+    assert "后端简短判断" in response.summary
+    assert "实时盘面和同花顺复盘暂不可用" in response.summary
+    assert response.drivers[0].title == "后端防守判断"
+    assert any("不能把新闻或局部数据包装成确定结论" in item for item in response.risks)
+    assert any("后端已生成简短防守判断" in item for item in response.diagnostics)
+
+
 def test_market_commentary_reports_diagnostic_when_realtime_source_returns_unavailable():
     class UnavailableRealtimeProvider:
         def market_snapshot(self) -> RealtimeMarketSnapshot:
@@ -264,14 +376,15 @@ def test_market_commentary_reports_diagnostic_when_realtime_source_returns_unava
 
     response = MarketCommentaryProvider(UnavailableRealtimeProvider(), FakeNewsProvider()).current_commentary()
 
-    assert response.source == "news-fallback+commentary"
+    assert response.source == "local-brief-commentary"
     assert response.stance == "defensive"
-    assert "实时盘面暂不可用，以下仅为新闻线索候选" in response.summary
+    assert "后端简短判断" in response.summary
     assert "AI" in response.summary
-    assert response.drivers[0].title == "新闻线索"
+    assert response.drivers[0].title == "后端防守判断"
     assert response.diagnostics == [
         "行情评价实时快照不可用：同花顺和东方财富均无可用实时数据",
         "实时盘面不完整：快照状态为 unavailable、缺少指数、缺少红绿家数、缺少强势题材，未生成确定盘面评价。",
+        "后端已生成简短防守判断，避免前端 fallback 或局部数据被包装成确定行情结论。",
     ]
 
 
@@ -307,17 +420,16 @@ def test_market_commentary_does_not_build_definite_view_from_unavailable_snapsho
 
     response = MarketCommentaryProvider(UnavailableWithLocalDataProvider(), FakeNewsProvider()).current_commentary()
 
-    assert response.source == "news-fallback+commentary"
+    assert response.source == "local-brief-commentary"
     assert response.trade_date.isoformat() == "2026-06-05"
     assert response.stance == "defensive"
-    assert "实时盘面暂不可用，以下仅为新闻线索候选" in response.summary
+    assert "后端简短判断" in response.summary
     assert "AI应用" not in response.summary
     assert "红盘 4" not in response.summary
-    assert response.drivers[0].title == "新闻线索"
-    assert "候选" in response.drivers[0].detail
+    assert response.drivers[0].title == "后端防守判断"
     assert not any(point.title == "强势题材" for point in response.drivers)
-    assert any("实时数据缺失" in item for item in response.risks)
-    assert any("恢复实时快照后复核" in item for item in response.next_watch)
+    assert any("不能把新闻或局部数据包装成确定结论" in item for item in response.risks)
+    assert any("完整红绿家数" in item for item in response.next_watch)
     assert response.diagnostics[0] == "行情评价实时快照不可用：实时行情不可用，已使用本地最近交易日数据。"
     assert "快照状态为 unavailable" in response.diagnostics[1]
     assert "红绿家数不完整" in response.diagnostics[1]
@@ -339,13 +451,16 @@ def test_market_commentary_does_not_build_definite_view_from_empty_live_snapshot
 
     response = MarketCommentaryProvider(EmptyLiveRealtimeProvider(), FakeNewsProvider()).current_commentary()
 
-    assert response.source == "news-fallback+commentary"
+    assert response.source == "local-brief-commentary"
     assert response.stance == "defensive"
-    assert "实时盘面暂不可用，以下仅为新闻线索候选" in response.summary
+    assert "后端简短判断" in response.summary
     assert "今日强势题材" not in response.summary
-    assert response.drivers[0].title == "新闻线索"
-    assert any("实时数据缺失" in item for item in response.risks)
-    assert response.diagnostics == ["实时盘面不完整：缺少指数、缺少红绿家数、缺少强势题材，未生成确定盘面评价。"]
+    assert response.drivers[0].title == "后端防守判断"
+    assert any("不能把新闻或局部数据包装成确定结论" in item for item in response.risks)
+    assert response.diagnostics == [
+        "实时盘面不完整：缺少指数、缺少红绿家数、缺少强势题材，未生成确定盘面评价。",
+        "后端已生成简短防守判断，避免前端 fallback 或局部数据被包装成确定行情结论。",
+    ]
 
 
 def test_market_commentary_rejects_live_snapshot_with_partial_breadth_total():
@@ -377,8 +492,8 @@ def test_market_commentary_rejects_live_snapshot_with_partial_breadth_total():
 
     response = MarketCommentaryProvider(PartialBreadthRealtimeProvider(), FakeNewsProvider()).current_commentary()
 
-    assert response.source == "news-fallback+commentary"
-    assert response.mode == "news_fallback"
-    assert "实时盘面暂不可用，以下仅为新闻线索候选" in response.summary
+    assert response.source == "local-brief-commentary"
+    assert response.mode == "local_brief_review"
+    assert "后端简短判断" in response.summary
     assert not any("实时盘面数据完整" in item for item in response.diagnostics)
     assert any("红绿家数不完整" in item for item in response.diagnostics)

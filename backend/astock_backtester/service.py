@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
+import requests
 
 from astock_backtester.data.briefing import MarketBriefingProvider
 from astock_backtester.data.cache import LocalCache
@@ -21,7 +22,7 @@ from astock_backtester.data.operations import (
     import_daily_bars_into_cache,
 )
 from astock_backtester.data.providers import ADataProvider, AkshareProvider, CompositeProvider, HttpAStockProvider
-from astock_backtester.data.market_commentary import MarketCommentaryProvider
+from astock_backtester.data.market_commentary import MarketCommentaryProvider, build_local_brief_commentary
 from astock_backtester.data.news import MarketNewsProvider
 from astock_backtester.data.news_summary import MarketNewsSummaryProvider
 from astock_backtester.data.realtime import RealtimeMarketProvider, unavailable_market_snapshot
@@ -201,7 +202,13 @@ class DataServiceHandler(BaseHTTPRequestHandler):
             self._send_json(news.model_dump(mode="json"))
             return
         if self.path == "/market/commentary":
-            commentary = self.server.state.commentary_provider.current_commentary()
+            try:
+                commentary = self.server.state.commentary_provider.current_commentary()
+            except (TimeoutError, RuntimeError, requests.RequestException) as exc:
+                self.server.state.log("error", f"market commentary failed: {exc}")
+                commentary = build_local_brief_commentary(
+                    diagnostics=[f"行情评价接口失败：{exc}"],
+                )
             self._send_json(commentary.model_dump(mode="json"))
             return
         if self.path == "/market/news-summary":

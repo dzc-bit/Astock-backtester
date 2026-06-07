@@ -38,6 +38,72 @@ def _news_theme_text(news: MarketNewsResponse | None) -> str | None:
     return news.items[0].title
 
 
+def _briefing_basis_label(source: str) -> tuple[str, str, str]:
+    if "local-brief" in source:
+        return (
+            "本地简短复盘",
+            "本地简短复盘只提供防守口径，不含同花顺正文和实时红绿家数校验，盘中使用前需要重新刷新实时行情。",
+            "已用本地简短复盘生成行情评价。",
+        )
+    if "market-fallback" in source:
+        return (
+            "公开行情复盘兜底",
+            "该评价来自公开行情复盘兜底，不含同花顺正文和当前实时红绿家数校验，盘中使用前需要重新刷新实时行情。",
+            "已用公开行情复盘兜底生成行情评价。",
+        )
+    return (
+        "同花顺复盘",
+        "该评价来自同花顺复盘公开页面，不含当前实时红绿家数校验，盘中使用前需要重新刷新实时行情。",
+        "实时盘面读取失败，已用同花顺复盘总评生成行情评价。",
+    )
+
+
+def build_local_brief_commentary(
+    now: datetime | None = None,
+    diagnostics: list[str] | None = None,
+    snapshot: RealtimeMarketSnapshot | None = None,
+    news: MarketNewsResponse | None = None,
+) -> MarketCommentaryResponse:
+    timestamp = now or datetime.now(timezone.utc)
+    trade_date = _today_from_snapshot(snapshot).date() if snapshot is not None else timestamp.date()
+    news_theme = _news_theme_text(news)
+    theme_text = f" 新闻线索集中在 {news_theme}，只作为待验证方向。" if news_theme else ""
+    summary = (
+        "后端简短判断：实时盘面和同花顺复盘暂不可用，当前只给防守口径。"
+        "不要把新闻或局部数据包装成确定结论，先等待红绿家数、指数和强势板块恢复后再确认。"
+        f"{theme_text}"
+    )
+    details = "实时盘面、完整红绿家数和复盘正文均未形成可用依据，当前结论限制为风险控制。"
+    if news_theme:
+        details = f"{details} 新闻线索：{news_theme}。"
+    fallback_diagnostics = list(diagnostics or [])
+    fallback_diagnostics.append("后端已生成简短防守判断，避免前端 fallback 或局部数据被包装成确定行情结论。")
+    return MarketCommentaryResponse(
+        updated_at=timestamp,
+        trade_date=trade_date,
+        source="local-brief-commentary",
+        mode="local_brief_review",
+        stance="defensive",
+        summary=summary,
+        drivers=[
+            MarketCommentaryPoint(
+                title="后端防守判断",
+                detail=details,
+                weight="low",
+            )
+        ],
+        risks=[
+            "不能把新闻或局部数据包装成确定结论；缺少完整红绿家数时，盘面强弱只能等待实时接口或复盘正文恢复后复核。",
+            "若继续刷新仍失败，先保留最近成功内容，避免把空态当作行情变化。",
+        ],
+        next_watch=[
+            "优先恢复 /realtime/market-snapshot 的完整红绿家数与强势板块，再生成盘中评价。",
+            "同花顺复盘恢复后，用复盘正文交叉验证新闻线索和题材榜。",
+        ],
+        diagnostics=fallback_diagnostics,
+    )
+
+
 def _snapshot_missing_reasons(snapshot: RealtimeMarketSnapshot) -> list[str]:
     reasons: list[str] = []
     can_review_stale = snapshot.status == "stale" and snapshot.market_phase in {"post_close", "non_trading", "lunch_break"}
@@ -77,7 +143,7 @@ class MarketCommentaryProvider:
             briefing_commentary = self._briefing_fallback(now, news, diagnostics)
             if briefing_commentary is not None:
                 return briefing_commentary
-            return self._news_fallback(now, news, diagnostics)
+            return build_local_brief_commentary(now, diagnostics, news=news)
 
         diagnostics.extend(snapshot.diagnostics)
 
@@ -91,7 +157,7 @@ class MarketCommentaryProvider:
             briefing_commentary = self._briefing_fallback(now, news, diagnostics, snapshot=snapshot)
             if briefing_commentary is not None:
                 return briefing_commentary
-            return self._news_fallback(now, news, diagnostics, snapshot=snapshot)
+            return build_local_brief_commentary(now, diagnostics, snapshot=snapshot, news=news)
 
         return self._commentary_from_snapshot(now, snapshot, news, diagnostics)
 
@@ -295,16 +361,17 @@ class MarketCommentaryProvider:
         lead_text = basis[:180].rstrip()
         if len(basis) > len(lead_text):
             lead_text = f"{lead_text}..."
+        basis_label, basis_risk, diagnostic_message = _briefing_basis_label(briefing.source)
         if lead_text.startswith("收盘后复盘"):
             summary = lead_text
         else:
-            summary = f"收盘后复盘：实时盘面读取失败，已改用同花顺复盘总评作为公开复盘依据。{lead_text}"
+            summary = f"收盘后复盘：实时盘面读取失败，已改用{basis_label}作为复盘依据。{lead_text}"
         if news_theme:
             summary = f"{summary} 新闻侧重点为 {news_theme}，仅作为辅助线索，不替代复盘正文。"
 
         drivers = [
             MarketCommentaryPoint(
-                title="同花顺复盘",
+                title=basis_label,
                 detail=lead_text,
                 weight="high",
             )
@@ -312,7 +379,7 @@ class MarketCommentaryProvider:
         if news_theme:
             drivers.append(MarketCommentaryPoint(title="新闻催化", detail=f"辅助线索：{news_theme}", weight="medium"))
 
-        diagnostics.append("实时盘面读取失败，已用同花顺复盘总评生成行情评价。")
+        diagnostics.append(diagnostic_message)
         return MarketCommentaryResponse(
             updated_at=now,
             trade_date=(snapshot.updated_at.date() if snapshot is not None else briefing.updated_at.date()),
@@ -322,7 +389,7 @@ class MarketCommentaryProvider:
             summary=summary,
             drivers=drivers,
             risks=[
-                "该评价来自同花顺复盘公开页面，不含当前实时红绿家数校验，盘中使用前需要重新刷新实时行情。",
+                basis_risk,
                 "新闻只作为辅助线索，不能把消息热度包装成确定行情结论。",
             ],
             next_watch=[

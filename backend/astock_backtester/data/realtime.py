@@ -51,6 +51,11 @@ THS_INDUSTRY_DETAIL_URL = "https://q.10jqka.com.cn/thshy/detail/code/{board_code
 THS_HOT_TOPIC_URL = "http://zx.10jqka.com.cn/event/api/getharden/date/{date}/orderby/date/orderway/desc/charset/GBK/"
 TENCENT_QUOTE_URL = "https://qt.gtimg.cn/q={symbols}"
 EASTMONEY_A_SPOT_URL = "https://82.push2.eastmoney.com/api/qt/clist/get"
+EASTMONEY_SECTOR_URLS = [
+    "https://push2.eastmoney.com/api/qt/clist/get",
+    "https://82.push2.eastmoney.com/api/qt/clist/get",
+    "https://29.push2.eastmoney.com/api/qt/clist/get",
+]
 THS_TOPIC_SPLIT_RE = re.compile(r"[+＋/、,，;；|]+")
 THS_BREADTH_RE = re.compile(r"上涨[：:\s]*(\d+)\D+下跌[：:\s]*(\d+)\D+平盘[：:\s]*(\d+)")
 THS_BOARD_CODE_RE = re.compile(r"/code/(\d+)")
@@ -371,6 +376,7 @@ class RealtimeMarketProvider:
     requester: Callable[..., requests.Response] = requests.get
     breadth_time_budget: float = 2.0
     sector_time_budget: float = 3.0
+    sector_source_timeout: float = 0.8
     allow_eastmoney_breadth_fallback: bool = False
     _last_live_sector_rows: list[dict] = field(default_factory=list, init=False, repr=False)
     _sector_member_cache: dict[str, list[str]] = field(default_factory=dict, init=False, repr=False)
@@ -508,6 +514,14 @@ class RealtimeMarketProvider:
                 quotes.append(quote)
         return quotes
 
+    def _sector_request_timeout(self, max_seconds: float | None = None) -> float:
+        timeout = self.sector_source_timeout
+        if self.sector_time_budget is not None:
+            timeout = min(timeout, max(0.2, self.sector_time_budget / 3))
+        if max_seconds is not None:
+            timeout = min(timeout, max_seconds)
+        return min(self.timeout, timeout)
+
     def _fetch_live_sectors(self) -> list[SectorMover]:
         ths_concept_rows = self._fetch_ths_concept_section_rows()
         ths_concept_sectors = self._parse_sector_rows(ths_concept_rows, "ths-concept-section")
@@ -519,10 +533,30 @@ class RealtimeMarketProvider:
         if ths_industry_sectors:
             self._last_live_sector_rows = ths_industry_rows
             return _dedupe_sectors(ths_industry_sectors, 10)
+        eastmoney_concept_rows = self._fetch_eastmoney_sector_rows(["m:90+t:3+f:!50", "m:90+t:3"])
+        eastmoney_concept_sectors = self._parse_sector_rows(eastmoney_concept_rows, "eastmoney-sector")
+        if eastmoney_concept_sectors:
+            self._last_live_sector_rows = eastmoney_concept_rows
+            return _dedupe_sectors(eastmoney_concept_sectors, 10)
+        eastmoney_industry_rows = self._fetch_eastmoney_sector_rows(["m:90+t:2+f:!50", "m:90+t:2"])
+        eastmoney_industry_sectors = self._parse_sector_rows(eastmoney_industry_rows, "eastmoney-industry-sector")
+        if eastmoney_industry_sectors:
+            self._last_live_sector_rows = eastmoney_industry_rows
+            return _dedupe_sectors(eastmoney_industry_sectors, 10)
         sina_sectors = self._fetch_sina_sectors()
         self._last_live_sector_rows = []
         if sina_sectors:
             return _dedupe_sectors(sina_sectors, 10)
+        akshare_concept_rows = self._fetch_akshare_sector_rows("concept")
+        akshare_concept_sectors = self._parse_sector_rows(akshare_concept_rows, "akshare-sector")
+        if akshare_concept_sectors:
+            self._last_live_sector_rows = akshare_concept_rows
+            return _dedupe_sectors(akshare_concept_sectors, 10)
+        akshare_industry_rows = self._fetch_akshare_sector_rows("industry")
+        akshare_industry_sectors = self._parse_sector_rows(akshare_industry_rows, "akshare-industry-sector")
+        if akshare_industry_sectors:
+            self._last_live_sector_rows = akshare_industry_rows
+            return _dedupe_sectors(akshare_industry_sectors, 10)
         ths_hot_topic_rows = self._fetch_ths_hot_topic_rows()
         if ths_hot_topic_rows:
             # Hot-reason rows are useful topic candidates, but their gains are
@@ -779,7 +813,7 @@ class RealtimeMarketProvider:
         if self._heavy_market_provider is None:
             self._heavy_market_provider = HeavyMarketCrawlerProvider(
                 requester=self.requester,
-                timeout=min(self.timeout, 2.5),
+                timeout=min(self.timeout, 1.2),
                 browser_provider=BrowserMarketProvider(timeout=min(self.timeout, 2.5)),
             )
         breadth = self._heavy_market_provider.fetch_breadth()
@@ -837,11 +871,87 @@ class RealtimeMarketProvider:
             return None
         return MarketBreadth(up=up, down=down, flat=flat, total=total, source="eastmoney-a-share-spot")
 
+    def _fetch_eastmoney_sector_rows(self, fs_values: str | list[str]) -> list[dict]:
+        values = [fs_values] if isinstance(fs_values, str) else fs_values
+        for url in EASTMONEY_SECTOR_URLS:
+            for fs in values:
+                payload = self._request_eastmoney_sector_payload(url, fs)
+                rows = payload.get("data", {}).get("diff", []) if isinstance(payload, dict) else []
+                valid = self._normalize_sector_rows(rows)
+                if valid:
+                    return valid
+        return []
+
+    def _request_eastmoney_sector_payload(self, url: str, fs: str) -> dict:
+        try:
+            response = self.requester(
+                url,
+                timeout=self._sector_request_timeout(max_seconds=2.5),
+                headers={"Referer": "https://quote.eastmoney.com/", "User-Agent": "Mozilla/5.0"},
+                params={
+                    "pn": "1",
+                    "pz": "50",
+                    "po": "1",
+                    "np": "1",
+                    "fltt": "2",
+                    "invt": "2",
+                    "fid": "f3",
+                    "fs": fs,
+                    "fields": "f2,f3,f4,f8,f12,f14,f20,f104,f105,f128,f136",
+                },
+            )
+            response.raise_for_status()
+            payload = response.json() or {}
+        except Exception:
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    def _normalize_sector_rows(self, rows: object) -> list[dict]:
+        if not isinstance(rows, list):
+            return []
+        valid: list[dict] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            name = str(row.get("f14") or "").strip()
+            code = str(row.get("f12") or "").strip()
+            if not name or not code:
+                continue
+            if _normalize_sector_change_pct(row) is None:
+                continue
+            row["_change_pct_unit"] = "percent"
+            valid.append(row)
+        return valid
+
+    def _fetch_akshare_sector_rows(self, board_type: str) -> list[dict]:
+        try:
+            import akshare as ak
+
+            if board_type == "concept":
+                frame = ak.stock_board_concept_name_em()
+            else:
+                frame = ak.stock_board_industry_name_em()
+        except Exception:
+            return []
+        if frame is None or getattr(frame, "empty", True):
+            return []
+        rows: list[dict] = []
+        for _, item in frame.head(50).iterrows():
+            row = {
+                "f12": item.get("板块代码") or item.get("代码") or item.get("code") or "",
+                "f14": item.get("板块名称") or item.get("名称") or item.get("name") or "",
+                "f3": item.get("涨跌幅") or item.get("change_pct") or item.get("涨跌幅%") or None,
+                "f128": item.get("领涨股票") or item.get("领涨股") or "",
+            }
+            if _normalize_sector_change_pct(row) is not None and str(row["f14"]).strip():
+                rows.append(row)
+        return rows
+
     def _fetch_sina_sectors(self) -> list[SectorMover]:
         try:
             response = self.requester(
                 "https://vip.stock.finance.sina.com.cn/q/view/newSinaHy.php",
-                timeout=self.timeout,
+                timeout=self._sector_request_timeout(),
                 headers={
                     "Referer": "https://finance.sina.com.cn/",
                     "User-Agent": "Mozilla/5.0",
@@ -899,7 +1009,7 @@ class RealtimeMarketProvider:
             try:
                 response = self.requester(
                     THS_HOT_TOPIC_URL.format(date=target.isoformat()),
-                    timeout=self.timeout,
+                    timeout=self._sector_request_timeout(),
                     headers=THS_HOT_TOPIC_HEADERS,
                 )
                 response.raise_for_status()
@@ -921,7 +1031,7 @@ class RealtimeMarketProvider:
         try:
             response = self.requester(
                 THS_CONCEPT_SECTION_URL,
-                timeout=self.timeout,
+                timeout=self._sector_request_timeout(),
                 headers=THS_HEADERS,
             )
             response.raise_for_status()
@@ -977,7 +1087,7 @@ class RealtimeMarketProvider:
             try:
                 response = self.requester(
                     THS_INDUSTRY_HTML_URL.format(page=page),
-                    timeout=self.timeout,
+                    timeout=self._sector_request_timeout(),
                     headers=THS_HEADERS,
                 )
                 response.raise_for_status()
@@ -1110,6 +1220,10 @@ class RealtimeMarketProvider:
             "ths-hot-reason": "同花顺热点归因",
             "ths-concept-section": "同花顺概念题材板块",
             "ths-industry-html": "同花顺行业板块总览",
+            "eastmoney-sector": "东方财富概念板块备选",
+            "eastmoney-industry-sector": "东方财富行业板块备选",
+            "akshare-sector": "AKShare 概念板块备选",
+            "akshare-industry-sector": "AKShare 行业板块备选",
             "sina-sector": "新浪行业板块",
         }.get(live_sectors[0].source if live_sectors else None)
 

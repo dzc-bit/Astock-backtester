@@ -526,6 +526,11 @@ export function App() {
     beijing: "北交所",
     custom: settings.custom_symbols.length > 0 ? `自选 ${settings.custom_symbols.length} 只` : "自选代码"
   }[settings.stock_pool];
+  const marketBreadthLabel = marketSnapshot?.breadth
+    ? marketSnapshot.status === "live" && !marketSnapshot.breadth.source.startsWith("local")
+      ? `今日实时红盘 ${marketSnapshot.breadth.up} / 全市场 ${marketSnapshot.breadth.total}`
+      : `本地最近交易日/非实时 红盘 ${marketSnapshot.breadth.up} / 样本 ${marketSnapshot.breadth.total}`
+    : `${poolLabel} / 等待实时行情`;
 
   const applySavedStrategy = (preset: SavedStrategyPreset) => {
     setStrategy(cloneStrategyConfig(preset.strategy));
@@ -578,11 +583,7 @@ export function App() {
             <strong>{formatPercent(liveHeatRatio)}</strong>
           </div>
           <Flame size={24} aria-hidden="true" />
-          <small>
-            {marketSnapshot?.breadth
-              ? `今日实时红盘 ${marketSnapshot.breadth.up} / 全市场 ${marketSnapshot.breadth.total}`
-              : `${poolLabel} / 等待实时行情`}
-          </small>
+          <small>{marketBreadthLabel}</small>
         </article>
         <article className="summary-card">
           <div>

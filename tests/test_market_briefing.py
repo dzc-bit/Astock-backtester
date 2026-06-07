@@ -526,6 +526,55 @@ def test_market_briefing_provider_uses_market_fallback_when_ths_page_has_no_sect
     assert any("同花顺复盘页未解析到有效章节" in item for item in response.diagnostics)
 
 
+def test_market_briefing_provider_uses_market_fallback_when_ths_request_fails():
+    def requester(*args, **kwargs):
+        raise RuntimeError("ths blocked")
+
+    def fallback_provider():
+        return [
+            {
+                "title": "公开行情回顾",
+                "content": "同花顺复盘页暂不可用，公开行情显示指数震荡，强势方向仅作为线索。",
+                "links": [{"title": "东方财富行情", "url": "https://quote.eastmoney.com/center/gridlist.html"}],
+                "tables": [
+                    {
+                        "title": "参考指数",
+                        "columns": ["名称", "最新值", "涨跌额", "涨跌幅"],
+                        "rows": [{"名称": "上证指数", "最新值": "3120.00", "涨跌额": "12.50", "涨跌幅": "0.40%"}],
+                    }
+                ],
+            }
+        ]
+
+    response = MarketBriefingProvider(
+        requester=requester,
+        fallback_provider=fallback_provider,
+    ).latest_fupan()
+
+    assert response.source == "ths-fupan+market-fallback"
+    assert response.summary == "同花顺复盘页暂不可用，公开行情显示指数震荡，强势方向仅作为线索。"
+    assert response.sections[0].title == "公开行情回顾"
+    assert response.sections[0].links[0].url == "https://quote.eastmoney.com/center/gridlist.html"
+    assert response.sections[0].tables[0].columns == ["名称", "最新值", "涨跌额", "涨跌幅"]
+    assert response.diagnostics[0] == "同花顺复盘读取失败：ths blocked"
+    assert any("已使用注入的公开行情兜底源生成复盘回顾" in item for item in response.diagnostics)
+
+
+def test_market_briefing_provider_returns_local_brief_section_when_fupan_and_market_fallback_fail():
+    def requester(*args, **kwargs):
+        raise RuntimeError("all sources blocked")
+
+    response = MarketBriefingProvider(requester=requester).latest_fupan()
+
+    assert response.source == "ths-fupan+local-brief"
+    assert response.sections
+    assert response.sections[0].title == "本地简短复盘"
+    assert "只给防守口径" in (response.sections[0].content or "")
+    assert "同花顺复盘读取失败：all sources blocked" in response.diagnostics[0]
+    assert any("Sina 指数兜底失败" in item for item in response.diagnostics)
+    assert any("东方财富 A 股行情兜底失败" in item for item in response.diagnostics)
+
+
 def test_market_briefing_provider_does_not_mix_user_mode_candidates_from_legacy_latest_bars_hook():
     html = """
     <html><body>
@@ -593,7 +642,20 @@ def test_market_briefing_provider_returns_diagnostics_when_ths_unavailable():
     response = MarketBriefingProvider(requester=requester).latest_fupan()
 
     assert response.kind == "fupan"
-    assert response.source == "fallback"
-    assert response.summary == "同花顺复盘暂不可用，已保留复盘评价入口。"
-    assert response.sections == []
-    assert response.diagnostics == ["同花顺复盘读取失败：network closed"]
+    assert response.source == "ths-fupan+local-brief"
+    assert "只给防守口径" in response.summary
+    assert response.sections[0].title == "本地简短复盘"
+    assert response.diagnostics[0] == "同花顺复盘读取失败：network closed"
+    assert any("本地简短防守复盘" in item for item in response.diagnostics)
+
+
+def test_market_briefing_provider_labels_zaopan_fallback_source_when_ths_unavailable():
+    def requester(*args, **kwargs):
+        raise RuntimeError("zaopan blocked")
+
+    response = MarketBriefingProvider(requester=requester).latest_zaopan()
+
+    assert response.kind == "zaopan"
+    assert response.source == "ths-zaopan+fallback"
+    assert response.source_url == "https://stock.10jqka.com.cn/zaopan/"
+    assert response.diagnostics == ["同花顺早盘读取失败：zaopan blocked"]

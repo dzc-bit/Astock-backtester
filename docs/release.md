@@ -21,7 +21,13 @@ New-Item -ItemType Directory -Force "$env:USERPROFILE\.tauri"
 npm run tauri -- signer generate -w "$env:USERPROFILE\.tauri\a-stock-receiver.key"
 ```
 
-当前本机私钥路径：
+当前本机私钥优先路径：
+
+```text
+D:\New project 6\运行产物\签名密钥\a-stock-backtester-v017.key
+```
+
+旧版/备用本机私钥路径：
 
 ```text
 %USERPROFILE%\.tauri\a-stock-receiver.key
@@ -101,7 +107,7 @@ Remove-Item Env:\TAURI_SIGNING_PRIVATE_KEY
 - `src-tauri\target\release\bundle\nsis\*_x64-setup.exe.sig`
 
 `.sig` 文件的内容要写入 `latest.json`，不是把 `.sig` 文件路径写进去。
-如果本机没有 `%USERPROFILE%\.tauri\a-stock-receiver.key` 或对应环境变量，Tauri 仍可能先生成 `.exe`，但会在 updater 签名阶段失败。此时应记录为“安装包构建完成、签名发布阻塞”，而不是把旧 `.sig` 或旧 `latest.json` 当成本次发布资产。
+如果本机没有 `D:\New project 6\运行产物\签名密钥\a-stock-backtester-v017.key`、旧版 `%USERPROFILE%\.tauri\a-stock-receiver.key` 或对应环境变量，Tauri 仍可能先生成 `.exe`，但会在 updater 签名阶段失败。此时应记录为“安装包构建完成、签名发布阻塞”，而不是把旧 `.sig` 或旧 `latest.json` 当成本次发布资产。
 
 ## 安装后 sidecar 验证
 

@@ -352,20 +352,30 @@ mod tests {
     }
 
     #[test]
-    fn populated_legacy_cache_is_used_when_preferred_cache_is_empty() {
-        let root = unique_temp_dir("cache-pick-legacy");
+    fn cache_alias_is_used_only_when_preferred_cache_is_empty() {
+        let root = unique_temp_dir("cache-pick-alias");
         let preferred = root.join("preferred");
-        let legacy = root.join("legacy");
+        let cache_alias = root.join(".astock-cache");
         fs::create_dir_all(&preferred).expect("preferred cache dir should exist");
-        let year_dir = legacy.join("warehouse").join("daily_bars").join("year=2026");
-        fs::create_dir_all(&year_dir).expect("legacy warehouse dir should exist");
-        fs::write(year_dir.join("daily_bars.parquet"), b"legacy-data").expect("legacy parquet should exist");
+        let year_dir = cache_alias.join("warehouse").join("daily_bars").join("year=2026");
+        fs::create_dir_all(&year_dir).expect("cache alias warehouse dir should exist");
+        fs::write(year_dir.join("daily_bars.parquet"), b"alias-data").expect("cache alias parquet should exist");
 
-        let selected = choose_populated_cache_dir(&preferred, &[preferred.clone(), legacy.clone()]);
+        let selected = choose_populated_cache_dir(&preferred, &[preferred.clone(), cache_alias.clone()]);
 
-        assert_eq!(selected, legacy);
+        assert_eq!(selected, cache_alias);
 
         fs::remove_dir_all(&root).expect("temp cache tree should be removed");
+    }
+
+    #[test]
+    fn release_cache_candidates_do_not_include_old_local_data_dir() {
+        let root = std::path::Path::new(r"D:\New project 6");
+        let candidates = workspace_cache_candidates_from_root(root, ".astock-cache");
+
+        assert!(candidates.contains(&root.join("运行产物").join("本地数据仓")));
+        assert!(candidates.contains(&root.join(".astock-cache")));
+        assert!(!candidates.contains(&root.join("运行产物").join("本地数据")));
     }
 
     #[test]

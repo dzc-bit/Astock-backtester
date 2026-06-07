@@ -434,7 +434,7 @@ class MarketBriefingProvider:
             soup = self._fetch_ths_html(THS_FUPAN_URL)
             return self._parse_fupan(soup)
         except Exception as exc:
-            return self._fallback("fupan", THS_FUPAN_URL, f"同花顺复盘读取失败：{exc}")
+            return self._fupan_market_or_local_fallback([f"同花顺复盘读取失败：{exc}"])
 
     def latest_zaopan(self) -> MarketBriefingResponse:
         try:
@@ -541,6 +541,8 @@ class MarketBriefingProvider:
                 expanded_sections = fallback_sections
                 summary = fallback_sections[0].content or "同花顺复盘页暂不可用，已使用公开行情与本地最近交易日生成回顾。"
                 source = "ths-fupan+market-fallback"
+            else:
+                return self._local_brief_fupan(diagnostics)
         return MarketBriefingResponse(
             kind="fupan",
             updated_at=datetime.now(timezone.utc),
@@ -613,11 +615,50 @@ class MarketBriefingProvider:
         return MarketBriefingResponse(
             kind=kind,
             updated_at=datetime.now(timezone.utc),
-            source="fallback",
+            source=f"ths-{kind}+fallback",
             source_url=source_url,
             summary=f"同花顺{label}暂不可用，已保留{label}评价入口。",
             sections=[],
             diagnostics=[diagnostic],
+        )
+
+    def _fupan_market_or_local_fallback(self, diagnostics: list[str]) -> MarketBriefingResponse:
+        fallback_sections, fallback_diagnostics = self._market_fallback_sections()
+        diagnostics.extend(fallback_diagnostics)
+        if fallback_sections:
+            return MarketBriefingResponse(
+                kind="fupan",
+                updated_at=datetime.now(timezone.utc),
+                source="ths-fupan+market-fallback",
+                source_url=THS_FUPAN_URL,
+                summary=fallback_sections[0].content or "同花顺复盘页暂不可用，已使用公开行情生成回顾线索。",
+                sections=fallback_sections,
+                diagnostics=diagnostics,
+            )
+        return self._local_brief_fupan(diagnostics)
+
+    def _local_brief_fupan(self, diagnostics: list[str]) -> MarketBriefingResponse:
+        diagnostics = list(diagnostics)
+        diagnostics.append("同花顺复盘和公开行情兜底均不可用，已生成本地简短防守复盘。")
+        content = (
+            "同花顺结构化复盘暂不可用，公开行情兜底也未形成可用结构。"
+            "当前只给防守口径：不把新闻、局部行情或空页面包装成确定复盘结论；"
+            "等待同花顺正文、指数表或活跃个股表恢复后再确认强势方向。"
+        )
+        section = MarketBriefingSection(
+            title="本地简短复盘",
+            content=content,
+            links=[],
+            tables=[],
+        )
+        return MarketBriefingResponse(
+            kind="fupan",
+            updated_at=datetime.now(timezone.utc),
+            source="ths-fupan+local-brief",
+            source_url=THS_FUPAN_URL,
+            summary=content,
+            sections=[section],
+            diagnostics=diagnostics,
         )
 
     def _market_fallback_sections(self) -> tuple[list[MarketBriefingSection], list[str]]:

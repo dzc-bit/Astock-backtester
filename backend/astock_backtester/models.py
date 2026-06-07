@@ -237,7 +237,14 @@ class MarketCommentaryResponse(BaseModel):
     updated_at: datetime
     trade_date: date
     source: str
-    mode: Literal["intraday", "lunch_break_review", "post_close", "non_trading_review", "news_fallback"] = "intraday"
+    mode: Literal[
+        "intraday",
+        "lunch_break_review",
+        "post_close",
+        "non_trading_review",
+        "news_fallback",
+        "local_brief_review",
+    ] = "intraday"
     stance: Literal["positive", "neutral", "defensive"]
     summary: str
     drivers: list[MarketCommentaryPoint] = Field(default_factory=list)
