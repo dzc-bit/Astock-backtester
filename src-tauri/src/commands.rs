@@ -9,10 +9,87 @@ use tauri::{AppHandle, State};
 use crate::python_runtime::{backend_dir, project_root, python_command};
 use crate::service_manager::{DataServiceManager, DataServiceStatus};
 
+#[derive(serde::Serialize)]
+pub struct WorkspaceDiagnostics {
+    pub project_root: String,
+    pub canonical_project_root: Option<String>,
+    pub current_dir: String,
+    pub runtime_data_dir: String,
+    pub runtime_data_dir_exists: bool,
+    pub cache_alias: String,
+    pub cache_alias_exists: bool,
+    pub cache_alias_canonical: Option<String>,
+    pub cache_alias_points_to_runtime_data: Option<bool>,
+    pub saved_strategies_path: String,
+    pub saved_strategies_exists: bool,
+    pub warnings: Vec<String>,
+}
+
 fn saved_strategies_path_from_root(root: &Path) -> PathBuf {
     root.join("运行产物")
         .join("策略配置")
         .join("saved-strategies.json")
+}
+
+fn runtime_data_dir_from_root(root: &Path) -> PathBuf {
+    root.join("运行产物").join("本地数据仓")
+}
+
+fn cache_alias_from_root(root: &Path) -> PathBuf {
+    root.join(".astock-cache")
+}
+
+fn canonical_string(path: &Path) -> Option<String> {
+    fs::canonicalize(path)
+        .ok()
+        .map(|canonical| canonical.to_string_lossy().to_string())
+}
+
+fn paths_equal(left: &Path, right: &Path) -> Option<bool> {
+    let left = fs::canonicalize(left).ok()?;
+    let right = fs::canonicalize(right).ok()?;
+    Some(left.to_string_lossy().eq_ignore_ascii_case(&right.to_string_lossy()))
+}
+
+fn workspace_diagnostics_from_root(root: &Path, current_dir: &Path) -> Result<WorkspaceDiagnostics, String> {
+    let runtime_data_dir = runtime_data_dir_from_root(root);
+    let cache_alias = cache_alias_from_root(root);
+    let saved_strategies_path = saved_strategies_path_from_root(root);
+    let runtime_data_dir_exists = runtime_data_dir.exists();
+    let cache_alias_exists = cache_alias.exists();
+    let cache_alias_points_to_runtime_data = if cache_alias_exists && runtime_data_dir_exists {
+        paths_equal(&cache_alias, &runtime_data_dir)
+    } else {
+        None
+    };
+    let mut warnings = Vec::new();
+    if !runtime_data_dir_exists {
+        warnings.push(format!(
+            "runtime data directory is missing: {}",
+            runtime_data_dir.display()
+        ));
+    }
+    if cache_alias_exists && cache_alias_points_to_runtime_data == Some(false) {
+        warnings.push(format!(
+            "cache alias does not point to runtime data directory: {}",
+            cache_alias.display()
+        ));
+    }
+
+    Ok(WorkspaceDiagnostics {
+        project_root: root.to_string_lossy().to_string(),
+        canonical_project_root: canonical_string(root),
+        current_dir: current_dir.to_string_lossy().to_string(),
+        runtime_data_dir: runtime_data_dir.to_string_lossy().to_string(),
+        runtime_data_dir_exists,
+        cache_alias: cache_alias.to_string_lossy().to_string(),
+        cache_alias_exists,
+        cache_alias_canonical: canonical_string(&cache_alias),
+        cache_alias_points_to_runtime_data,
+        saved_strategies_path: saved_strategies_path.to_string_lossy().to_string(),
+        saved_strategies_exists: saved_strategies_path.exists(),
+        warnings,
+    })
 }
 
 fn read_saved_strategies_from(root: &Path) -> Result<Value, String> {
@@ -98,9 +175,19 @@ pub fn persist_saved_strategies(items: Value) -> Result<(), String> {
     write_saved_strategies_to(&root, &items)
 }
 
+#[tauri::command]
+pub fn workspace_diagnostics() -> Result<WorkspaceDiagnostics, String> {
+    let root = project_root()?;
+    let current_dir = std::env::current_dir().map_err(|err| format!("failed to read current dir: {err}"))?;
+    workspace_diagnostics_from_root(&root, &current_dir)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{read_saved_strategies_from, saved_strategies_path_from_root, write_saved_strategies_to};
+    use super::{
+        read_saved_strategies_from, saved_strategies_path_from_root, workspace_diagnostics_from_root,
+        write_saved_strategies_to,
+    };
     use serde_json::json;
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -147,5 +234,40 @@ mod tests {
         assert_eq!(stored, payload);
 
         fs::remove_dir_all(root).expect("temp strategy config tree should be removed");
+    }
+
+    #[test]
+    fn workspace_diagnostics_report_runtime_paths_under_project_root() {
+        let root = unique_temp_dir("workspace-diagnostics");
+        let runtime_data_dir = root.join("运行产物").join("本地数据仓");
+        let strategy_dir = root.join("运行产物").join("策略配置");
+        fs::create_dir_all(&runtime_data_dir).expect("runtime data dir should exist");
+        fs::create_dir_all(&strategy_dir).expect("strategy dir should exist");
+
+        let diagnostics = workspace_diagnostics_from_root(&root, &root)
+            .expect("workspace diagnostics should be built");
+
+        assert_eq!(diagnostics.project_root, root.to_string_lossy());
+        assert!(diagnostics.runtime_data_dir.ends_with(r"运行产物\本地数据仓"));
+        assert!(diagnostics.runtime_data_dir_exists);
+        assert!(diagnostics.cache_alias.ends_with(".astock-cache"));
+        assert!(diagnostics.saved_strategies_path.ends_with(r"运行产物\策略配置\saved-strategies.json"));
+        assert!(diagnostics.warnings.is_empty());
+
+        fs::remove_dir_all(root).expect("temp workspace tree should be removed");
+    }
+
+    #[test]
+    fn workspace_diagnostics_warn_when_runtime_data_dir_is_missing() {
+        let root = unique_temp_dir("workspace-diagnostics-missing-data");
+        fs::create_dir_all(&root).expect("temp workspace root should exist");
+
+        let diagnostics = workspace_diagnostics_from_root(&root, &root)
+            .expect("workspace diagnostics should still be built");
+
+        assert!(!diagnostics.runtime_data_dir_exists);
+        assert!(diagnostics.warnings.iter().any(|item| item.contains("runtime data directory")));
+
+        fs::remove_dir_all(root).expect("temp workspace tree should be removed");
     }
 }

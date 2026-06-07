@@ -38,7 +38,7 @@ npm run tauri -- signer generate -w "$env:USERPROFILE\.tauri\a-stock-receiver.ke
 
 如果私钥丢失，已经安装的带更新器版本无法校验新密钥签出的更新包。除非有计划地做一次迁移发布，否则不要轮换密钥。
 
-本次 `v0.1.7` 就属于一次计划内迁移发布：旧私钥已不可用，因此 `v0.1.6` 用户需要手动安装 `v0.1.7`。从 `v0.1.7` 开始，后续版本恢复为正常的应用内更新流程。
+历史上如果旧私钥不可用，需要做一次计划内迁移发布：旧版用户必须手动安装新的 NSIS 安装包，之后才能重新走应用内更新。除非明确安排迁移，不要轮换更新私钥。
 
 ## 版本号
 
@@ -52,7 +52,7 @@ npm run tauri -- signer generate -w "$env:USERPROFILE\.tauri\a-stock-receiver.ke
 Git tag 使用 `v版本号`，例如：
 
 ```text
-v0.1.1
+v1.1.0
 ```
 
 ## Release Order
@@ -60,11 +60,14 @@ v0.1.1
 1. Bump `package.json`, `pyproject.toml`, `src-tauri/Cargo.toml`, and `src-tauri/tauri.conf.json` to the same version.
 2. Build the sidecar with `scripts/build-data-service.ps1`.
 3. Build the signed NSIS installer.
-4. Generate `release-assets/latest.json` with `scripts/write-latest-json.ps1`.
-5. Create the GitHub Release and upload the installer plus `latest.json`.
-6. Verify `https://github.com/dzc-bit/Astock-backtester/releases/latest/download/latest.json` returns the new version.
+4. Confirm the installer contains the latest `src-tauri\bin\astock-data-service.exe`; for a same-version local reinstall, also verify the installed `bin\astock-data-service.exe` was actually overwritten.
+5. Generate a fresh `latest.json` with `scripts/write-latest-json.ps1` from the real `.sig`.
+6. Create the GitHub Release and upload the installer plus the freshly generated `latest.json`.
+7. Verify `https://github.com/dzc-bit/Astock-backtester/releases/latest/download/latest.json` returns the new version.
 
-`latest.json` must be generated from the real `.sig` file produced next to the installer. Do not hand-edit a future version into `release-assets/latest.json` before the installer and signature exist, because the app updater verifies that signature.
+`latest.json` must be generated from the real `.sig` file produced next to the installer. Do not hand-edit a future version into `release-assets/latest.json` before the installer and signature exist, because the app updater verifies that signature. The `release-assets` directory is ignored by Git; treat files there as local staging artifacts and upload the verified `latest.json` to the GitHub Release instead of keeping stale updater manifests in the repository.
+
+If `npm run tauri -- build --ci` creates the NSIS `.exe` but exits with `A public key has been found, but no private key`, the local installer can be used for manual installation checks only. Do not upload that installer as an updater release, do not reuse an older `.sig`, and do not regenerate `latest.json` until `TAURI_SIGNING_PRIVATE_KEY` is available and the matching `.sig` is produced by the same build.
 
 ## Build The Local Data Service Sidecar
 
@@ -98,6 +101,7 @@ Remove-Item Env:\TAURI_SIGNING_PRIVATE_KEY
 - `src-tauri\target\release\bundle\nsis\*_x64-setup.exe.sig`
 
 `.sig` 文件的内容要写入 `latest.json`，不是把 `.sig` 文件路径写进去。
+如果本机没有 `%USERPROFILE%\.tauri\a-stock-receiver.key` 或对应环境变量，Tauri 仍可能先生成 `.exe`，但会在 updater 签名阶段失败。此时应记录为“安装包构建完成、签名发布阻塞”，而不是把旧 `.sig` 或旧 `latest.json` 当成本次发布资产。
 
 ## GitHub Release 资产
 
@@ -107,17 +111,21 @@ Remove-Item Env:\TAURI_SIGNING_PRIVATE_KEY
 - `latest.json`
 
 `latest.json` 必须以这个文件名上传，因为应用配置固定读取 `releases/latest/download/latest.json`。
+安装包上传到 GitHub Release 时使用 ASCII 资产名，例如 `Astock-backtester_1.1.0_x64-setup.exe`；
+`latest.json.platforms.windows-x86_64.url` 必须指向这个真实资产名。保留本地中文安装包文件名可以用于归档，但不要让 updater 指向 GitHub 自动转写后的乱码资产名。
 
 ## latest.json
 
 用发布版本、安装包 URL 和签名内容生成 `latest.json`：
 
 ```powershell
-$assetName = "A股策略回测工作台_0.1.1_x64-setup.exe"
+$assetName = "A股策略回测工作台_1.1.0_x64-setup.exe"
+$releaseAssetName = "Astock-backtester_1.1.0_x64-setup.exe"
 powershell -ExecutionPolicy Bypass -File scripts/write-latest-json.ps1 `
-  -Version "0.1.1" `
+  -Version "1.1.0" `
   -AssetName $assetName `
-  -Notes "新增本地数据服务与数据中心缺口补数。"
+  -ReleaseAssetName $releaseAssetName `
+  -Notes "发布行情无感刷新、复盘/早盘全文、策略命中展示、回测口径校准与桌面更新增强。"
 ```
 
 不要提前加入 macOS 或 Linux 平台字段。静态 JSON 会被 updater 整体解析，只有真实可用的平台资产才应该写入。

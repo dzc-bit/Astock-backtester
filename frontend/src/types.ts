@@ -98,15 +98,28 @@ export type SectorMover = {
   source: string;
 };
 
+export type MarketSessionPhase = "trading" | "pre_open" | "lunch_break" | "post_close" | "non_trading";
+
+export type MarketRefreshMeta = {
+  phase: MarketSessionPhase;
+  status: "idle" | "refreshing" | "using_last_success" | "unavailable";
+  message: string;
+  last_success_at?: string | null;
+  last_error?: string | null;
+  next_refresh_ms: number;
+};
+
 export type RealtimeMarketSnapshot = {
   status: "live" | "stale" | "unavailable";
   source: string;
   updated_at: string;
+  market_phase?: MarketSessionPhase;
   indexes: MarketIndexQuote[];
   breadth?: MarketBreadth | null;
   strong_sectors: SectorMover[];
   yesterday_strong_sectors?: SectorMover[];
   message: string;
+  diagnostics?: string[];
 };
 
 export type MarketNewsItem = {
@@ -123,6 +136,7 @@ export type MarketNewsResponse = {
   updated_at: string;
   source: string;
   items: MarketNewsItem[];
+  diagnostics?: string[];
 };
 
 export type MarketBriefingLink = {
@@ -149,9 +163,46 @@ export type MarketBriefingResponse = {
   kind: "fupan" | "zaopan";
   updated_at: string;
   source: string;
-  source_url: string;
+  source_url?: string | null;
   summary: string;
   sections: MarketBriefingSection[];
+  diagnostics: string[];
+};
+
+export type MarketCommentaryPoint = {
+  title: string;
+  detail: string;
+  weight: "high" | "medium" | "low";
+};
+
+export type MarketCommentaryResponse = {
+  updated_at: string;
+  trade_date: string;
+  source: string;
+  mode?: "intraday" | "lunch_break_review" | "post_close" | "non_trading_review" | "news_fallback";
+  stance: "positive" | "neutral" | "defensive";
+  summary: string;
+  drivers: MarketCommentaryPoint[];
+  risks: string[];
+  next_watch: string[];
+  diagnostics: string[];
+};
+
+export type NewsSummaryTheme = {
+  title: string;
+  summary: string;
+  sentiment: "positive" | "neutral" | "negative";
+  source_count: number;
+  headlines: string[];
+};
+
+export type NewsSummaryResponse = {
+  updated_at: string;
+  source: string;
+  item_count: number;
+  themes: NewsSummaryTheme[];
+  highlights: string[];
+  risks: string[];
   diagnostics: string[];
 };
 
@@ -210,6 +261,8 @@ export type BacktestSettingsConfig = {
   stop_loss_pct: number | null;
   max_positions: number;
   max_daily_buys: number;
+  limit_up_blocks_buy?: boolean;
+  limit_down_blocks_sell?: boolean;
   fee_rate: number;
   stamp_tax_rate: number;
   slippage_rate: number;
@@ -252,14 +305,35 @@ export type Trade = {
   actual_position_pct: number;
   buy_reason: string[];
   sell_reason: string[];
+  blocked_reason: string | null;
   pnl?: number | null;
   pnl_pct?: number | null;
+};
+
+export type MatchedStock = {
+  symbol: string;
+  name?: string | null;
+  close?: number | null;
+  change?: number | null;
+  change_pct?: number | null;
+  reasons: string[];
+  signal_date?: string | null;
+  trade_date?: string | null;
+  rank_score?: number | null;
+};
+
+export type DailyStrategyMatches = {
+  signal_date: string;
+  trade_date: string;
+  matches: MatchedStock[];
 };
 
 export type BacktestResult = {
   metrics: BacktestMetrics;
   equity_curve: EquityPoint[];
   trades: Trade[];
+  latest_strategy_matches?: DailyStrategyMatches | null;
+  matched_stocks?: MatchedStock[];
   preflight_issues: Array<{ code: string; message: string; severity: "warning" | "error"; dataset?: string | null }>;
 };
 

@@ -203,6 +203,14 @@ fn should_use_packaged_service(packaged_service_exists: bool) -> bool {
     packaged_service_exists && !cfg!(debug_assertions)
 }
 
+fn stop_child_after_start_failure<T>(child: &mut Child, message: String) -> Result<T, String> {
+    if child.try_wait().map_err(|err| format!("{message}; failed to inspect child: {err}"))?.is_none() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    Err(message)
+}
+
 impl DataServiceManager {
     pub fn ensure_running(&mut self, app: &AppHandle, cache_dir: &str) -> Result<DataServiceStatus, String> {
         let resolved_cache_dir = resolve_cache_dir(cache_dir)?;
@@ -238,10 +246,12 @@ impl DataServiceManager {
             return Err("packaged localhost data service was not found".to_string());
         };
         command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped());
-        let child = command
+        let mut child = command
             .spawn()
             .map_err(|err| format!("failed to start localhost data service: {err}"))?;
-        wait_for_health(port)?;
+        if let Err(err) = wait_for_health(port) {
+            return stop_child_after_start_failure(&mut child, err);
+        }
         self.service = Some(ManagedService {
             child,
             port,
@@ -261,10 +271,11 @@ impl DataServiceManager {
 mod tests {
     use super::{
         build_service_args, choose_populated_cache_dir, health_request, packaged_service_relative_path,
-        runtime_data_candidates_from, workspace_cache_candidates_from_root,
+        stop_child_after_start_failure, runtime_data_candidates_from, workspace_cache_candidates_from_root,
         should_use_packaged_service,
     };
     use std::fs;
+    use std::process::{Command, Stdio};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn unique_temp_dir(name: &str) -> std::path::PathBuf {
@@ -375,5 +386,27 @@ mod tests {
         assert_eq!(selected, preferred);
 
         fs::remove_dir_all(&root).expect("temp cache tree should be removed");
+    }
+
+    #[test]
+    fn stop_child_after_start_failure_terminates_spawned_process() {
+        let mut child = Command::new("cmd")
+            .args(["/C", "ping -n 30 127.0.0.1 > nul"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("test child process should start");
+
+        let child_id = child.id();
+        let result: Result<(), String> = stop_child_after_start_failure(&mut child, "health failed".to_string());
+
+        assert_eq!(result.unwrap_err(), "health failed");
+        let status = Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {child_id}")])
+            .output()
+            .expect("tasklist should run");
+        let raw = String::from_utf8_lossy(&status.stdout);
+        assert!(!raw.contains(&child_id.to_string()));
     }
 }

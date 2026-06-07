@@ -1,4 +1,4 @@
-import { act, render, screen } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "../App";
@@ -10,7 +10,10 @@ const apiMocks = vi.hoisted(() => ({
   loadDataServiceHealth: vi.fn(),
   loadDataServiceLogs: vi.fn(),
   loadDailyBarsCoverage: vi.fn(),
+  loadMarketBriefing: vi.fn(),
+  loadMarketCommentary: vi.fn(),
   loadMarketNews: vi.fn(),
+  loadNewsSummary: vi.fn(),
   loadRealtimeMarketSnapshot: vi.fn(),
   loadRecommendedStrategies: vi.fn(),
   loadRiskAlerts: vi.fn(),
@@ -143,6 +146,46 @@ describe("A 股回测工作台界面", () => {
           sentiment: "positive"
         }
       ]
+    });
+    apiMocks.loadMarketBriefing.mockImplementation((_baseUrl, kind) =>
+      Promise.resolve({
+        kind,
+        updated_at: "2026-05-27T10:30:00Z",
+        source: kind === "fupan" ? "ths-fupan" : "ths-zaopan",
+        source_url:
+          kind === "fupan" ? "https://stock.10jqka.com.cn/fupan/" : "https://stock.10jqka.com.cn/zaopan/",
+        summary: kind === "fupan" ? "同花顺复盘摘要" : "同花顺早盘摘要",
+        sections: [],
+        diagnostics: []
+      })
+    );
+    apiMocks.loadMarketCommentary.mockResolvedValue({
+      updated_at: "2026-05-27T10:30:00Z",
+      trade_date: "2026-05-27",
+      source: "test-commentary",
+      stance: "neutral",
+      summary: "指数震荡偏强，但赚钱效应集中在少数主线。",
+      drivers: [{ title: "强势题材", detail: "半导体+3.60%，电力设备+2.40%。", weight: "high" }],
+      risks: ["量能不足时避免追高。"],
+      next_watch: ["明日先看半导体能否继续放量。"],
+      diagnostics: []
+    });
+    apiMocks.loadNewsSummary.mockResolvedValue({
+      updated_at: "2026-05-27T10:30:00Z",
+      source: "test-summary",
+      item_count: 1,
+      themes: [
+        {
+          title: "科技",
+          summary: "科技方向消息集中。",
+          sentiment: "positive",
+          source_count: 1,
+          headlines: ["政策利好推动科技板块走强"]
+        }
+      ],
+      highlights: ["政策利好推动科技板块走强"],
+      risks: ["高位题材分化加快。"],
+      diagnostics: []
     });
     apiMocks.loadRiskAlerts.mockResolvedValue({
       updated_at: "2026-05-27T10:30:00Z",
@@ -329,10 +372,10 @@ describe("A 股回测工作台界面", () => {
     expect(await screen.findByText("上证指数")).toBeInTheDocument();
     expect(screen.getByText("红 3200")).toBeInTheDocument();
     expect(screen.getByText("绿 1700")).toBeInTheDocument();
-    expect(screen.getByText(/行情评价/)).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "行情评价" })).toBeInTheDocument();
     expect(screen.getAllByText("半导体").length).toBeGreaterThan(0);
     expect(await screen.findByRole("heading", { name: "资讯与事件" })).toBeInTheDocument();
-    expect(screen.getByText("政策利好推动科技板块走强")).toBeInTheDocument();
+    expect(screen.getAllByText("政策利好推动科技板块走强").length).toBeGreaterThan(0);
     expect(await screen.findByText("日线行情")).toBeInTheDocument();
   });
 
@@ -653,6 +696,54 @@ describe("A 股回测工作台界面", () => {
     expect(await screen.findByText("交易次数 1")).toBeInTheDocument();
   });
 
+  it("keeps blocked trade reasons from the stream after the final backtest result", async () => {
+    const user = userEvent.setup();
+    let emitBlocked: (() => void) | null = null;
+    let finish: (() => void) | null = null;
+    const blockedTrade = {
+      ...demoResult.trades[0],
+      shares: 0,
+      buy_amount: 0,
+      actual_position_pct: 0,
+      sell_date: null,
+      sell_price: null,
+      sell_amount: null,
+      pnl: null,
+      pnl_pct: null,
+      blocked_reason: "次日开盘接近涨停，未买入：AAA"
+    };
+    apiMocks.runBacktestStreamWithDataService.mockImplementation(
+      (_baseUrl, _strategy, _settings, handlers) =>
+        new Promise((resolve) => {
+          handlers.onPhase("校验参数");
+          emitBlocked = () => handlers.onTrade(blockedTrade);
+          finish = () => {
+            handlers.onResult({ ...demoResult, trades: [] });
+            resolve({ ...demoResult, trades: [] });
+          };
+        })
+    );
+
+    render(<App />);
+    await screen.findByText("日线行情");
+    await user.click(screen.getByRole("button", { name: "运行历史回测" }));
+    await waitFor(() => {
+      expect(apiMocks.runBacktestStreamWithDataService).toHaveBeenCalled();
+      expect(emitBlocked).not.toBeNull();
+    });
+
+    act(() => {
+      emitBlocked?.();
+    });
+    expect(await screen.findByText("次日开盘接近涨停，未买入：AAA")).toBeInTheDocument();
+
+    act(() => {
+      finish?.();
+    });
+    expect(await screen.findByText("回测完成，已生成收益曲线和交易明细。")).toBeInTheDocument();
+    expect(screen.getByText("次日开盘接近涨停，未买入：AAA")).toBeInTheDocument();
+  });
+
   it("uses editable funding and matching inputs with examples instead of fixed selectors", async () => {
     render(<App />);
 
@@ -721,10 +812,10 @@ describe("A 股回测工作台界面", () => {
     expect(screen.getByText("12项")).toBeInTheDocument();
   });
 
-  it("shows a deterministic closing sector review after market close", async () => {
+  it("shows structured market data and independent commentary after market close", async () => {
     apiMocks.loadRealtimeMarketSnapshot.mockResolvedValue({
       status: "live",
-      source: "ashare-sina+local+eastmoney-sector",
+      source: "ashare-sina+local+ths-concept-section",
       updated_at: "2026-05-27T07:30:00Z",
       indexes: [
         {
@@ -740,8 +831,8 @@ describe("A 股回测工作台界面", () => {
       ],
       breadth: { up: 3200, down: 1700, flat: 200, total: 5100, source: "local-latest" },
       strong_sectors: [
-        { name: "半导体", change_pct: 0.036, leading_symbol: "688001", source: "eastmoney-sector" },
-        { name: "电力设备", change_pct: 0.024, leading_symbol: "300750", source: "eastmoney-sector" }
+        { name: "半导体", change_pct: 0.036, leading_symbol: "688001", source: "ths-concept-section" },
+        { name: "电力设备", change_pct: 0.024, leading_symbol: "300750", source: "ths-concept-section" }
       ],
       yesterday_strong_sectors: [],
       message: "实时行情已更新"
@@ -749,14 +840,28 @@ describe("A 股回测工作台界面", () => {
 
     render(<App />);
 
-    expect(await screen.findByText(/收盘后板块解读/)).toBeInTheDocument();
-    expect(screen.getByText(/半导体\+3\.60%/)).toBeInTheDocument();
+    expect(await screen.findByText("行情评价")).toBeInTheDocument();
+    expect(await screen.findByText("指数震荡偏强，但赚钱效应集中在少数主线。")).toBeInTheDocument();
+    expect(screen.getAllByText(/半导体\+3\.60%/).length).toBeGreaterThan(0);
+    expect(screen.queryByText(/收盘后板块解读/)).not.toBeInTheDocument();
+  });
+
+  it("shows defensive market commentary when the commentary API fails", async () => {
+    apiMocks.loadMarketCommentary.mockRejectedValue(new Error("commentary upstream timeout"));
+
+    render(<App />);
+
+    const panel = await screen.findByRole("region", { name: "行情评价" });
+    await waitFor(() => expect(panel).toHaveTextContent("防守"));
+    expect(panel).toHaveTextContent("实时盘面暂不可用");
+    expect(panel).toHaveTextContent("依据不完整");
+    expect(panel).toHaveTextContent("行情评价接口失败：commentary upstream timeout");
   });
 
   it("tracks yesterday's strong sectors in the market panel and commentary", async () => {
     apiMocks.loadRealtimeMarketSnapshot.mockResolvedValue({
       status: "live",
-      source: "ashare-sina+local+eastmoney-sector+local-yesterday-group",
+      source: "ashare-sina+local+ths-concept-section+local-yesterday-group",
       updated_at: "2026-05-27T02:30:00Z",
       indexes: [
         {
@@ -772,8 +877,8 @@ describe("A 股回测工作台界面", () => {
       ],
       breadth: { up: 3200, down: 1700, flat: 200, total: 5100, source: "local-latest" },
       strong_sectors: [
-        { name: "半导体", change_pct: 0.036, leading_symbol: "688001", source: "eastmoney-sector" },
-        { name: "电力设备", change_pct: 0.024, leading_symbol: "300750", source: "eastmoney-sector" }
+        { name: "半导体", change_pct: 0.036, leading_symbol: "688001", source: "ths-concept-section" },
+        { name: "电力设备", change_pct: 0.024, leading_symbol: "300750", source: "ths-concept-section" }
       ],
       yesterday_strong_sectors: [
         { name: "机器人", change_pct: 0.041, leading_symbol: "300024", source: "local-yesterday-group" },
@@ -781,12 +886,23 @@ describe("A 股回测工作台界面", () => {
       ],
       message: "实时行情已更新；昨日强势板块追踪来自本地历史。"
     });
+    apiMocks.loadMarketCommentary.mockResolvedValue({
+      updated_at: "2026-05-27T10:30:00Z",
+      trade_date: "2026-05-27",
+      source: "test-commentary",
+      stance: "neutral",
+      summary: "昨日强势延续：机器人仍在榜，说明资金没有完全散场。",
+      drivers: [{ title: "昨日强势延续", detail: "机器人、半导体继续在观察名单。", weight: "medium" }],
+      risks: ["旧热点承接不足时不要追高。"],
+      next_watch: ["明日先看机器人能否继续放量。"],
+      diagnostics: []
+    });
 
     render(<App />);
 
     expect(await screen.findByText("昨日强势追踪")).toBeInTheDocument();
-    expect(await screen.findByText(/机器人/)).toBeInTheDocument();
-    expect(await screen.findByText(/昨日强势延续/)).toBeInTheDocument();
+    expect((await screen.findAllByText(/机器人/)).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText(/昨日强势延续/)).length).toBeGreaterThan(0);
     expect(screen.getAllByText(/半导体/).length).toBeGreaterThan(0);
   });
 
@@ -889,9 +1005,9 @@ describe("A 股回测工作台界面", () => {
     );
   });
 
-  it("asks to save the strategy after entry and exit rules run successfully, then stores it in 策略配置", async () => {
+  it("offers an inline save action after entry and exit rules run successfully, then stores it in 策略配置", async () => {
     const user = userEvent.setup();
-    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const confirmSpy = vi.spyOn(window, "confirm");
     const savedName = "市场热度 + 市值量价筛选";
     render(<App />);
 
@@ -910,7 +1026,10 @@ describe("A 股回测工作台界面", () => {
 
     await user.click(screen.getByRole("button", { name: "运行历史回测" }));
 
-    expect(confirmSpy).toHaveBeenCalledWith("当前入场规则和离场规则已成功运行回测，是否保存到策略配置？");
+    expect(confirmSpy).not.toHaveBeenCalled();
+    expect(await screen.findByText("回测完成，可将当前入场与离场规则保存到策略配置。")).toBeInTheDocument();
+    expect(screen.getByText(`建议名称：${savedName}`)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "保存策略" }));
     expect(await screen.findByText(`已保存策略：${savedName}`)).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "已保存策略" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: `套用已保存策略${savedName}` })).toBeInTheDocument();
@@ -930,9 +1049,9 @@ describe("A 股回测工作台界面", () => {
     expect(await screen.findByText(`已删除已保存策略：${savedName}`)).toBeInTheDocument();
   });
 
-  it("does not store the strategy when the user declines the save prompt", async () => {
+  it("does not store the strategy when the user dismisses the inline save prompt", async () => {
     const user = userEvent.setup();
-    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+    const confirmSpy = vi.spyOn(window, "confirm");
     render(<App />);
 
     await screen.findByText("日线行情");
@@ -950,7 +1069,9 @@ describe("A 股回测工作台界面", () => {
 
     await user.click(screen.getByRole("button", { name: "运行历史回测" }));
 
-    expect(confirmSpy).toHaveBeenCalledWith("当前入场规则和离场规则已成功运行回测，是否保存到策略配置？");
+    expect(confirmSpy).not.toHaveBeenCalled();
+    expect(await screen.findByText("回测完成，可将当前入场与离场规则保存到策略配置。")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "暂不保存" }));
     expect(await screen.findByText("本次未保存策略，你可以继续调整后再次运行。")).toBeInTheDocument();
     expect(window.localStorage.getItem("astock-saved-strategies")).toBeNull();
     expect(screen.getByRole("heading", { name: "已保存策略" })).toBeInTheDocument();

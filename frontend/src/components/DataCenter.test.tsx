@@ -21,9 +21,17 @@ const coverage = [
   { dataset: "capital_flow", symbols: 1, start_date: "2024-01-03", end_date: "2024-01-03", missing_rows: 1 }
 ];
 
+const staleRecentCoverage = [
+  { dataset: "daily_bars", symbols: 5000, start_date: "2015-01-05", end_date: "2026-05-26", missing_rows: 0 },
+  { dataset: "capital_flow", symbols: 4900, start_date: "2015-01-05", end_date: "2026-05-26", missing_rows: 0 }
+];
+
 describe("DataCenter", () => {
+  const setupUser = () => userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+
   beforeEach(() => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(new Date("2026-06-07T10:00:00+08:00"));
     apiMocks.ensureDataService.mockResolvedValue({
       running: true,
       port: 9011,
@@ -95,15 +103,15 @@ describe("DataCenter", () => {
     expect(apiMocks.loadDailyBarsCoverage).toHaveBeenCalledWith(
       "http://127.0.0.1:9011",
       ["600519"],
-      "2024-01-02",
-      "2024-01-08"
+      "2026-06-01",
+      "2026-06-05"
     );
     expect(screen.getByText("600519")).toBeInTheDocument();
     expect(screen.getByText(/2024-01-04/)).toBeInTheDocument();
   });
 
   it("shows recent service logs when a fetch fails", async () => {
-    const user = userEvent.setup();
+    const user = setupUser();
     apiMocks.fetchDailyBars.mockRejectedValue(new Error("HTTP 400: request_failed - boom"));
     apiMocks.loadDataServiceLogs.mockResolvedValue({
       items: [
@@ -120,7 +128,7 @@ describe("DataCenter", () => {
   });
 
   it("refreshes logs from the reconnected service after an import timeout", async () => {
-    const user = userEvent.setup();
+    const user = setupUser();
     apiMocks.ensureDataService.mockClear();
     apiMocks.importDailyBars.mockClear();
     apiMocks.loadDataServiceHealth.mockClear();
@@ -156,7 +164,7 @@ describe("DataCenter", () => {
   });
 
   it("fetches missing daily bars through the service and refreshes parent coverage", async () => {
-    const user = userEvent.setup();
+    const user = setupUser();
     const onCoverageChange = vi.fn();
 
     render(<DataCenter cacheDir=".astock-cache" coverage={coverage} onCoverageChange={onCoverageChange} />);
@@ -169,8 +177,8 @@ describe("DataCenter", () => {
     await waitFor(() => expect(apiMocks.fetchDailyBars).toHaveBeenCalledWith(
       "http://127.0.0.1:9011",
       ["600519", "000001"],
-      "2024-01-02",
-      "2024-01-08"
+      "2026-06-01",
+      "2026-06-05"
     ));
     expect(onCoverageChange).toHaveBeenCalledWith(coverage);
     expect(await screen.findByText("Fetched 3 daily bar rows")).toBeInTheDocument();
@@ -182,7 +190,7 @@ describe("DataCenter", () => {
   });
 
   it("shows immediate busy feedback for data operations", async () => {
-    const user = userEvent.setup();
+    const user = setupUser();
     let resolveFetch: (value: Awaited<ReturnType<typeof apiMocks.fetchDailyBars>>) => void = () => {};
     apiMocks.fetchDailyBars.mockReturnValue(
       new Promise((resolve) => {
@@ -212,7 +220,7 @@ describe("DataCenter", () => {
   });
 
   it("starts a full-market sync job and shows progress", async () => {
-    const user = userEvent.setup();
+    const user = setupUser();
     apiMocks.startFullMarketSync.mockResolvedValue({
       job: {
         job_id: "job-1",
@@ -241,5 +249,65 @@ describe("DataCenter", () => {
     await waitFor(() => expect(apiMocks.loadSyncJob).toHaveBeenCalledWith("http://127.0.0.1:9011", "job-1"));
     expect(await screen.findByText(/已完成 2\/2/)).toBeInTheDocument();
     expect(screen.getAllByText(/导入 20 行/).length).toBeGreaterThan(0);
+  });
+
+  it("uses a recent business-day range and moves the date inputs after successful fetch coverage", async () => {
+    const user = setupUser();
+    const updatedCoverage = [
+      { dataset: "daily_bars", symbols: 1, start_date: "2024-01-02", end_date: "2026-06-05", missing_rows: 0 }
+    ];
+    apiMocks.fetchDailyBars.mockResolvedValue({
+      status: "ok",
+      imported_rows: 5,
+      requested_symbols: ["600519"],
+      fetched_symbols: ["600519"],
+      missing_symbols: [],
+      coverage: updatedCoverage,
+      logs: [{ level: "info", message: "Fetched 5 recent daily bar rows" }]
+    });
+    const onCoverageChange = vi.fn();
+
+    render(<DataCenter cacheDir=".astock-cache" coverage={coverage} onCoverageChange={onCoverageChange} />);
+
+    expect(await screen.findByLabelText("开始日期")).toHaveValue("2026-06-01");
+    expect(screen.getByLabelText("结束日期")).toHaveValue("2026-06-05");
+    await user.click(screen.getByRole("button", { name: "补全缺失数据" }));
+
+    await waitFor(() => expect(apiMocks.fetchDailyBars).toHaveBeenCalledWith(
+      "http://127.0.0.1:9011",
+      ["600519"],
+      "2026-06-01",
+      "2026-06-05"
+    ));
+    expect(onCoverageChange).toHaveBeenCalledWith(updatedCoverage);
+    expect(screen.getByLabelText("结束日期")).toHaveValue("2026-06-05");
+    expect(await screen.findByText("Fetched 5 recent daily bar rows")).toBeInTheDocument();
+  });
+
+  it("fills from the local coverage end date to the latest open day when coverage is stale", async () => {
+    const user = setupUser();
+    apiMocks.loadDataServiceHealth.mockResolvedValue({
+      ok: true,
+      cache_path: "C:\\cache",
+      port: 9011,
+      coverage: staleRecentCoverage
+    });
+    apiMocks.loadDailyBarsCoverage.mockResolvedValue({
+      summary: staleRecentCoverage,
+      items: []
+    });
+
+    render(<DataCenter cacheDir=".astock-cache" coverage={staleRecentCoverage} onCoverageChange={vi.fn()} />);
+
+    expect(await screen.findByLabelText("开始日期")).toHaveValue("2026-05-26");
+    expect(screen.getByLabelText("结束日期")).toHaveValue("2026-06-05");
+    await user.click(screen.getByRole("button", { name: "补全缺失数据" }));
+
+    await waitFor(() => expect(apiMocks.fetchDailyBars).toHaveBeenCalledWith(
+      "http://127.0.0.1:9011",
+      ["600519"],
+      "2026-05-26",
+      "2026-06-05"
+    ));
   });
 });

@@ -11,7 +11,9 @@ import type {
   ImportResult,
   ConditionValidationResult,
   MarketBriefingResponse,
+  MarketCommentaryResponse,
   MarketNewsResponse,
+  NewsSummaryResponse,
   RealtimeMarketSnapshot,
   RecommendedStrategiesResponse,
   RiskAlertsResponse,
@@ -53,10 +55,27 @@ const demoResult: BacktestResult = {
       actual_position_pct: 0.48,
       buy_reason: ["float market cap 8800000000 in [1000000000, 30000000000]", "3d main net inflow 6000000 >= 3000000"],
       sell_reason: ["fixed holding days reached"],
+      blocked_reason: null,
       pnl: -7200,
       pnl_pct: -0.15
     }
   ],
+  latest_strategy_matches: {
+    signal_date: "2024-01-04",
+    trade_date: "2024-01-04",
+    matches: [
+      {
+        symbol: "AAA",
+        name: "示例股份",
+        close: 12,
+        change_pct: 0.021,
+        reasons: ["float market cap 8800000000 in [1000000000, 30000000000]", "3d main net inflow 6000000 >= 3000000"],
+        signal_date: "2024-01-04",
+        trade_date: "2024-01-04",
+        rank_score: 1.4
+      }
+    ]
+  },
   preflight_issues: []
 };
 
@@ -264,11 +283,70 @@ export async function loadMarketBriefing(baseUrl: string, kind: "fupan" | "zaopa
   return serviceFetch<MarketBriefingResponse>(baseUrl, `/market/${kind}`);
 }
 
+export async function loadMarketCommentary(baseUrl: string): Promise<MarketCommentaryResponse> {
+  if (!isTauriRuntime()) {
+    return {
+      updated_at: new Date("2026-06-01T15:30:00+08:00").toISOString(),
+      trade_date: "2026-06-01",
+      source: "browser-preview",
+      stance: "neutral",
+      summary: "指数震荡偏强，但赚钱效应主要集中在半导体和 AI 应用，追高要看量能承接。",
+      drivers: [
+        {
+          title: "半导体",
+          detail: "指数与板块共振，资金仍在围绕硬科技做切换；代表股：中芯国际、北方华创。",
+          weight: "high"
+        },
+        {
+          title: "AI 应用",
+          detail: "应用端更偏轮动，适合等分歧后的确认信号；代表股：昆仑万维。",
+          weight: "medium"
+        }
+      ],
+      risks: ["如果成交额不能继续放大，强势题材容易冲高回落。"],
+      next_watch: ["明日先看半导体与 AI 应用是否继续放量。", "指数红但个股弱时，降低追涨仓位。"],
+      diagnostics: []
+    };
+  }
+  return serviceFetch<MarketCommentaryResponse>(baseUrl, "/market/commentary");
+}
+
+export async function loadNewsSummary(baseUrl: string): Promise<NewsSummaryResponse> {
+  if (!isTauriRuntime()) {
+    return {
+      updated_at: new Date("2026-06-01T15:00:00+08:00").toISOString(),
+      source: "browser-preview",
+      item_count: 18,
+      themes: [
+        {
+          title: "AI 应用与算力",
+          summary: "政策、订单和产品发布共同催化，盘中热度延续。",
+          sentiment: "positive",
+          source_count: 8,
+          headlines: ["应用端公司成交活跃", "算力链仍有资金关注"]
+        },
+        {
+          title: "新能源设备",
+          summary: "部分细分方向有修复，但持续性仍要看订单和价格信号。",
+          sentiment: "neutral",
+          source_count: 5,
+          headlines: ["设备端反弹更明显", "龙头估值修复带动板块"]
+        }
+      ],
+      highlights: ["AI 应用与算力消息热度靠前", "新能源设备出现局部修复"],
+      risks: ["高位股波动加大", "行业价格压力仍在"],
+      diagnostics: []
+    };
+  }
+  return serviceFetch<NewsSummaryResponse>(baseUrl, "/market/news-summary");
+}
+
 export async function loadRiskAlerts(baseUrl: string): Promise<RiskAlertsResponse> {
   if (!isTauriRuntime()) {
     return {
       updated_at: new Date("2026-05-27T10:30:00+08:00").toISOString(),
       source: "browser-preview",
+      diagnostics: [],
       items: [
         {
           symbol: "000001",
@@ -621,13 +699,14 @@ export async function runBacktestStreamWithDataService(
       | { type: "progress"; message: string; trade_date?: string; scanned_days?: number; total_days?: number; open_positions?: number; closed_trades?: number; candidates?: number }
       | { type: "trade_opened"; trade: BacktestResult["trades"][number] }
       | { type: "trade_closed"; trade: BacktestResult["trades"][number] }
+      | { type: "trade_blocked"; trade: BacktestResult["trades"][number] }
       | { type: "result"; result: BacktestResult }
       | { type: "error"; message?: string };
     if (event.type === "phase") {
       handlers.onPhase?.(event.phase);
     } else if (event.type === "progress") {
       handlers.onProgress?.(event);
-    } else if (event.type === "trade_opened" || event.type === "trade_closed") {
+    } else if (event.type === "trade_opened" || event.type === "trade_closed" || event.type === "trade_blocked") {
       handlers.onTrade?.(event.trade);
     } else if (event.type === "result") {
       finalResult = event.result;

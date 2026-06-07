@@ -4,6 +4,28 @@ type Props = {
   trades: Trade[];
 };
 
+type TradeWithBlockedReason = Trade & {
+  blocked_reason?: string | null;
+};
+
+function hasBlockedReason(trade: Trade): trade is TradeWithBlockedReason {
+  return "blocked_reason" in trade;
+}
+
+function blockedReasonOf(trade: Trade): string | null {
+  if (!hasBlockedReason(trade)) {
+    return null;
+  }
+  return trade.blocked_reason?.trim() || null;
+}
+
+function formatPrice(value: number | null | undefined): string {
+  if (value == null || Number.isNaN(value)) {
+    return "--";
+  }
+  return value.toFixed(2);
+}
+
 function formatPercent(value: number): string {
   return `${(value * 100).toFixed(2)}%`;
 }
@@ -82,8 +104,8 @@ export function TradesTable({ trades }: Props) {
           <thead>
             <tr>
               <th>股票</th>
-              <th>买入</th>
-              <th>卖出</th>
+              <th>买入实际成交价</th>
+              <th>卖出实际成交价</th>
               <th>仓位</th>
               <th>触发原因</th>
               <th>收益</th>
@@ -95,26 +117,49 @@ export function TradesTable({ trades }: Props) {
                 <td colSpan={6}>暂无交易记录</td>
               </tr>
             ) : (
-              trades.map((trade) => (
-                <tr key={`${trade.symbol}-${trade.buy_date}`}>
-                  <td>{trade.symbol}</td>
-                  <td>
-                    <strong>{trade.buy_date}</strong> @ {trade.buy_price}
-                    <div>{trade.shares} 股</div>
-                  </td>
-                  <td>{trade.sell_date ?? "持仓中"}</td>
-                  <td>
-                    <strong>{formatPercent(trade.actual_position_pct)}</strong>
-                    <div>
-                      成交 {formatCompactMoney(trade.buy_amount)} / 计划 {formatCompactMoney(trade.planned_amount)}
-                    </div>
-                  </td>
-                  <td>{trade.buy_reason.map(translateReason).join("；")}</td>
-                  <td className={trade.pnl_pct == null ? "" : trade.pnl_pct >= 0 ? "up-text" : "down-text"}>
-                    {trade.pnl_pct == null ? "持仓中" : `${(trade.pnl_pct * 100).toFixed(2)}%`}
-                  </td>
-                </tr>
-              ))
+              trades.map((trade) => {
+                const blockedReason = blockedReasonOf(trade);
+                const isBlockedEvent = trade.shares === 0 && blockedReason != null;
+                const buyReasonText = trade.buy_reason.map(translateReason).join("；");
+                return (
+                  <tr className={isBlockedEvent ? "trade-blocked-row" : undefined} key={`${trade.symbol}-${trade.buy_date}`}>
+                    <td>
+                      <strong>{trade.symbol}</strong>
+                      {blockedReason ? <div className="trade-status-badge">阻断/延迟</div> : null}
+                    </td>
+                    <td>
+                      <strong>{trade.buy_date}</strong> @ {formatPrice(trade.buy_price)}
+                      <div>{isBlockedEvent ? "未成交" : `${trade.shares} 股`}</div>
+                    </td>
+                    <td>
+                      {isBlockedEvent ? "未成交" : (
+                        <>
+                          <strong>{trade.sell_date ?? "持仓中"}</strong>
+                          {trade.sell_date || trade.sell_price != null ? <div>@ {formatPrice(trade.sell_price)}</div> : null}
+                        </>
+                      )}
+                    </td>
+                    <td>
+                      <strong>{formatPercent(trade.actual_position_pct)}</strong>
+                      <div>
+                        成交 {formatCompactMoney(trade.buy_amount)} / 计划 {formatCompactMoney(trade.planned_amount)}
+                      </div>
+                    </td>
+                    <td>
+                      {buyReasonText ? <div className="trade-reason-text">{buyReasonText}</div> : "暂无触发原因"}
+                      {blockedReason ? (
+                        <div className="trade-blocked-reason">
+                          <strong>阻断原因：</strong>
+                          <span>{blockedReason}</span>
+                        </div>
+                      ) : null}
+                    </td>
+                    <td className={isBlockedEvent || trade.pnl_pct == null ? "" : trade.pnl_pct >= 0 ? "up-text" : "down-text"}>
+                      {isBlockedEvent ? "未产生收益" : trade.pnl_pct == null ? "持仓中" : `${(trade.pnl_pct * 100).toFixed(2)}%`}
+                    </td>
+                  </tr>
+                );
+              })
             )}
           </tbody>
         </table>

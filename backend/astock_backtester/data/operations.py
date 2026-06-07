@@ -10,6 +10,7 @@ from astock_backtester.models import (
     DailyBarsCoverageItem,
     DailyBarsCoverageResponse,
     DataOperationResult,
+    DatasetCoverage,
     ServiceHealth,
     ServiceLogEntry,
 )
@@ -130,9 +131,19 @@ def fetch_daily_bars_into_cache(
 
 
 def build_service_health(cache: LocalCache, warehouse: Warehouse, port: int | None = None) -> ServiceHealth:
-    coverage = warehouse.coverage()
+    try:
+        coverage = warehouse.coverage()
+    except Exception:
+        coverage = []
     if not any(item.symbols > 0 for item in coverage):
-        coverage = cache.coverage()
+        try:
+            coverage = cache.coverage()
+        except Exception:
+            coverage = [
+                DatasetCoverage(dataset="daily_bars", symbols=0, start_date=None, end_date=None),
+                DatasetCoverage(dataset="market_cap", symbols=0, start_date=None, end_date=None),
+                DatasetCoverage(dataset="capital_flow", symbols=0, start_date=None, end_date=None),
+            ]
     return ServiceHealth(
         ok=True,
         cache_path=str(cache.root.resolve()),

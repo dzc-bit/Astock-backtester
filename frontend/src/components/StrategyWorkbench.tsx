@@ -26,10 +26,13 @@ type Props = {
   recommendedStrategies: RecommendedStrategy[];
   savedStrategies: SavedStrategyPreset[];
   strategySaveMessage?: string | null;
+  pendingStrategySaveName?: string | null;
   onValidateCondition: (text: string) => void;
   validateConditionText: (text: string, mode?: "entry" | "exit") => Promise<ConditionValidationResult>;
   onApplySavedStrategy: (preset: SavedStrategyPreset) => void;
   onDeleteSavedStrategy: (presetId: string) => void;
+  onConfirmPendingStrategySave?: () => void;
+  onDismissPendingStrategySave?: () => void;
   onSettingsDraftErrorsChange?: (errors: string[]) => void;
 };
 
@@ -283,10 +286,13 @@ export function StrategyWorkbench({
   recommendedStrategies,
   savedStrategies,
   strategySaveMessage = null,
+  pendingStrategySaveName = null,
   onValidateCondition,
   validateConditionText,
   onApplySavedStrategy,
   onDeleteSavedStrategy,
+  onConfirmPendingStrategySave,
+  onDismissPendingStrategySave,
   onSettingsDraftErrorsChange
 }: Props) {
   const dateRange = settingDateRange(coverage);
@@ -455,7 +461,24 @@ export function StrategyWorkbench({
         <h3>回测设置</h3>
         <h3>策略条件</h3>
       </div>
-      {strategySaveMessage ? <div className="strategy-save-banner">{strategySaveMessage}</div> : null}
+      {strategySaveMessage ? (
+        <div className="strategy-save-banner">
+          <div>
+            <strong>{strategySaveMessage}</strong>
+            {pendingStrategySaveName ? <span>建议名称：{pendingStrategySaveName}</span> : null}
+          </div>
+          {pendingStrategySaveName && onConfirmPendingStrategySave && onDismissPendingStrategySave ? (
+            <div className="strategy-save-actions">
+              <button className="primary-button compact" type="button" onClick={onConfirmPendingStrategySave}>
+                保存策略
+              </button>
+              <button className="secondary-button compact" type="button" onClick={onDismissPendingStrategySave}>
+                暂不保存
+              </button>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
 
       <section className="saved-strategies-panel" aria-label="已保存策略">
         <div className="saved-strategies-head">

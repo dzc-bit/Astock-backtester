@@ -1,4 +1,5 @@
 import pandas as pd
+import pytest
 
 from astock_backtester.engine import run_backtest
 from astock_backtester.indicators import add_market_heat, add_moving_average, add_returns
@@ -14,6 +15,58 @@ def enriched_data():
     return frame
 
 
+def simple_market_cap_strategy() -> StrategyConfig:
+    return StrategyConfig(
+        name="simple",
+        market_filters=[],
+        entry_groups=[
+            ConditionGroup(
+                id="entry",
+                operator=ConditionOperator.AND,
+                conditions=[
+                    ConditionNode(
+                        id="cap",
+                        condition_id="market_cap_between",
+                        params={"min": 1_000_000_000, "max": 10_000_000_000},
+                    )
+                ],
+            )
+        ],
+        exit_rules=[],
+    )
+
+
+def backtest_row(
+    trade_date: str,
+    *,
+    symbol: str = "000001",
+    open_price: float = 10.0,
+    high: float | None = None,
+    low: float | None = None,
+    close: float | None = None,
+    pre_close: float | None = None,
+    is_st: bool = False,
+) -> dict:
+    close_price = close if close is not None else open_price
+    row = {
+        "symbol": symbol,
+        "trade_date": pd.Timestamp(trade_date),
+        "open": open_price,
+        "high": high if high is not None else max(open_price, close_price),
+        "low": low if low is not None else min(open_price, close_price),
+        "close": close_price,
+        "volume": 1000,
+        "is_suspended": False,
+        "listing_days": 500,
+        "float_market_cap": 2_000_000_000,
+        "main_net_inflow": 0.0,
+        "is_st": is_st,
+    }
+    if pre_close is not None:
+        row["pre_close"] = pre_close
+    return row
+
+
 def test_backtest_buys_next_open_after_signal(basic_strategy, basic_settings):
     result = run_backtest(enriched_data(), basic_strategy, basic_settings)
 
@@ -21,7 +74,7 @@ def test_backtest_buys_next_open_after_signal(basic_strategy, basic_settings):
     first = result.trades[0]
     assert str(first.buy_signal_date) == "2024-01-04"
     assert str(first.buy_date) == "2024-01-05"
-    assert first.buy_price == 12.0
+    assert first.buy_price == pytest.approx(12.0 * (1 + basic_settings.slippage_rate))
     assert any("float market cap" in reason for reason in first.buy_reason)
 
 
@@ -33,6 +86,143 @@ def test_backtest_respects_max_daily_buys(basic_strategy, basic_settings):
         buys_by_day[trade.buy_date] += 1
 
     assert max(buys_by_day.values()) <= 1
+
+
+def test_backtest_result_reports_latest_trade_day_strategy_matches_without_daily_buy_limit():
+    dates = pd.to_datetime(["2024-01-02", "2024-01-03"])
+    rows = []
+    for symbol, name, close, volume, volume_ratio, change_pct in [
+        ("AAA", "Alpha", 10.0, 1000, 1.1, 0.01),
+        ("BBB", "Bravo", 11.0, 9000, 1.5, 0.03),
+        ("CCC", "Charlie", 12.0, 5000, 1.2, -0.01),
+    ]:
+        for trade_date in dates:
+            rows.append(
+                {
+                    "symbol": symbol,
+                    "name": name,
+                    "trade_date": trade_date,
+                    "open": close,
+                    "high": close * 1.01,
+                    "low": close * 0.99,
+                    "close": close,
+                    "change_pct": change_pct,
+                    "volume": volume,
+                    "volume_ratio_2d": volume_ratio,
+                    "is_suspended": False,
+                    "listing_days": 500,
+                    "float_market_cap": 2_000_000_000,
+                    "main_net_inflow": 0.0,
+                }
+            )
+    frame = pd.DataFrame(rows)
+    strategy = StrategyConfig(
+        name="latest-matches",
+        market_filters=[],
+        entry_groups=[
+            ConditionGroup(
+                id="entry",
+                operator=ConditionOperator.AND,
+                conditions=[
+                    ConditionNode(
+                        id="cap",
+                        condition_id="market_cap_between",
+                        params={"min": 1_000_000_000, "max": 3_000_000_000},
+                    )
+                ],
+            )
+        ],
+        exit_rules=[],
+    )
+    settings = BacktestSettings(
+        start_date=dates[0].date(),
+        end_date=dates[-1].date(),
+        initial_cash=100_000,
+        max_positions=10,
+        max_daily_buys=1,
+        min_listing_days=0,
+    )
+
+    events = []
+
+    result = run_backtest(frame, strategy, settings, on_event=lambda event: events.append(event))
+
+    opened_trades = [event["trade"] for event in events if event["type"] == "trade_opened"]
+    assert len(opened_trades) == 1
+    assert opened_trades[0].symbol == "BBB"
+    assert result.latest_strategy_matches is not None
+    assert str(result.latest_strategy_matches.signal_date) == "2024-01-03"
+    assert str(result.latest_strategy_matches.trade_date) == "2024-01-03"
+    assert [match.symbol for match in result.latest_strategy_matches.matches] == ["BBB", "CCC", "AAA"]
+
+    first_match = result.latest_strategy_matches.matches[0]
+    assert first_match.name == "Bravo"
+    assert str(first_match.signal_date) == "2024-01-03"
+    assert str(first_match.trade_date) == "2024-01-03"
+    assert first_match.close == 11.0
+    assert first_match.change_pct == 0.03
+    assert first_match.rank_score == 1.5
+    assert any("float market cap" in reason for reason in first_match.reasons)
+
+
+def test_backtest_result_reports_empty_matches_for_latest_trade_day_without_reusing_older_hits():
+    dates = pd.to_datetime(["2024-01-02", "2024-01-03", "2024-01-04"])
+    rows = []
+    for trade_date, market_cap in [
+        (dates[0], 2_000_000_000),
+        (dates[1], 2_000_000_000),
+        (dates[2], 9_000_000_000),
+    ]:
+        rows.append(
+            {
+                "symbol": "AAA",
+                "name": "Alpha",
+                "trade_date": trade_date,
+                "open": 10.0,
+                "high": 10.2,
+                "low": 9.8,
+                "close": 10.0,
+                "change_pct": 0.01,
+                "volume": 1000,
+                "is_suspended": False,
+                "listing_days": 500,
+                "float_market_cap": market_cap,
+                "main_net_inflow": 0.0,
+            }
+        )
+    frame = pd.DataFrame(rows)
+    strategy = StrategyConfig(
+        name="latest-empty-matches",
+        market_filters=[],
+        entry_groups=[
+            ConditionGroup(
+                id="entry",
+                operator=ConditionOperator.AND,
+                conditions=[
+                    ConditionNode(
+                        id="cap",
+                        condition_id="market_cap_between",
+                        params={"min": 1_000_000_000, "max": 3_000_000_000},
+                    )
+                ],
+            )
+        ],
+        exit_rules=[],
+    )
+    settings = BacktestSettings(
+        start_date=dates[0].date(),
+        end_date=dates[-1].date(),
+        initial_cash=100_000,
+        max_positions=1,
+        max_daily_buys=1,
+        min_listing_days=0,
+    )
+
+    result = run_backtest(frame, strategy, settings)
+
+    assert result.latest_strategy_matches is not None
+    assert str(result.latest_strategy_matches.signal_date) == "2024-01-04"
+    assert result.latest_strategy_matches.matches == []
 
 
 def test_backtest_reports_metrics_and_equity_curve(basic_strategy, basic_settings):
@@ -443,3 +633,320 @@ def test_backtest_uses_precomputed_breakout_and_breakdown_columns():
     assert any("prior 2d high" in reason for reason in trade.buy_reason)
     assert str(trade.sell_date) == "2024-01-08"
     assert any("prior 2d low" in reason for reason in trade.sell_reason)
+
+
+def test_annualized_return_uses_equity_curve_date_span_not_total_return():
+    frame = pd.DataFrame(
+        [
+            backtest_row("2024-01-02", close=10.0),
+            backtest_row("2024-01-03", open_price=10.0, close=10.0),
+            backtest_row("2024-01-22", open_price=12.0, close=12.0),
+        ]
+    )
+    settings = BacktestSettings(
+        start_date=pd.Timestamp("2024-01-02").date(),
+        end_date=pd.Timestamp("2024-01-22").date(),
+        initial_cash=100_000,
+        fixed_holding_days=20,
+        max_positions=1,
+        max_daily_buys=1,
+        min_listing_days=0,
+        slippage_rate=0,
+        fee_rate=0,
+        stamp_tax_rate=0,
+    )
+
+    result = run_backtest(frame, simple_market_cap_strategy(), settings)
+
+    assert result.metrics.total_return_pct == pytest.approx(0.2)
+    assert result.metrics.annualized_return_pct == pytest.approx((1.2 ** (365 / 20)) - 1)
+    assert result.metrics.annualized_return_pct != result.metrics.total_return_pct
+
+
+def test_limit_up_blocks_next_day_buy_and_records_chinese_reason():
+    frame = pd.DataFrame(
+        [
+            backtest_row("2024-01-02", close=10.0),
+            backtest_row("2024-01-03", open_price=11.0, high=11.0, low=11.0, close=11.0, pre_close=10.0),
+            backtest_row("2024-01-04", open_price=12.0, close=12.0, pre_close=11.0),
+        ]
+    )
+    events = []
+    settings = BacktestSettings(
+        start_date=pd.Timestamp("2024-01-02").date(),
+        end_date=pd.Timestamp("2024-01-05").date(),
+        initial_cash=100_000,
+        max_positions=1,
+        max_daily_buys=1,
+        min_listing_days=0,
+        slippage_rate=0,
+        fee_rate=0,
+        stamp_tax_rate=0,
+        limit_up_blocks_buy=True,
+    )
+
+    result = run_backtest(frame, simple_market_cap_strategy(), settings, on_event=lambda event: events.append(event))
+
+    assert result.trades == []
+    blocked_events = [event for event in events if event["type"] == "trade_blocked"]
+    assert blocked_events
+    blocked_trade = blocked_events[0]["trade"]
+    assert blocked_trade.blocked_reason == "次日开盘接近涨停，未买入：000001"
+    assert blocked_trade.shares == 0
+    assert blocked_trade.buy_amount == 0
+    assert blocked_trade.pnl_pct is None
+    assert result.metrics.trade_count == 0
+
+
+def test_missing_pre_close_does_not_guess_limit_up_block():
+    frame = pd.DataFrame(
+        [
+            backtest_row("2024-01-02", close=10.0),
+            backtest_row("2024-01-03", open_price=99.0, high=99.0, low=99.0, close=99.0),
+            backtest_row("2024-01-04", open_price=99.0, close=99.0),
+            backtest_row("2024-01-05", open_price=99.0, close=99.0),
+        ]
+    )
+    settings = BacktestSettings(
+        start_date=pd.Timestamp("2024-01-02").date(),
+        end_date=pd.Timestamp("2024-01-04").date(),
+        initial_cash=100_000,
+        max_positions=1,
+        max_daily_buys=1,
+        min_listing_days=0,
+        slippage_rate=0,
+        fee_rate=0,
+        stamp_tax_rate=0,
+        limit_up_blocks_buy=True,
+        fixed_holding_days=1,
+        exclude_st=False,
+    )
+
+    result = run_backtest(frame, simple_market_cap_strategy(), settings)
+
+    assert result.trades
+    assert result.trades[0].buy_price == 99.0
+
+
+def test_limit_down_blocks_sell_keeps_position_and_reports_reason():
+    frame = pd.DataFrame(
+        [
+            backtest_row("2024-01-02", close=10.0),
+            backtest_row("2024-01-03", open_price=10.0, close=10.0, pre_close=10.0),
+            backtest_row("2024-01-04", open_price=9.0, high=9.0, low=9.0, close=9.0, pre_close=10.0),
+            backtest_row("2024-01-05", open_price=9.5, close=9.5, pre_close=9.0),
+        ]
+    )
+    events = []
+    settings = BacktestSettings(
+        start_date=pd.Timestamp("2024-01-02").date(),
+        end_date=pd.Timestamp("2024-01-05").date(),
+        initial_cash=100_000,
+        fixed_holding_days=1,
+        max_positions=1,
+        max_daily_buys=1,
+        min_listing_days=0,
+        slippage_rate=0,
+        fee_rate=0,
+        stamp_tax_rate=0,
+        limit_down_blocks_sell=True,
+    )
+
+    result = run_backtest(frame, simple_market_cap_strategy(), settings, on_event=lambda event: events.append(event))
+
+    assert result.trades
+    trade = result.trades[0]
+    assert str(trade.sell_date) == "2024-01-05"
+    assert trade.sell_price == 9.5
+    blocked_events = [event for event in events if event["type"] == "trade_blocked"]
+    assert blocked_events
+    assert blocked_events[0]["trade"].blocked_reason == "卖出日开盘接近跌停，暂不卖出：000001"
+
+
+@pytest.mark.parametrize(
+    ("symbol", "is_st", "open_price", "pre_close", "should_block"),
+    [
+        ("600001", False, 9.0, 10.0, True),
+        ("000001", True, 9.5, 10.0, True),
+        ("300001", False, 9.0, 10.0, False),
+        ("300001", False, 8.0, 10.0, True),
+        ("688001", False, 8.0, 10.0, True),
+    ],
+)
+def test_limit_down_block_uses_board_specific_thresholds(symbol, is_st, open_price, pre_close, should_block):
+    frame = pd.DataFrame(
+        [
+            backtest_row("2024-01-02", symbol=symbol, close=10.0, is_st=is_st),
+            backtest_row("2024-01-03", symbol=symbol, open_price=10.0, close=10.0, pre_close=10.0, is_st=is_st),
+            backtest_row(
+                "2024-01-04",
+                symbol=symbol,
+                open_price=open_price,
+                high=max(open_price, 9.8),
+                low=open_price,
+                close=open_price,
+                pre_close=pre_close,
+                is_st=is_st,
+            ),
+            backtest_row("2024-01-05", symbol=symbol, open_price=9.8, close=9.8, pre_close=open_price, is_st=is_st),
+        ]
+    )
+    events = []
+    settings = BacktestSettings(
+        start_date=pd.Timestamp("2024-01-02").date(),
+        end_date=pd.Timestamp("2024-01-05").date(),
+        initial_cash=100_000,
+        fixed_holding_days=1,
+        max_positions=1,
+        max_daily_buys=1,
+        min_listing_days=0,
+        slippage_rate=0,
+        fee_rate=0,
+        stamp_tax_rate=0,
+        limit_down_blocks_sell=True,
+        exclude_st=False,
+    )
+
+    result = run_backtest(frame, simple_market_cap_strategy(), settings, on_event=lambda event: events.append(event))
+    blocked_events = [event for event in events if event["type"] == "trade_blocked"]
+
+    assert bool(blocked_events) is should_block
+    assert bool(result.trades) is True
+    if should_block:
+        assert result.trades[0].sell_date.isoformat() == "2024-01-05"
+    else:
+        assert result.trades[0].sell_date.isoformat() == "2024-01-04"
+
+
+def test_conservative_execution_records_actual_buy_and_sell_prices_and_amounts():
+    frame = pd.DataFrame(
+        [
+            backtest_row("2024-01-02", close=10.0),
+            backtest_row("2024-01-03", open_price=10.0, high=11.0, low=9.0, close=10.5, pre_close=10.0),
+            backtest_row("2024-01-04", open_price=12.0, high=12.5, low=11.5, close=12.0, pre_close=10.5),
+        ]
+    )
+    settings = BacktestSettings(
+        start_date=pd.Timestamp("2024-01-02").date(),
+        end_date=pd.Timestamp("2024-01-04").date(),
+        initial_cash=100_000,
+        fixed_holding_days=1,
+        max_positions=1,
+        max_daily_buys=1,
+        min_listing_days=0,
+        slippage_rate=0.01,
+        fee_rate=0.001,
+        stamp_tax_rate=0.002,
+        conservative_execution=True,
+    )
+
+    result = run_backtest(frame, simple_market_cap_strategy(), settings)
+
+    trade = result.trades[0]
+    assert trade.buy_price == pytest.approx(10.1)
+    assert trade.sell_price == pytest.approx(11.88)
+    assert trade.buy_amount == pytest.approx(trade.buy_price * trade.shares * 1.001)
+    assert trade.sell_amount == pytest.approx(trade.sell_price * trade.shares * (1 - 0.001 - 0.002))
+    assert trade.pnl == pytest.approx(trade.sell_amount - trade.buy_amount)
+    assert trade.pnl_pct == pytest.approx(trade.sell_amount / trade.buy_amount - 1)
+
+
+def test_take_profit_uses_trigger_price_instead_of_open_when_not_conservative():
+    frame = pd.DataFrame(
+        [
+            backtest_row("2024-01-02", close=10.0),
+            backtest_row("2024-01-03", open_price=10.0, high=10.1, low=9.9, close=10.0, pre_close=10.0),
+            backtest_row("2024-01-04", open_price=10.1, high=11.0, low=10.0, close=10.5, pre_close=10.0),
+        ]
+    )
+    settings = BacktestSettings(
+        start_date=pd.Timestamp("2024-01-02").date(),
+        end_date=pd.Timestamp("2024-01-04").date(),
+        initial_cash=100_000,
+        fixed_holding_days=20,
+        take_profit_pct=0.08,
+        max_positions=1,
+        max_daily_buys=1,
+        min_listing_days=0,
+        slippage_rate=0,
+        fee_rate=0,
+        stamp_tax_rate=0,
+        conservative_execution=False,
+    )
+
+    result = run_backtest(frame, simple_market_cap_strategy(), settings)
+
+    trade = result.trades[0]
+    assert trade.sell_price == pytest.approx(10.8)
+    assert any("止盈触发" in reason for reason in trade.sell_reason)
+
+
+def test_stop_loss_uses_trigger_price_instead_of_open_when_not_conservative():
+    frame = pd.DataFrame(
+        [
+            backtest_row("2024-01-02", close=10.0),
+            backtest_row("2024-01-03", open_price=10.0, high=10.1, low=9.9, close=10.0, pre_close=10.0),
+            backtest_row("2024-01-04", open_price=9.9, high=10.0, low=9.2, close=9.5, pre_close=10.0),
+        ]
+    )
+    settings = BacktestSettings(
+        start_date=pd.Timestamp("2024-01-02").date(),
+        end_date=pd.Timestamp("2024-01-04").date(),
+        initial_cash=100_000,
+        fixed_holding_days=20,
+        stop_loss_pct=-0.06,
+        max_positions=1,
+        max_daily_buys=1,
+        min_listing_days=0,
+        slippage_rate=0,
+        fee_rate=0,
+        stamp_tax_rate=0,
+        conservative_execution=False,
+    )
+
+    result = run_backtest(frame, simple_market_cap_strategy(), settings)
+
+    trade = result.trades[0]
+    assert trade.sell_price == pytest.approx(9.4)
+    assert any("止损触发" in reason for reason in trade.sell_reason)
+
+
+@pytest.mark.parametrize(
+    ("symbol", "is_st", "open_price", "pre_close", "should_block"),
+    [
+        ("600001", False, 11.0, 10.0, True),
+        ("000001", True, 10.5, 10.0, True),
+        ("300001", False, 11.0, 10.0, False),
+        ("300001", False, 12.0, 10.0, True),
+        ("688001", False, 12.0, 10.0, True),
+    ],
+)
+def test_limit_up_block_uses_board_specific_thresholds(symbol, is_st, open_price, pre_close, should_block):
+    frame = pd.DataFrame(
+        [
+            backtest_row("2024-01-02", symbol=symbol, close=10.0, is_st=is_st),
+            backtest_row("2024-01-03", symbol=symbol, open_price=open_price, high=open_price, low=open_price, close=open_price, pre_close=pre_close, is_st=is_st),
+            backtest_row("2024-01-04", symbol=symbol, open_price=open_price, close=open_price, pre_close=open_price, is_st=is_st),
+        ]
+    )
+    events = []
+    settings = BacktestSettings(
+        start_date=pd.Timestamp("2024-01-02").date(),
+        end_date=pd.Timestamp("2024-01-04").date(),
+        initial_cash=100_000,
+        max_positions=1,
+        max_daily_buys=1,
+        min_listing_days=0,
+        slippage_rate=0,
+        fee_rate=0,
+        stamp_tax_rate=0,
+        limit_up_blocks_buy=True,
+        fixed_holding_days=1,
+        exclude_st=False,
+    )
+
+    result = run_backtest(frame, simple_market_cap_strategy(), settings, on_event=lambda event: events.append(event))
+    blocked_events = [event for event in events if event["type"] == "trade_blocked"]
+
+    assert bool(blocked_events) is should_block
+    assert bool(result.trades) is (not should_block)

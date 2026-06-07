@@ -2,7 +2,9 @@ import { useEffect, useState } from "react";
 import { Activity, Database, Flame, ShieldAlert, TrendingUp } from "lucide-react";
 import {
   loadMarketBriefing,
+  loadMarketCommentary,
   loadMarketNews,
+  loadNewsSummary,
   loadRealtimeMarketSnapshot,
   loadRecommendedStrategies,
   loadRiskAlerts,
@@ -12,7 +14,9 @@ import {
 } from "./api";
 import { DataCenter } from "./components/DataCenter";
 import { MarketDashboard } from "./components/MarketDashboard";
+import { MarketCommentaryPanel } from "./components/MarketCommentaryPanel";
 import { NewsPanel } from "./components/NewsPanel";
+import { NewsSummaryPanel } from "./components/NewsSummaryPanel";
 import { ResultsOverview } from "./components/ResultsOverview";
 import { RiskAlertsModal } from "./components/RiskAlertsModal";
 import {
@@ -29,6 +33,7 @@ import { StrategyWorkbench } from "./components/StrategyWorkbench";
 import { TradesTable } from "./components/TradesTable";
 import { TonghuashunBriefingPanel } from "./components/TonghuashunBriefingPanel";
 import { UpdatePanel } from "./components/UpdatePanel";
+import { detectMarketSessionPhase, initialMarketRefreshMeta, refreshIntervalForPhase } from "./marketRefresh";
 import { defaultSettings, defaultStrategy } from "./strategyDefaults";
 import type {
   BacktestResult,
@@ -37,13 +42,21 @@ import type {
   DatasetCoverage,
   ConditionValidationResult,
   MarketBriefingResponse,
+  MarketCommentaryResponse,
+  MarketRefreshMeta,
   MarketNewsResponse,
+  NewsSummaryResponse,
   RealtimeMarketSnapshot,
   RecommendedStrategy,
   RiskAlertsResponse,
   SavedStrategyPreset,
   StrategyConfig
 } from "./types";
+
+type PendingStrategySave = {
+  strategy: StrategyConfig;
+  name: string;
+} | null;
 
 function formatPercent(value: number | null | undefined): string {
   return value == null ? "--" : `${(value * 100).toFixed(2)}%`;
@@ -127,6 +140,35 @@ function validateBacktestSettings(settings: BacktestSettingsConfig, draftErrors:
   return [...new Set(errors)];
 }
 
+type BacktestTrade = BacktestResult["trades"][number];
+
+function fallbackMarketCommentary(reason: string): MarketCommentaryResponse {
+  return {
+    updated_at: new Date().toISOString(),
+    trade_date: new Date().toISOString().slice(0, 10),
+    source: "frontend-fallback",
+    mode: "news_fallback",
+    stance: "defensive",
+    summary: "实时盘面暂不可用，以下仅为防守口径。行情评价接口暂时没有返回可用内容，先不要把新闻或局部数据包装成确定结论。",
+    drivers: [],
+    risks: ["行情评价接口不可用，缺少实时红绿家数、指数和题材榜联动验证。"],
+    next_watch: ["优先恢复行情评价接口，再结合红绿家数、强势题材和昨日强势追踪复核盘面。"],
+    diagnostics: [`行情评价接口失败：${reason}`]
+  };
+}
+
+function tradeIdentity(trade: BacktestTrade): string {
+  return `${trade.symbol}-${trade.buy_signal_date}-${trade.buy_date}`;
+}
+
+function mergeBacktestTrades(current: BacktestTrade[], incoming: BacktestTrade[]): BacktestTrade[] {
+  const incomingKeys = new Set(incoming.map(tradeIdentity));
+  return [
+    ...incoming,
+    ...current.filter((trade) => !incomingKeys.has(tradeIdentity(trade)))
+  ];
+}
+
 export function App() {
   const [coverage, setCoverage] = useState<DatasetCoverage[]>([]);
   const [result, setResult] = useState<BacktestResult | null>(null);
@@ -139,8 +181,11 @@ export function App() {
   const [runPhases, setRunPhases] = useState<string[]>([]);
   const [runProgressMessage, setRunProgressMessage] = useState<string | null>(null);
   const [marketSnapshot, setMarketSnapshot] = useState<RealtimeMarketSnapshot | null>(null);
+  const [marketRefreshMeta, setMarketRefreshMeta] = useState<MarketRefreshMeta>(() => initialMarketRefreshMeta());
   const [isLoadingMarket, setIsLoadingMarket] = useState(false);
   const [marketNews, setMarketNews] = useState<MarketNewsResponse | null>(null);
+  const [marketCommentary, setMarketCommentary] = useState<MarketCommentaryResponse | null>(null);
+  const [newsSummary, setNewsSummary] = useState<NewsSummaryResponse | null>(null);
   const [fupanBriefing, setFupanBriefing] = useState<MarketBriefingResponse | null>(null);
   const [zaopanBriefing, setZaopanBriefing] = useState<MarketBriefingResponse | null>(null);
   const [isLoadingNews, setIsLoadingNews] = useState(false);
@@ -153,6 +198,7 @@ export function App() {
   const [isValidatingCondition, setIsValidatingCondition] = useState(false);
   const [settingsDraftErrors, setSettingsDraftErrors] = useState<string[]>([]);
   const [strategySaveMessage, setStrategySaveMessage] = useState<string | null>(null);
+  const [pendingStrategySave, setPendingStrategySave] = useState<PendingStrategySave>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -170,7 +216,7 @@ export function App() {
     };
   }, []);
 
-  const saveStrategyIfConfirmed = async (currentStrategy: StrategyConfig) => {
+  const queueStrategySavePrompt = (currentStrategy: StrategyConfig) => {
     const hasCustomEntryRule = currentStrategy.entry_groups.some((group) =>
       group.conditions.some((condition) => Boolean(condition.expression?.trim()))
     );
@@ -181,26 +227,42 @@ export function App() {
       !hasCustomExitRule ||
       strategySignature(currentStrategy) === strategySignature(defaultStrategy)
     ) {
+      setPendingStrategySave(null);
       return;
     }
     const existing = savedStrategies.find((item) => strategySignature(item.strategy) === strategySignature(currentStrategy));
     if (existing) {
+      setPendingStrategySave(null);
       setStrategySaveMessage(`当前策略已保存在“${existing.name}”中。`);
       return;
     }
-    if (!window.confirm("当前入场规则和离场规则已成功运行回测，是否保存到策略配置？")) {
-      setStrategySaveMessage("本次未保存策略，你可以继续调整后再次运行。");
+    const nextPreset = createSavedStrategyPreset(currentStrategy, savedStrategies);
+    setPendingStrategySave({
+      strategy: cloneStrategyConfig(currentStrategy),
+      name: nextPreset.name
+    });
+    setStrategySaveMessage("回测完成，可将当前入场与离场规则保存到策略配置。");
+  };
+
+  const confirmPendingStrategySave = async () => {
+    if (!pendingStrategySave) {
       return;
     }
-    const nextPreset = createSavedStrategyPreset(currentStrategy, savedStrategies);
+    const nextPreset = createSavedStrategyPreset(pendingStrategySave.strategy, savedStrategies);
     const nextSavedStrategies = [nextPreset, ...savedStrategies];
     try {
       await persistSavedStrategiesToStore(nextSavedStrategies);
       setSavedStrategies(nextSavedStrategies);
       setStrategySaveMessage(`已保存策略：${nextPreset.name}`);
+      setPendingStrategySave(null);
     } catch (caught) {
       setStrategySaveMessage(caught instanceof Error ? `策略保存失败：${caught.message}` : "策略保存失败。");
     }
+  };
+
+  const dismissPendingStrategySave = () => {
+    setPendingStrategySave(null);
+    setStrategySaveMessage("本次未保存策略，你可以继续调整后再次运行。");
   };
 
   const runBacktest = async () => {
@@ -226,26 +288,17 @@ export function App() {
               setRunPhases((current) => (current.includes(phase) ? current : [...current, phase])),
             onProgress: (event) => setRunProgressMessage(event.message),
             onTrade: (trade) =>
-              setStreamedTrades((current) =>
-                current.some((item) => item.symbol === trade.symbol && item.buy_date === trade.buy_date)
-                  ? current.map((item) =>
-                      item.symbol === trade.symbol && item.buy_date === trade.buy_date
-                        ? { ...item, ...trade }
-                        : item
-                    )
-                  : [trade, ...current]
-              ),
+              setStreamedTrades((current) => mergeBacktestTrades(current, [trade])),
             onResult: (completed) => {
               setResult(completed);
-              setStreamedTrades(completed.trades);
+              setStreamedTrades((current) => mergeBacktestTrades(current, completed.trades));
               setRunProgressMessage("回测完成，已生成收益曲线和交易明细。");
             }
           })
         : await runConfiguredBacktest(strategy, settings);
       setResult(nextResult);
-      setStreamedTrades(nextResult.trades);
-      setRunProgressMessage(null);
-      await saveStrategyIfConfirmed(strategy);
+      setStreamedTrades((current) => mergeBacktestTrades(current, nextResult.trades));
+      queueStrategySavePrompt(strategy);
       setRunPhases(["校验参数", "读取本地数据", "计算指标", "撮合交易", "生成结果"]);
     } catch (caught) {
       setError(caught instanceof Error ? translateError(caught.message) : "回测运行失败。");
@@ -260,37 +313,69 @@ export function App() {
       return;
     }
     let cancelled = false;
+    let timer: number | undefined;
     const refreshMarket = async () => {
+      const phase = detectMarketSessionPhase();
+      let nextRefreshMs = refreshIntervalForPhase(phase);
       setIsLoadingMarket(true);
+      setMarketRefreshMeta((current) => ({
+        ...current,
+        phase,
+        status: "refreshing",
+        message: current.last_success_at ? "刷新中，保留上一份成功快照" : "刷新中",
+        next_refresh_ms: refreshIntervalForPhase(phase)
+      }));
       try {
         const snapshot = await loadRealtimeMarketSnapshot(dataService.base_url);
         if (!cancelled) {
-          setMarketSnapshot(snapshot);
-        }
-      } catch {
-        if (!cancelled) {
-          setMarketSnapshot({
-            status: "unavailable",
-            source: "local-service",
-            updated_at: new Date().toISOString(),
-            indexes: [],
-            breadth: null,
-            strong_sectors: [],
-            yesterday_strong_sectors: [],
-            message: "实时行情接口暂不可用，请确认本地数据服务已启动。"
+          setMarketSnapshot((current) => (snapshot.status === "unavailable" && current ? current : snapshot));
+          const nextPhase = snapshot.market_phase ?? phase;
+          setMarketRefreshMeta((current) => {
+            const usingLastSuccess = snapshot.status === "unavailable" && Boolean(current.last_success_at);
+            nextRefreshMs = refreshIntervalForPhase(nextPhase, snapshot.status === "unavailable");
+            return {
+              phase: nextPhase,
+              status: usingLastSuccess ? "using_last_success" : snapshot.status === "unavailable" ? "unavailable" : "idle",
+              message:
+                usingLastSuccess
+                  ? "实时接口暂不可用，使用最近数据"
+                  : snapshot.status === "unavailable"
+                    ? "实时接口暂不可用"
+                    : nextPhase === "trading"
+                      ? "实时行情已更新"
+                      : "非交易时段，使用最近数据",
+              last_success_at: snapshot.status === "unavailable" ? current.last_success_at ?? null : snapshot.updated_at,
+              last_error: snapshot.status === "unavailable" ? snapshot.message : undefined,
+              next_refresh_ms: nextRefreshMs
+            };
           });
+        }
+      } catch (caught) {
+        if (!cancelled) {
+          const reason = caught instanceof Error ? caught.message : "请求失败";
+          setMarketRefreshMeta((current) => ({
+            phase,
+            status: current.last_success_at ? "using_last_success" : "unavailable",
+            message: current.last_success_at ? "实时接口暂不可用，使用最近数据" : "实时接口暂不可用",
+            last_success_at: current.last_success_at ?? null,
+            last_error: reason,
+            next_refresh_ms: refreshIntervalForPhase(phase, true)
+          }));
+          nextRefreshMs = refreshIntervalForPhase(phase, true);
         }
       } finally {
         if (!cancelled) {
           setIsLoadingMarket(false);
+          timer = window.setTimeout(refreshMarket, nextRefreshMs);
         }
       }
     };
     void refreshMarket();
-    const timer = window.setInterval(refreshMarket, 60_000);
     return () => {
       cancelled = true;
-      window.clearInterval(timer);
+      if (timer !== undefined) {
+        window.clearTimeout(timer);
+      }
     };
   }, [dataService]);
 
@@ -300,14 +385,30 @@ export function App() {
     }
     setIsLoadingNews(true);
     try {
-      const [news, fupan, zaopan] = await Promise.all([
+      const [newsResult, fupanResult, zaopanResult, commentaryResult, summaryResult] = await Promise.allSettled([
         loadMarketNews(dataService.base_url),
         loadMarketBriefing(dataService.base_url, "fupan"),
-        loadMarketBriefing(dataService.base_url, "zaopan")
+        loadMarketBriefing(dataService.base_url, "zaopan"),
+        loadMarketCommentary(dataService.base_url),
+        loadNewsSummary(dataService.base_url)
       ]);
-      setMarketNews(news);
-      setFupanBriefing(fupan);
-      setZaopanBriefing(zaopan);
+      if (newsResult.status === "fulfilled") {
+        setMarketNews(newsResult.value);
+      }
+      if (fupanResult.status === "fulfilled") {
+        setFupanBriefing(fupanResult.value);
+      }
+      if (zaopanResult.status === "fulfilled") {
+        setZaopanBriefing(zaopanResult.value);
+      }
+      if (commentaryResult.status === "fulfilled") {
+        setMarketCommentary(commentaryResult.value);
+      } else {
+        setMarketCommentary(fallbackMarketCommentary(commentaryResult.reason instanceof Error ? commentaryResult.reason.message : "请求失败"));
+      }
+      if (summaryResult.status === "fulfilled") {
+        setNewsSummary(summaryResult.value);
+      }
     } finally {
       setIsLoadingNews(false);
     }
@@ -361,10 +462,12 @@ export function App() {
     }
     let cancelled = false;
     const loadAuxiliaryData = async () => {
-      const [newsResult, fupanResult, zaopanResult, riskResult, recommendedResult] = await Promise.allSettled([
+      const [newsResult, fupanResult, zaopanResult, commentaryResult, summaryResult, riskResult, recommendedResult] = await Promise.allSettled([
         loadMarketNews(dataService.base_url),
         loadMarketBriefing(dataService.base_url, "fupan"),
         loadMarketBriefing(dataService.base_url, "zaopan"),
+        loadMarketCommentary(dataService.base_url),
+        loadNewsSummary(dataService.base_url),
         loadRiskAlerts(dataService.base_url),
         loadRecommendedStrategies(dataService.base_url)
       ]);
@@ -379,6 +482,14 @@ export function App() {
       }
       if (zaopanResult.status === "fulfilled") {
         setZaopanBriefing(zaopanResult.value);
+      }
+      if (commentaryResult.status === "fulfilled") {
+        setMarketCommentary(commentaryResult.value);
+      } else {
+        setMarketCommentary(fallbackMarketCommentary(commentaryResult.reason instanceof Error ? commentaryResult.reason.message : "请求失败"));
+      }
+      if (summaryResult.status === "fulfilled") {
+        setNewsSummary(summaryResult.value);
       }
       if (riskResult.status === "fulfilled") {
         setRiskAlerts(riskResult.value);
@@ -406,6 +517,7 @@ export function App() {
   const issueCount = result?.preflight_issues.length ?? 0;
   const riskAlertCount = riskAlerts?.items.length ?? 0;
   const closedTrades = result?.metrics.trade_count ?? 0;
+  const visibleTrades = result ? mergeBacktestTrades(streamedTrades, result.trades) : streamedTrades;
   const poolLabel = {
     all: "全A",
     main_board: "沪深主板",
@@ -451,8 +563,12 @@ export function App() {
         </div>
       </header>
       <div className="market-news-layout">
-        <MarketDashboard snapshot={marketSnapshot} isLoading={isLoadingMarket} />
+        <MarketDashboard snapshot={marketSnapshot} isLoading={isLoadingMarket} refreshMeta={marketRefreshMeta} />
         <NewsPanel news={marketNews} isLoading={isLoadingNews} onRefresh={refreshNews} />
+      </div>
+      <div className="market-insight-layout">
+        <MarketCommentaryPanel commentary={marketCommentary} isLoading={isLoadingNews} />
+        <NewsSummaryPanel summary={newsSummary} isLoading={isLoadingNews} />
       </div>
       <TonghuashunBriefingPanel fupan={fupanBriefing} zaopan={zaopanBriefing} />
       <section className="summary-band" aria-label="工作台概览">
@@ -512,10 +628,13 @@ export function App() {
           recommendedStrategies={recommendedStrategies}
           savedStrategies={savedStrategies}
           strategySaveMessage={strategySaveMessage}
+          pendingStrategySaveName={pendingStrategySave?.name ?? null}
           onValidateCondition={handleValidateCondition}
           validateConditionText={validateConditionText}
           onApplySavedStrategy={applySavedStrategy}
           onDeleteSavedStrategy={deleteSavedStrategy}
+          onConfirmPendingStrategySave={confirmPendingStrategySave}
+          onDismissPendingStrategySave={dismissPendingStrategySave}
           onSettingsDraftErrorsChange={setSettingsDraftErrors}
         />
         {error ? <div className="error-banner" role="alert">{error}</div> : null}
@@ -529,7 +648,7 @@ export function App() {
             riskAlertCount={riskAlertCount}
             onOpenRiskAlerts={() => setRiskModalOpen(true)}
           />
-          <TradesTable trades={isRunningBacktest ? streamedTrades : result?.trades ?? streamedTrades} />
+          <TradesTable trades={isRunningBacktest ? streamedTrades : visibleTrades} />
         </div>
         <DataCenter
           cacheDir=".astock-cache"

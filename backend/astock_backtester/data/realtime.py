@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 from typing import Callable, Iterable
 
 import pandas as pd
@@ -27,10 +27,6 @@ INDEXES = [
 ]
 
 YESTERDAY_SECTOR_TRACKING_NOTE = "昨日强势板块追踪来自本地历史。"
-EASTMONEY_HEADERS = {
-    "Referer": "https://quote.eastmoney.com/",
-    "User-Agent": "Mozilla/5.0",
-}
 THS_HEADERS = {
     "Referer": "https://q.10jqka.com.cn/",
     "User-Agent": "Mozilla/5.0",
@@ -39,20 +35,11 @@ THS_HOT_TOPIC_HEADERS = {
     "Referer": "http://zx.10jqka.com.cn/",
     "User-Agent": "Mozilla/5.0",
 }
-EASTMONEY_UT = "bd1d9ddb04089700cf9c27f6f7426281"
-CONCEPT_FIELDS = "f2,f3,f4,f8,f12,f14,f20,f104,f105,f128,f136"
-INDUSTRY_FIELDS = "f1,f2,f3,f4,f8,f12,f14,f20,f104,f105,f128,f136"
-A_SHARE_BREADTH_FIELDS = "f12,f14,f3"
-CONCEPT_FS = "m:90+t:3+f:!50"
-INDUSTRY_FS = "m:90+t:2+f:!50"
-A_SHARE_BREADTH_FS = "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048"
-A_SHARE_BREADTH_SEGMENT_FS = (
-    "m:0+t:6",
-    "m:0+t:80",
-    "m:1+t:2",
-    "m:1+t:23",
-    "m:0+t:81+s:2048",
-)
+SINA_HEADERS = {
+    "Referer": "https://finance.sina.com.cn/",
+    "User-Agent": "Mozilla/5.0",
+}
+SINA_BREADTH_BATCH_SIZE = 400
 THS_MARKET_SUMMARY_URL = "https://q.10jqka.com.cn/index/index/board/all/"
 THS_CONCEPT_SECTION_URL = "https://q.10jqka.com.cn/gn/"
 THS_INDUSTRY_HTML_URL = "https://q.10jqka.com.cn/thshy/index/field/199112/order/desc/page/{page}/"
@@ -258,6 +245,45 @@ def _append_yesterday_sector_note(message: str, yesterday_sectors: list[SectorMo
     return f"{message} {YESTERDAY_SECTOR_TRACKING_NOTE}"
 
 
+def _market_phase(now: datetime) -> str:
+    local = now.astimezone(timezone(timedelta(hours=8)))
+    if local.weekday() >= 5:
+        return "non_trading"
+    current = local.time()
+    if current < time(9, 30):
+        return "pre_open"
+    if time(11, 30) <= current < time(13, 0):
+        return "lunch_break"
+    if current >= time(15, 0):
+        return "post_close"
+    return "trading"
+
+
+def _phase_diagnostic(phase: str) -> str | None:
+    return {
+        "non_trading": "周末或非交易日，降低实时接口刷新频率。",
+        "pre_open": "盘前非连续竞价时段，降低实时接口刷新频率。",
+        "lunch_break": "午间休市，降低实时接口刷新频率。",
+        "post_close": "收盘后，降低实时接口刷新频率。",
+    }.get(phase)
+
+
+def _is_renderable_snapshot(snapshot: RealtimeMarketSnapshot) -> bool:
+    return bool(snapshot.indexes and snapshot.breadth and snapshot.breadth.total > 0 and snapshot.strong_sectors)
+
+
+def unavailable_market_snapshot(message: str, *, diagnostics: list[str] | None = None) -> RealtimeMarketSnapshot:
+    now = datetime.now(timezone.utc)
+    return RealtimeMarketSnapshot(
+        status="unavailable",
+        source="service-fallback",
+        updated_at=now,
+        market_phase=_market_phase(now),
+        message=message,
+        diagnostics=diagnostics or [],
+    )
+
+
 @dataclass
 class RealtimeMarketProvider:
     warehouse: Warehouse
@@ -267,9 +293,15 @@ class RealtimeMarketProvider:
     _sector_member_cache: dict[str, list[str]] = field(default_factory=dict, init=False, repr=False)
     _ths_concept_rows_cache: list[dict] | None = field(default=None, init=False, repr=False)
     _ths_industry_rows_cache: list[dict] | None = field(default=None, init=False, repr=False)
+    _last_successful_snapshot: RealtimeMarketSnapshot | None = field(default=None, init=False, repr=False)
 
     def market_snapshot(self) -> RealtimeMarketSnapshot:
         now = datetime.now(timezone.utc)
+        phase = _market_phase(now)
+        diagnostics: list[str] = []
+        phase_note = _phase_diagnostic(phase)
+        if phase_note:
+            diagnostics.append(phase_note)
         self._ths_concept_rows_cache = None
         self._ths_industry_rows_cache = None
         self._last_live_sector_rows = []
@@ -281,6 +313,12 @@ class RealtimeMarketProvider:
         yesterday_sectors = local_snapshot.yesterday_strong_sectors
         breadth = live_breadth or local_snapshot.breadth
         status = "live" if indexes else local_snapshot.status
+        if not indexes:
+            diagnostics.append("实时指数接口暂不可用，尝试使用最近成功快照或本地最近交易日。")
+        if indexes and not live_breadth and local_snapshot.breadth:
+            diagnostics.append("实时红绿家数接口暂不可用，已回退到本地最近交易日统计。")
+        if indexes and not live_sectors and local_snapshot.strong_sectors:
+            diagnostics.append("实时强势题材接口暂不可用，已回退到本地最近交易日题材聚合。")
         source_parts: list[str] = []
         if indexes:
             source_parts.append("ashare-sina")
@@ -300,16 +338,42 @@ class RealtimeMarketProvider:
         else:
             message = self._build_live_message(live_breadth, live_sectors)
         message = _append_yesterday_sector_note(message, yesterday_sectors)
-        return RealtimeMarketSnapshot(
+        snapshot = RealtimeMarketSnapshot(
             status=status,
             source=source,
             updated_at=now,
+            market_phase=phase,
             indexes=indexes or local_snapshot.indexes,
             breadth=breadth,
             strong_sectors=strong_sectors,
             yesterday_strong_sectors=yesterday_sectors,
             message=message,
+            diagnostics=diagnostics,
         )
+        if snapshot.status == "live" and _is_renderable_snapshot(snapshot):
+            self._last_successful_snapshot = snapshot.model_copy(deep=True)
+            return snapshot
+        if self._last_successful_snapshot is not None and not indexes:
+            retained = self._last_successful_snapshot.model_copy(deep=True)
+            retained.status = "stale"
+            retained.updated_at = now
+            retained.market_phase = phase
+            retained.source = (
+                retained.source
+                if retained.source.endswith("+retained-last-success")
+                else f"{retained.source}+retained-last-success"
+            )
+            retained.message = _append_yesterday_sector_note(
+                f"{phase_note or '实时接口暂不可用'} 沿用最近成功行情快照。", retained.yesterday_strong_sectors
+            )
+            retained.diagnostics = [
+                *diagnostics,
+                f"沿用最近成功行情快照：{self._last_successful_snapshot.updated_at.isoformat()}。",
+            ]
+            return retained
+        if snapshot.status == "stale" and _is_renderable_snapshot(snapshot):
+            self._last_successful_snapshot = snapshot.model_copy(deep=True)
+        return snapshot
 
     def _fetch_indexes(self) -> list[MarketIndexQuote]:
         symbols = ",".join(symbol for symbol, _ in INDEXES)
@@ -338,46 +402,20 @@ class RealtimeMarketProvider:
         if ths_concept_sectors:
             self._last_live_sector_rows = ths_concept_rows
             return _dedupe_sectors(ths_concept_sectors, 10)
-        concept_rows = self._fetch_sector_rows(CONCEPT_FS, CONCEPT_FIELDS)
-        concept_sectors = self._parse_sector_rows(
-            concept_rows,
-            "eastmoney-sector",
-        )
-        if concept_sectors:
-            self._last_live_sector_rows = [dict(row, _source="eastmoney-sector") for row in concept_rows]
-            return _dedupe_sectors(concept_sectors, 10)
         ths_industry_rows = self._fetch_ths_industry_html_rows()
         ths_industry_sectors = self._parse_sector_rows(ths_industry_rows, "ths-industry-html")
         if ths_industry_sectors:
             self._last_live_sector_rows = ths_industry_rows
             return _dedupe_sectors(ths_industry_sectors, 10)
-        industry_rows = self._fetch_sector_rows(INDUSTRY_FS, INDUSTRY_FIELDS)
-        industry_sectors = self._parse_sector_rows(
-            industry_rows,
-            "eastmoney-industry-sector",
-        )
-        if industry_sectors:
-            self._last_live_sector_rows = [dict(row, _source="eastmoney-industry-sector") for row in industry_rows]
-            return _dedupe_sectors(industry_sectors, 10)
         sina_sectors = self._fetch_sina_sectors()
         self._last_live_sector_rows = []
         if sina_sectors:
             return _dedupe_sectors(sina_sectors, 10)
         ths_hot_topic_rows = self._fetch_ths_hot_topic_rows()
         if ths_hot_topic_rows:
+            # Hot-reason rows are useful topic candidates, but their gains are
+            # individual stock moves. Do not present them as board quote pct.
             self._last_live_sector_rows = ths_hot_topic_rows
-            return _dedupe_sectors(
-                [
-                    SectorMover(
-                        name=row["name"],
-                        change_pct=_normalize_change_pct(row["change_pct"]) or 0.0,
-                        leading_symbol=row.get("leading_symbol"),
-                        source="ths-hot-reason",
-                    )
-                    for row in ths_hot_topic_rows
-                ],
-                10,
-            )
         return []
 
     def _parse_sector_rows(self, rows: list[dict], source: str) -> list[SectorMover]:
@@ -389,7 +427,7 @@ class RealtimeMarketProvider:
             change_pct = _normalize_sector_change_pct(row)
             if change_pct is None:
                 continue
-            leader = str(row.get("f128") or row.get("leading_symbol") or "").strip() or None
+            leader = str(row.get("f140") or row.get("f128") or row.get("leading_symbol") or "").strip() or None
             sectors.append(
                 SectorMover(
                     name=name,
@@ -400,57 +438,65 @@ class RealtimeMarketProvider:
             )
         return sectors
 
-    def _fetch_sector_rows(self, fs: str, fields: str) -> list[dict]:
-        try:
-            response = self.requester(
-                "https://push2.eastmoney.com/api/qt/clist/get",
-                params={
-                    "pn": "1",
-                    "pz": "100",
-                    "po": "1",
-                    "np": "1",
-                    "ut": EASTMONEY_UT,
-                    "fltt": "2",
-                    "invt": "2",
-                    "fid": "f3",
-                    "fs": fs,
-                    "fields": fields,
-                },
-                timeout=self.timeout,
-                headers=EASTMONEY_HEADERS,
-            )
-            response.raise_for_status()
-            return (((response.json() or {}).get("data") or {}).get("diff")) or []
-        except Exception:
-            return []
-
     def _fetch_live_breadth(self) -> MarketBreadth | None:
         ths_breadth = self._fetch_ths_market_summary_breadth()
         if ths_breadth:
             return ths_breadth
-        rows = self._fetch_eastmoney_breadth_rows()
-        if not rows:
+        sina_breadth = self._fetch_sina_breadth()
+        if sina_breadth:
+            return sina_breadth
+        return None
+
+    def _fetch_sina_breadth(self) -> MarketBreadth | None:
+        symbols = self._latest_local_symbols()
+        if not symbols:
             return None
+        sina_symbols = [sina_symbol for symbol in symbols if (sina_symbol := self._sina_stock_symbol(symbol))]
+        if not sina_symbols:
+            return None
+
         up = 0
         down = 0
         flat = 0
-        seen_codes: set[str] = set()
-        for row in rows:
-            code = str(row.get("f12") or "").strip()
-            if code:
-                if code in seen_codes:
-                    continue
-                seen_codes.add(code)
+        seen: set[str] = set()
+        for start in range(0, len(sina_symbols), SINA_BREADTH_BATCH_SIZE):
+            batch = sina_symbols[start : start + SINA_BREADTH_BATCH_SIZE]
             try:
-                change_pct = float(row.get("f3", 0))
-            except (TypeError, ValueError):
-                continue
-            if change_pct > 0:
-                up += 1
-            elif change_pct < 0:
-                down += 1
+                response = self.requester(
+                    "https://hq.sinajs.cn/list=" + ",".join(batch),
+                    timeout=self.timeout,
+                    headers=SINA_HEADERS,
+                )
+                response.raise_for_status()
+            except Exception:
+                return None
+            raw_content = getattr(response, "content", b"")
+            if raw_content:
+                text = raw_content.decode("gbk", errors="ignore")
             else:
-                flat += 1
+                response.encoding = response.encoding or "gbk"
+                text = response.text
+            decoded = _decode_sina_response(text)
+            if not decoded:
+                continue
+            for sina_symbol in batch:
+                values = decoded.get(sina_symbol, [])
+                if len(values) < 4:
+                    continue
+                previous_close = _parse_float(values[2])
+                last = _parse_float(values[3])
+                if previous_close is None or previous_close <= 0 or last is None or last <= 0:
+                    continue
+                symbol = normalize_symbol(sina_symbol[-6:])
+                if symbol in seen:
+                    continue
+                seen.add(symbol)
+                if last > previous_close:
+                    up += 1
+                elif last < previous_close:
+                    down += 1
+                else:
+                    flat += 1
         total = up + down + flat
         if total == 0:
             return None
@@ -459,51 +505,36 @@ class RealtimeMarketProvider:
             down=down,
             flat=flat,
             total=total,
-            source="eastmoney-a-share-live",
+            source="sina-a-share-live",
         )
 
-    def _fetch_eastmoney_breadth_rows(self) -> list[dict]:
-        rows: list[dict] = []
-        for fs in A_SHARE_BREADTH_SEGMENT_FS:
-            rows.extend(self._fetch_eastmoney_breadth_segment_rows(fs))
-        return rows
+    def _latest_local_symbols(self) -> list[str]:
+        try:
+            latest = self.warehouse.read_latest_daily_bars(days=1)
+        except Exception:
+            return []
+        if latest.empty or "symbol" not in latest.columns:
+            return []
+        symbols: list[str] = []
+        seen: set[str] = set()
+        for value in latest["symbol"].dropna():
+            symbol = normalize_symbol(str(value))
+            if symbol and symbol not in seen:
+                symbols.append(symbol)
+                seen.add(symbol)
+        return symbols
 
-    def _fetch_eastmoney_breadth_segment_rows(self, fs: str, page_size: int = 3000, max_pages: int = 3) -> list[dict]:
-        rows: list[dict] = []
-        for page in range(1, max_pages + 1):
-            try:
-                response = self.requester(
-                    "https://82.push2.eastmoney.com/api/qt/clist/get",
-                    params={
-                        "pn": str(page),
-                        "pz": str(page_size),
-                        "po": "1",
-                        "np": "1",
-                        "ut": EASTMONEY_UT,
-                        "fltt": "2",
-                        "invt": "2",
-                        "fid": "f12",
-                        "fs": fs,
-                        "fields": A_SHARE_BREADTH_FIELDS,
-                    },
-                    timeout=self.timeout,
-                    headers=EASTMONEY_HEADERS,
-                )
-                response.raise_for_status()
-                data = (response.json() or {}).get("data") or {}
-                page_rows = data.get("diff") or []
-            except Exception:
-                break
-            if not page_rows:
-                break
-            rows.extend(page_rows)
-            total = _parse_int(data.get("total")) or 0
-            if total:
-                if len(rows) >= total:
-                    break
-            elif len(page_rows) < page_size:
-                break
-        return rows
+    def _sina_stock_symbol(self, symbol: str) -> str | None:
+        code = normalize_symbol(symbol)
+        if not code:
+            return None
+        if code.startswith(("6", "9")):
+            return f"sh{code}"
+        if code.startswith(("0", "2", "3")):
+            return f"sz{code}"
+        if code.startswith(("4", "8")):
+            return f"bj{code}"
+        return None
 
     def _fetch_sina_sectors(self) -> list[SectorMover]:
         try:
@@ -521,6 +552,24 @@ class RealtimeMarketProvider:
         response.encoding = response.encoding or "gbk"
         text = response.text
         rows: list[dict] = []
+        for match in re.finditer(r'"[^"]+"\s*:\s*"([^"]+)"', text):
+            values = match.group(1).split(",")
+            if len(values) < 6:
+                continue
+            name = values[1].strip()
+            pct_text = values[5].strip()
+            leader = values[8].strip() if len(values) > 8 else ""
+            if name and _parse_float(pct_text) is not None:
+                rows.append(
+                    {
+                        "name": name,
+                        "change_pct": pct_text,
+                        "_change_pct_unit": "percent",
+                        "leading_symbol": leader,
+                    }
+                )
+        if rows:
+            return self._parse_sector_rows(rows, "sina-sector")
         for chunk in text.split("},"):
             if "name:" not in chunk or "changepercent:" not in chunk:
                 continue
@@ -530,7 +579,14 @@ class RealtimeMarketProvider:
                 leader = ""
                 if "symbol:" in chunk:
                     leader = chunk.split("symbol:", 1)[1].split(",", 1)[0].strip("'\" ")
-                rows.append({"name": name, "change_pct": pct_text, "leading_symbol": leader})
+                rows.append(
+                    {
+                        "name": name,
+                        "change_pct": pct_text,
+                        "_change_pct_unit": "percent",
+                        "leading_symbol": leader,
+                    }
+                )
             except Exception:
                 continue
         return self._parse_sector_rows(rows, "sina-sector")
@@ -732,14 +788,12 @@ class RealtimeMarketProvider:
     ) -> str:
         breadth_label = {
             "ths-market-summary": "同花顺市场总览",
-            "eastmoney-a-share-live": "东方财富实时全A",
+            "sina-a-share-live": "新浪实时个股",
         }.get(live_breadth.source if live_breadth else None)
         sector_label = {
             "ths-hot-reason": "同花顺热点归因",
             "ths-concept-section": "同花顺概念题材板块",
             "ths-industry-html": "同花顺行业板块总览",
-            "eastmoney-sector": "东方财富概念板块",
-            "eastmoney-industry-sector": "东方财富行业板块",
             "sina-sector": "新浪行业板块",
         }.get(live_sectors[0].source if live_sectors else None)
 
@@ -748,7 +802,7 @@ class RealtimeMarketProvider:
         if sector_label:
             return f"实时指数来自 Ashare/Sina，强势题材来自{sector_label}，红绿家数暂回退到本地最近交易日。"
         if breadth_label:
-            return f"实时指数与红绿家数来自 Ashare/Sina 和{breadth_label}，强势题材暂不可用。"
+            return f"实时指数来自 Ashare/Sina，红绿家数来自{breadth_label}，强势题材暂不可用。"
         return "实时指数来自 Ashare/Sina，红绿家数与强势题材暂回退到本地最近交易日。"
 
     def _snapshot_from_local(self, now: datetime) -> RealtimeMarketSnapshot:
@@ -759,14 +813,18 @@ class RealtimeMarketProvider:
                 status="unavailable",
                 source="local",
                 updated_at=now,
+                market_phase=_market_phase(now),
                 message=f"实时行情不可用，本地数据读取失败：{exc}",
+                diagnostics=[f"本地最近交易日读取失败：{exc}"],
             )
         if bars.empty:
             return RealtimeMarketSnapshot(
                 status="unavailable",
                 source="local",
                 updated_at=now,
+                market_phase=_market_phase(now),
                 message="实时行情不可用，本地历史数据为空。",
+                diagnostics=["本地最近交易日为空，无法生成兜底快照。"],
             )
 
         data = bars.copy()
@@ -807,11 +865,13 @@ class RealtimeMarketProvider:
             status="stale",
             source="local-latest",
             updated_at=now,
+            market_phase=_market_phase(now),
             indexes=[pseudo_index],
             breadth=breadth,
             strong_sectors=local_sectors,
             yesterday_strong_sectors=yesterday_sectors,
             message=message,
+            diagnostics=[f"已使用本地最近交易日 {latest_date.date()} 作为兜底快照。"],
         )
 
     def _with_previous_close(
@@ -834,12 +894,17 @@ class RealtimeMarketProvider:
         return current
 
     def _local_market_groups(self, latest: pd.DataFrame, source: str) -> list[SectorMover]:
-        if latest.empty or not self._last_live_sector_rows:
+        sector_rows = self._last_live_sector_rows
+        if latest.empty:
+            return []
+        if not sector_rows:
+            sector_rows = self._fetch_ths_hot_topic_rows()
+        if not sector_rows:
             return []
         rows: list[SectorMover] = []
         data = latest.copy()
         data["symbol"] = data["symbol"].astype(str).map(normalize_symbol)
-        for board in self._last_live_sector_rows[:20]:
+        for board in sector_rows[:20]:
             board_code = str(board.get("f12") or board.get("code") or "").strip()
             board_name = str(board.get("f14") or board.get("name") or "").strip()
             members = [normalize_symbol(item) for item in board.get("members") or [] if str(item).strip()]
@@ -869,35 +934,7 @@ class RealtimeMarketProvider:
         cached = self._sector_member_cache.get(board_code)
         if cached is not None:
             return cached
-        if board_code.startswith("BK"):
-            try:
-                response = self.requester(
-                    "https://29.push2.eastmoney.com/api/qt/clist/get",
-                    params={
-                        "pn": "1",
-                        "pz": "500",
-                        "po": "1",
-                        "np": "1",
-                        "ut": EASTMONEY_UT,
-                        "fltt": "2",
-                        "invt": "2",
-                        "fid": "f12",
-                        "fs": f"b:{board_code}+f:!50",
-                        "fields": "f12",
-                    },
-                    timeout=self.timeout,
-                    headers=EASTMONEY_HEADERS,
-                )
-                response.raise_for_status()
-                diff = (((response.json() or {}).get("data") or {}).get("diff")) or []
-                members = [
-                    normalize_symbol(str(item.get("f12")).strip())
-                    for item in diff
-                    if str(item.get("f12") or "").strip()
-                ]
-            except Exception:
-                members = []
-        elif board_code.isdigit() and board_code.startswith("88"):
+        if board_code.isdigit() and board_code.startswith("88"):
             members = self._fetch_ths_board_members(board_code)
         else:
             members = []

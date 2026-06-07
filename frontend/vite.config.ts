@@ -3,12 +3,16 @@ import { realpathSync } from "node:fs";
 import { fileURLToPath, URL } from "node:url";
 import { resolve } from "node:path";
 import { defineConfig } from "vite";
+import { readPackageVersion } from "./appVersion";
 
 const frontendRoot = realpathSync(fileURLToPath(new URL(".", import.meta.url)));
 
 export default defineConfig({
   root: frontendRoot,
   plugins: [react()],
+  define: {
+    __APP_VERSION__: JSON.stringify(readPackageVersion(frontendRoot))
+  },
   server: {
     port: 1420,
     strictPort: false
