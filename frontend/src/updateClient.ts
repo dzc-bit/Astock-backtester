@@ -4,6 +4,8 @@ import { check } from "@tauri-apps/plugin-updater";
 import type { DownloadEvent } from "@tauri-apps/plugin-updater";
 
 declare global {
+  const __APP_VERSION__: string;
+
   interface Window {
     __TAURI_INTERNALS__?: unknown;
   }
@@ -66,7 +68,7 @@ export function createTauriUpdateApi(): UpdateApi {
     isRuntime: isTauriRuntime,
     async getVersion() {
       if (!isTauriRuntime()) {
-        return "0.1.0";
+        return __APP_VERSION__;
       }
       return getVersion();
     },

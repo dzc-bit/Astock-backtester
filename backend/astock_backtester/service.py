@@ -23,7 +23,7 @@ from astock_backtester.data.providers import ADataProvider, CompositeProvider, H
 from astock_backtester.data.market_commentary import MarketCommentaryProvider
 from astock_backtester.data.news import MarketNewsProvider
 from astock_backtester.data.news_summary import MarketNewsSummaryProvider
-from astock_backtester.data.realtime import RealtimeMarketProvider
+from astock_backtester.data.realtime import RealtimeMarketProvider, unavailable_market_snapshot
 from astock_backtester.data.risk import RiskAlertProvider
 from astock_backtester.data.sync import SyncJobManager
 from astock_backtester.data.warehouse import Warehouse
@@ -57,6 +57,27 @@ class DataServiceState:
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }
         )
+
+
+def _retained_realtime_snapshot(provider: Any, exc: Exception):
+    retained = getattr(provider, "_last_successful_snapshot", None)
+    if retained is None:
+        return None
+    snapshot = retained.model_copy(deep=True)
+    snapshot.status = "stale"
+    snapshot.updated_at = datetime.now(timezone.utc)
+    snapshot.source = (
+        snapshot.source
+        if snapshot.source.endswith("+service-retained-last-success")
+        else f"{snapshot.source}+service-retained-last-success"
+    )
+    snapshot.message = "实时行情接口暂不可用，沿用最近成功行情快照。"
+    snapshot.diagnostics = [
+        *snapshot.diagnostics,
+        f"实时行情接口失败：{exc}",
+        f"沿用最近成功行情快照：{retained.updated_at.isoformat()}。",
+    ]
+    return snapshot
 
 
 class DataServiceServer(ThreadingHTTPServer):
@@ -157,7 +178,16 @@ class DataServiceHandler(BaseHTTPRequestHandler):
             self._send_json({"items": list(self.server.state.logs)})
             return
         if self.path == "/realtime/market-snapshot":
-            snapshot = self.server.state.realtime_provider.market_snapshot()
+            try:
+                snapshot = self.server.state.realtime_provider.market_snapshot()
+            except Exception as exc:
+                self.server.state.log("error", f"realtime market snapshot failed: {exc}")
+                snapshot = _retained_realtime_snapshot(self.server.state.realtime_provider, exc)
+                if snapshot is None:
+                    snapshot = unavailable_market_snapshot(
+                        "实时行情接口暂不可用，已保留页面最近数据。",
+                        diagnostics=[f"实时行情接口失败：{exc}"],
+                    )
             self._send_json(snapshot.model_dump(mode="json"))
             return
         if self.path == "/market/news":

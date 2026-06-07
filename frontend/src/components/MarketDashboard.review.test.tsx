@@ -45,3 +45,39 @@ it("does not mix commentary into live intraday snapshots", () => {
   expect(screen.queryByText(/收盘后板块解读：/)).not.toBeInTheDocument();
   expect(screen.queryByText(/行情评价：/)).not.toBeInTheDocument();
 });
+
+it("shows refresh fallback metadata while preserving the last successful snapshot", () => {
+  render(
+    <MarketDashboard
+      snapshot={buildSnapshot({
+        status: "live",
+        indexes: [
+          {
+            symbol: "sh000001",
+            name: "上证指数",
+            last: 3120.5,
+            previous_close: 3100,
+            change: 20.5,
+            change_pct: 0.0066,
+            source: "test",
+            updated_at: "2026-06-05T14:50:00+08:00"
+          }
+        ]
+      })}
+      refreshMeta={{
+        phase: "post_close",
+        status: "using_last_success",
+        message: "实时接口暂不可用，使用最近数据",
+        last_success_at: "2026-06-05T14:50:00+08:00",
+        last_error: "timeout",
+        next_refresh_ms: 300_000
+      }}
+    />
+  );
+
+  expect(screen.getByText("上证指数")).toBeInTheDocument();
+  expect(screen.getByText("3,120.5")).toBeInTheDocument();
+  expect(screen.getByText("使用最近数据")).toBeInTheDocument();
+  expect(screen.getByText(/收盘后/)).toBeInTheDocument();
+  expect(screen.getByText(/实时接口暂不可用/)).toBeInTheDocument();
+});

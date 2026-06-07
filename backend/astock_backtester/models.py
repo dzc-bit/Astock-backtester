@@ -202,11 +202,13 @@ class RealtimeMarketSnapshot(BaseModel):
     status: Literal["live", "stale", "unavailable"]
     source: str
     updated_at: datetime
+    market_phase: Literal["trading", "pre_open", "lunch_break", "post_close", "non_trading"] = "trading"
     indexes: list[MarketIndexQuote] = Field(default_factory=list)
     breadth: MarketBreadth | None = None
     strong_sectors: list[SectorMover] = Field(default_factory=list)
     yesterday_strong_sectors: list[SectorMover] = Field(default_factory=list)
     message: str
+    diagnostics: list[str] = Field(default_factory=list)
 
 
 class MarketNewsItem(BaseModel):
@@ -235,6 +237,7 @@ class MarketCommentaryResponse(BaseModel):
     updated_at: datetime
     trade_date: date
     source: str
+    mode: Literal["intraday", "lunch_break_review", "post_close", "non_trading_review", "news_fallback"] = "intraday"
     stance: Literal["positive", "neutral", "defensive"]
     summary: str
     drivers: list[MarketCommentaryPoint] = Field(default_factory=list)

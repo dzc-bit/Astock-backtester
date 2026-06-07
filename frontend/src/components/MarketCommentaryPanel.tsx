@@ -238,7 +238,7 @@ export function MarketCommentaryPanel({ commentary, isLoading = false }: Props) 
                   <h3>主线</h3>
                 </div>
                 {commentary.drivers.length > 0 ? (
-                  commentary.drivers.map((driver) => (
+                  commentary.drivers.slice(0, 1).map((driver) => (
                     <article className={`commentary-mainline ${driver.weight}`} key={driver.title}>
                       <div className="commentary-mainline-title">
                         <strong>{driver.title}</strong>
@@ -258,7 +258,7 @@ export function MarketCommentaryPanel({ commentary, isLoading = false }: Props) 
                   <h3>风险</h3>
                 </div>
                 {commentary.risks.length > 0 ? (
-                  commentary.risks.map((risk, index) => (
+                  commentary.risks.slice(0, 1).map((risk, index) => (
                     <article className="commentary-risk medium" key={`risk-${index}`}>
                       <strong>风险提示</strong>
                       <p>{compactText(risk, 76)}</p>
@@ -276,7 +276,7 @@ export function MarketCommentaryPanel({ commentary, isLoading = false }: Props) 
                 </div>
                 {commentary.next_watch.length > 0 ? (
                   <ul className="watchpoint-list">
-                    {commentary.next_watch.map((item, index) => (
+                    {commentary.next_watch.slice(0, 2).map((item, index) => (
                       <li key={`watch-${index}`}>{compactText(item, 72)}</li>
                     ))}
                   </ul>

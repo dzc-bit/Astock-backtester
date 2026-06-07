@@ -51,6 +51,25 @@ def _is_number_text(value: str) -> bool:
     return bool(re.search(r"[+-]?\d+(?:\.\d+)?", value))
 
 
+def _is_rank_text(value: str) -> bool:
+    return bool(re.fullmatch(r"\d{1,3}", value.strip()))
+
+
+def _is_stock_gain_price_row(row: list[str], title: str | None) -> bool:
+    title_text = title or ""
+    return (
+        _is_stock_like_title(title_text)
+        and (
+            (len(row) >= 3 and _is_percent_text(row[1]) and _is_number_text(row[2]))
+            or (len(row) == 2 and _is_percent_text(row[1]))
+        )
+    )
+
+
+def _is_stock_like_title(title: str | None) -> bool:
+    return any(keyword in (title or "") for keyword in ("个股", "股票", "热门个股", "异动个股"))
+
+
 def _neutral_columns(width: int) -> list[str]:
     labels = ["名称", "数值一", "数值二", "数值三", "数值四", "数值五", "数值六", "数值七"]
     return [labels[index] if index < len(labels) else f"数值{index + 1}" for index in range(width)]
@@ -62,7 +81,7 @@ def _infer_table_columns(rows: list[list[str]], title: str | None) -> list[str]:
     title_text = title or ""
     second_is_percent = len(first_data_row) > 1 and _is_percent_text(first_data_row[1])
     third_is_number = len(first_data_row) > 2 and _is_number_text(first_data_row[2])
-    stock_like_title = any(keyword in title_text for keyword in ("个股", "股票", "热门个股", "异动个股"))
+    stock_like_title = _is_stock_like_title(title_text)
     rank_like_title = any(keyword in title_text for keyword in ("涨幅榜", "跌幅榜", "排行榜", "榜单"))
 
     if width >= 3 and second_is_percent and third_is_number:
@@ -107,7 +126,7 @@ def _readable_content_from_node(node: Tag | None) -> str:
     if not blocks:
         blocks = [_node_text(node)]
     filtered = [block for block in blocks if block and not _is_noisy_content_line(block)]
-    return _clean_text(" ".join(filtered))
+    return "\n\n".join(_clean_text(block) for block in filtered)
 
 
 def _ths_headers(referer: str = THS_REFERER) -> dict[str, str]:
@@ -143,9 +162,14 @@ def _table_from_node(table: Tag, title: str | None = None) -> MarketBriefingTabl
         columns = rows[0]
         data_rows = rows[1:]
     else:
-        max_width = max(len(row) for row in rows)
-        columns = _infer_table_columns(rows, title)
         data_rows = rows
+        if not _is_stock_like_title(title) and all(_is_noisy_content_line(" ".join(row)) for row in data_rows):
+            return None
+        if data_rows and len(data_rows[0]) >= 3 and _is_rank_text(data_rows[0][0]):
+            stripped_rows = [row[1:] if len(row) >= 3 and _is_rank_text(row[0]) else row for row in data_rows]
+            if stripped_rows and _is_stock_gain_price_row(stripped_rows[0], title):
+                data_rows = stripped_rows
+        columns = _infer_table_columns(data_rows, title)
 
     normalized_rows: list[dict[str, str]] = []
     for row in data_rows[:8]:
@@ -185,6 +209,18 @@ def _remove_non_textual_nodes(node: Tag) -> Tag:
         return node
     for child in root.select("script,style,table,a,img,svg,canvas"):
         child.decompose()
+    return root
+
+
+def _remove_non_body_nodes(node: Tag) -> Tag:
+    root = _remove_non_textual_nodes(node)
+    for child in root.select("h1,h2,h3,.title,.hd"):
+        child.decompose()
+    for child in root.select("strong"):
+        if child.parent and child.parent.name in {"div", "section", "article"}:
+            child.decompose()
+        else:
+            child.unwrap()
     return root
 
 
@@ -379,7 +415,7 @@ class MarketBriefingProvider:
                 for table in (_table_from_node(node, title=title) for node in part.select("table")[:2])
                 if table is not None
             ]
-            content_root = _remove_non_textual_nodes(part)
+            content_root = _remove_non_body_nodes(part)
             content = _readable_content_from_node(content_root)
             if content or tables:
                 sections.append(

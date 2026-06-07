@@ -38,7 +38,8 @@ def _news_theme_text(news: MarketNewsResponse | None) -> str | None:
 
 def _snapshot_missing_reasons(snapshot: RealtimeMarketSnapshot) -> list[str]:
     reasons: list[str] = []
-    if snapshot.status != "live":
+    can_review_stale = snapshot.status == "stale" and snapshot.market_phase in {"post_close", "non_trading", "lunch_break"}
+    if snapshot.status != "live" and not can_review_stale:
         reasons.append(f"快照状态为 {snapshot.status}")
     if not snapshot.indexes:
         reasons.append("缺少指数")
@@ -69,6 +70,8 @@ class MarketCommentaryProvider:
 
         if snapshot is None:
             return self._news_fallback(now, news, diagnostics)
+
+        diagnostics.extend(snapshot.diagnostics)
 
         if snapshot.status == "unavailable":
             if snapshot is not None and snapshot.message:
@@ -209,13 +212,32 @@ class MarketCommentaryProvider:
             updated_at=now,
             trade_date=_today_from_snapshot(snapshot).date(),
             source=f"{snapshot.source}+commentary",
+            mode=self._commentary_mode(snapshot),
             stance=stance,
-            summary=" ".join(summary_parts),
+            summary=f"{self._summary_prefix(snapshot)}{' '.join(summary_parts)}",
             drivers=drivers,
             risks=risks,
             next_watch=next_watch,
             diagnostics=diagnostics,
         )
+
+    def _commentary_mode(self, snapshot: RealtimeMarketSnapshot) -> str:
+        if snapshot.market_phase == "non_trading":
+            return "non_trading_review"
+        if snapshot.market_phase == "lunch_break":
+            return "lunch_break_review"
+        if snapshot.market_phase == "post_close":
+            return "post_close"
+        return "intraday"
+
+    def _summary_prefix(self, snapshot: RealtimeMarketSnapshot) -> str:
+        if snapshot.market_phase == "non_trading":
+            return "非交易日最近交易日回顾："
+        if snapshot.market_phase == "post_close":
+            return "收盘后复盘："
+        if snapshot.market_phase == "lunch_break":
+            return "午间盘面回顾："
+        return ""
 
     def _news_fallback(
         self,
@@ -252,6 +274,7 @@ class MarketCommentaryProvider:
             updated_at=now,
             trade_date=trade_date,
             source=source,
+            mode="news_fallback",
             stance="defensive",
             summary=summary,
             drivers=drivers,

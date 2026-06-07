@@ -80,7 +80,7 @@ def test_market_briefing_provider_keeps_full_ths_zaopan_summary_main_and_sidebar
     assert response.sections[0].content == long_main_body
     assert main_sentinel in (response.sections[0].content or "")
     assert not (response.sections[0].content or "").endswith("...")
-    assert response.sections[1].content == f"侧栏观点 {long_sidebar_body}"
+    assert response.sections[1].content == long_sidebar_body
     assert sidebar_sentinel in (response.sections[1].content or "")
     assert not (response.sections[1].content or "").endswith("...")
 
@@ -307,6 +307,126 @@ def test_market_briefing_provider_labels_stock_gain_price_tables_without_misusin
     assert table.rows[0] == {"个股": "软通动力", "涨幅": "20.00%", "现价": "58.63"}
     assert "异动原因" not in table.columns
     assert "影响" not in table.columns
+
+
+def test_market_briefing_provider_preserves_index_page_paragraphs():
+    html = """
+    <html><body>
+      <div id="fpzj">复盘摘要：题材轮动。</div>
+      <div class="fp_item_hd"><h2>同花顺解盘</h2></div>
+      <div class="fp_item_cnt">
+        <p>机器人板块午后持续走强。</p>
+        <p>明日重点观察成交额能否继续放大。</p>
+      </div>
+    </body></html>
+    """
+
+    response = MarketBriefingProvider(requester=lambda *args, **kwargs: FakeHtmlResponse(html)).latest_fupan()
+
+    assert response.sections[0].content == "机器人板块午后持续走强。\n\n明日重点观察成交额能否继续放大。"
+
+
+def test_market_briefing_provider_removes_sidebar_title_from_zaopan_content():
+    html = """
+    <html><body>
+      <div class="yestoday">昨日收盘指数 上证指数：4068.57 -0.734%</div>
+      <div class="content-main-fr">
+        <div class="table-part">
+          <h2>机构观点</h2>
+          <p>机构认为低空经济仍需观察成交承接。</p>
+        </div>
+      </div>
+    </body></html>
+    """
+
+    response = MarketBriefingProvider(requester=lambda *args, **kwargs: FakeHtmlResponse(html)).latest_zaopan()
+
+    assert response.sections[0].title == "机构观点"
+    assert response.sections[0].content == "机构认为低空经济仍需观察成交承接。"
+    assert not response.sections[0].content.startswith("机构观点")
+
+
+def test_market_briefing_provider_removes_leading_rank_from_stock_gain_price_table():
+    html = """
+    <html><body>
+      <div id="fpzj">复盘摘要：热门个股活跃。</div>
+      <div class="fp_item_hd"><h2>热门个股涨幅榜</h2></div>
+      <div class="fp_item_cnt">
+        <table>
+          <tr><td>1</td><td>软通动力</td><td>20.00%</td><td>58.63</td></tr>
+          <tr><td>2</td><td>新易盛</td><td>13.24%</td><td>118.20</td></tr>
+        </table>
+      </div>
+    </body></html>
+    """
+
+    response = MarketBriefingProvider(requester=lambda *args, **kwargs: FakeHtmlResponse(html)).latest_fupan()
+
+    table = response.sections[0].tables[0]
+    assert table.columns == ["个股", "涨幅", "现价"]
+    assert table.rows[0] == {"个股": "软通动力", "涨幅": "20.00%", "现价": "58.63"}
+    assert "数值一" not in table.columns
+
+
+def test_market_briefing_provider_removes_leading_rank_from_three_column_stock_gain_table():
+    html = """
+    <html><body>
+      <div id="fpzj">复盘摘要：热门个股活跃。</div>
+      <div class="fp_item_hd"><h2>热门个股涨幅榜</h2></div>
+      <div class="fp_item_cnt">
+        <table>
+          <tr><td>1</td><td>软通动力</td><td>20.00%</td></tr>
+          <tr><td>2</td><td>新易盛</td><td>13.24%</td></tr>
+        </table>
+      </div>
+    </body></html>
+    """
+
+    response = MarketBriefingProvider(requester=lambda *args, **kwargs: FakeHtmlResponse(html)).latest_fupan()
+
+    table = response.sections[0].tables[0]
+    assert table.columns == ["个股", "涨幅"]
+    assert table.rows[0] == {"个股": "软通动力", "涨幅": "20.00%"}
+
+
+def test_market_briefing_provider_keeps_inline_strong_body_text():
+    html = """
+    <html><body>
+      <div class="yestoday">昨日收盘指数 上证指数：4068.57 -0.734%</div>
+      <div class="content-main-fr">
+        <div class="table-part">
+          <h2>机构观点</h2>
+          <p>资金关注<strong>机器人主线</strong>的成交承接。</p>
+        </div>
+      </div>
+    </body></html>
+    """
+
+    response = MarketBriefingProvider(requester=lambda *args, **kwargs: FakeHtmlResponse(html)).latest_zaopan()
+
+    assert "机器人主线" in (response.sections[0].content or "")
+    assert response.sections[0].content == "资金关注 机器人主线 的成交承接。"
+
+
+def test_market_briefing_provider_filters_all_numeric_tables():
+    html = """
+    <html><body>
+      <div id="fpzj">复盘摘要：指数小幅反弹。</div>
+      <div class="fp_item_hd"><h2>神秘数字</h2></div>
+      <div class="fp_item_cnt">
+        <table>
+          <tr><td>1293.69</td><td>+14.46</td><td>+1.13%</td><td>363.54亿</td></tr>
+          <tr><td>2026-06-05 15:00:00</td><td>2026-06-05 15:00:00</td><td>1</td><td>2</td></tr>
+        </table>
+        <p>机器人板块午后持续走强，资金围绕题材龙头博弈。</p>
+      </div>
+    </body></html>
+    """
+
+    response = MarketBriefingProvider(requester=lambda *args, **kwargs: FakeHtmlResponse(html)).latest_fupan()
+
+    assert response.sections[0].tables == []
+    assert response.sections[0].content == "机器人板块午后持续走强，资金围绕题材龙头博弈。"
 
 
 def test_market_briefing_provider_filters_numeric_soup_and_repeated_timestamps_from_section_content():

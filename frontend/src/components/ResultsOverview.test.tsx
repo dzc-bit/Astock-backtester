@@ -55,13 +55,40 @@ it("lists today's matched stocks after a strategy run", () => {
     />
   );
 
-  expect(screen.getByText("当日符合策略股票")).toBeInTheDocument();
+  expect(screen.getByRole("region", { name: "今日策略命中" })).toBeInTheDocument();
+  expect(screen.getByText("今日策略命中")).toBeInTheDocument();
+  expect(screen.getByText("信号日 2026-06-01 / 展示日 2026-06-01")).toBeInTheDocument();
   expect(screen.getByText("600519")).toBeInTheDocument();
   expect(screen.getByText("贵州茅台")).toBeInTheDocument();
   expect(screen.getByText("+2.13%")).toBeInTheDocument();
   expect(screen.getByText("收盘 1688.80")).toBeInTheDocument();
   expect(screen.getByText("收盘价站上20日均线")).toBeInTheDocument();
   expect(screen.getByText("主力净流入放大")).toBeInTheDocument();
+});
+
+it("prefers latest strategy matches over legacy matched stocks and sorts by rank score", () => {
+  render(
+    <ResultsOverview
+      result={buildResult({
+        matched_stocks: [{ symbol: "OLD", name: "旧字段", close: 1, change_pct: 0, reasons: ["legacy"] }],
+        latest_strategy_matches: {
+          signal_date: "2026-06-03",
+          trade_date: "2026-06-03",
+          matches: [
+            { symbol: "LOW", name: "低分", close: 10, change_pct: 0.01, rank_score: 0.3, reasons: ["低分原因"] },
+            { symbol: "HIGH", name: "高分", close: 20, change_pct: 0.02, rank_score: 2.4, reasons: ["高分原因"] }
+          ]
+        }
+      })}
+      onRun={vi.fn()}
+      onOpenRiskAlerts={vi.fn()}
+    />
+  );
+
+  expect(screen.queryByText("OLD")).not.toBeInTheDocument();
+  const cards = screen.getAllByRole("article").filter((item) => item.className.includes("matched-stock-card"));
+  expect(cards[0]).toHaveTextContent("HIGH");
+  expect(cards[0]).toHaveTextContent("评分 2.40");
 });
 
 it("shows a friendly empty state when no stocks match today", () => {
@@ -73,7 +100,7 @@ it("shows a friendly empty state when no stocks match today", () => {
     />
   );
 
-  expect(screen.getByText("当日符合策略股票")).toBeInTheDocument();
+  expect(screen.getByText("今日策略命中")).toBeInTheDocument();
   expect(screen.getByText("今日没有股票命中当前策略")).toBeInTheDocument();
 });
 

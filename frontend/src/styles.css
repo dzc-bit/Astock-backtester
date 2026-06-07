@@ -244,7 +244,7 @@ body {
 .market-dashboard,
 .news-panel {
   min-width: 0;
-  height: clamp(520px, 42vw, 680px);
+  height: clamp(360px, 34vw, 460px);
   min-height: 0;
   overflow: hidden;
 }
@@ -262,6 +262,38 @@ body {
   min-height: 0;
   overflow: auto;
   padding-right: 4px;
+}
+
+.market-refresh-strip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  border: 1px solid #dbe4ee;
+  border-radius: 8px;
+  background: #f8fafc;
+  color: #526071;
+  padding: 8px 10px;
+  font-size: 12px;
+}
+
+.market-refresh-strip span {
+  flex: 0 0 auto;
+  color: #1d4ed8;
+  font-weight: 800;
+}
+
+.market-refresh-strip strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.market-refresh-strip small {
+  margin-left: auto;
+  color: #64748b;
+  white-space: nowrap;
 }
 
 .index-strip {
@@ -435,7 +467,8 @@ body {
   display: flex;
   flex-direction: column;
   min-width: 0;
-  min-height: 420px;
+  min-height: 0;
+  max-height: 360px;
   overflow: hidden;
 }
 
@@ -465,11 +498,11 @@ body {
   display: grid;
   gap: 10px;
   border: 1px solid #bbe6d1;
-  border-radius: 14px;
+  border-radius: 8px;
   background:
     radial-gradient(circle at top right, rgba(159, 232, 112, 0.18), transparent 35%),
     linear-gradient(135deg, #f2fff7, #ffffff);
-  padding: 15px;
+  padding: 12px;
 }
 
 .commentary-conclusion div,
@@ -500,7 +533,7 @@ body {
 
 .commentary-conclusion p {
   color: #17212f;
-  font-size: 18px;
+  font-size: 15px;
   font-weight: 800;
 }
 
@@ -528,7 +561,7 @@ body {
 
 .commentary-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1.2fr) minmax(240px, 0.8fr);
+  grid-template-columns: minmax(0, 1fr) minmax(220px, 0.75fr);
   gap: 12px;
   min-height: 0;
   overflow: auto;
@@ -548,9 +581,9 @@ body {
   align-content: start;
   gap: 10px;
   border: 1px solid #dbe4ee;
-  border-radius: 14px;
+  border-radius: 8px;
   background: #fbfcfe;
-  padding: 14px;
+  padding: 10px;
 }
 
 .commentary-block h3 {
@@ -568,9 +601,9 @@ body {
   display: grid;
   gap: 8px;
   border: 1px solid #e2e8f0;
-  border-radius: 12px;
+  border-radius: 8px;
   background: #ffffff;
-  padding: 12px;
+  padding: 9px;
 }
 
 .commentary-mainline > strong,
@@ -1147,6 +1180,10 @@ body {
   color: #17212f;
   font-size: 14px;
   line-height: 1.45;
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 
 .news-title-row span,
@@ -1159,6 +1196,10 @@ body {
 .news-copy p {
   margin: 0;
   line-height: 1.55;
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 
 .news-meta {
@@ -1192,6 +1233,16 @@ body {
   text-decoration: none;
 }
 
+.news-collapsed-note {
+  border: 1px dashed #cfe0f5;
+  border-radius: 8px;
+  background: #f8fbff;
+  color: #526071;
+  padding: 9px 10px;
+  font-size: 12px;
+  font-weight: 800;
+}
+
 .ths-briefing-panel {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1204,14 +1255,14 @@ body {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
   gap: 14px;
-  min-height: 190px;
+  min-height: 150px;
   overflow: hidden;
   border: 1px solid #d8e0ea;
-  border-radius: 16px;
+  border-radius: 8px;
   background:
     linear-gradient(145deg, rgba(255, 255, 255, 0.98), rgba(248, 250, 252, 0.96)),
     radial-gradient(circle at top right, rgba(37, 99, 235, 0.12), transparent 34%);
-  padding: 18px;
+  padding: 14px;
   box-shadow: 0 14px 34px rgba(25, 37, 54, 0.08);
 }
 
@@ -2621,7 +2672,7 @@ td small {
   gap: 12px;
   margin-top: 14px;
   border: 1px solid #cfe0f5;
-  border-radius: 14px;
+  border-radius: 8px;
   background:
     radial-gradient(circle at top right, rgba(37, 99, 235, 0.12), transparent 36%),
     linear-gradient(135deg, #f8fbff, #ffffff);
@@ -2641,6 +2692,14 @@ td small {
   color: #17212f;
 }
 
+.matched-stocks-head small {
+  display: block;
+  margin-top: 4px;
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 800;
+}
+
 .matched-stocks-head > strong {
   border: 1px solid #bbe6d1;
   border-radius: 999px;
@@ -2658,9 +2717,9 @@ td small {
 .matched-stock-card {
   flex-wrap: wrap;
   border: 1px solid #dbe4ee;
-  border-radius: 12px;
+  border-radius: 8px;
   background: #ffffff;
-  padding: 12px;
+  padding: 10px;
 }
 
 .matched-stock-id,
@@ -2680,6 +2739,12 @@ td small {
   color: #64748b;
   font-size: 12px;
   font-weight: 800;
+}
+
+.matched-stock-quote small {
+  color: #1d4ed8;
+  font-size: 11px;
+  font-weight: 900;
 }
 
 .matched-stock-quote {

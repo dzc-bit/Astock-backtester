@@ -1,6 +1,6 @@
 import { Play } from "lucide-react";
 import { Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
-import type { BacktestResult, MatchedStock } from "../types";
+import type { BacktestResult, DailyStrategyMatches, MatchedStock } from "../types";
 
 type Props = {
   result: BacktestResult | null;
@@ -34,15 +34,20 @@ function movementClass(value: number | null | undefined): "up-text" | "down-text
   return value > 0 ? "up-text" : "down-text";
 }
 
-function MatchedStocksPanel({ matchedStocks }: { matchedStocks: MatchedStock[] | undefined }) {
-  const hasPayload = Array.isArray(matchedStocks);
-  const items = matchedStocks ?? [];
+function MatchedStocksPanel({ dailyMatches, legacyMatches }: { dailyMatches?: DailyStrategyMatches | null; legacyMatches?: MatchedStock[] }) {
+  const hasPayload = Boolean(dailyMatches) || Array.isArray(legacyMatches);
+  const rawItems = dailyMatches?.matches ?? legacyMatches ?? [];
+  const items = [...rawItems].sort((left, right) => (right.rank_score ?? 0) - (left.rank_score ?? 0));
+  const dateLabel = dailyMatches
+    ? `信号日 ${dailyMatches.signal_date} / 展示日 ${dailyMatches.trade_date}`
+    : "兼容旧字段 matched_stocks";
   return (
-    <section className="matched-stocks-panel" aria-label="当日符合策略股票">
+    <section className="matched-stocks-panel" aria-label="今日策略命中">
       <div className="matched-stocks-head">
         <div>
-          <span className="section-kicker">今日信号</span>
-          <h3>当日符合策略股票</h3>
+          <span className="section-kicker">今日符合条件个股</span>
+          <h3>今日策略命中</h3>
+          <small>{dateLabel}</small>
         </div>
         <strong>{hasPayload ? `${items.length} 只` : "待对接"}</strong>
       </div>
@@ -57,6 +62,7 @@ function MatchedStocksPanel({ matchedStocks }: { matchedStocks: MatchedStock[] |
               <div className="matched-stock-quote">
                 <strong className={movementClass(stock.change_pct)}>{formatPercent(stock.change_pct)}</strong>
                 <span>收盘 {formatPrice(stock.close)}</span>
+                {stock.rank_score != null ? <small>评分 {stock.rank_score.toFixed(2)}</small> : null}
               </div>
               <div className="matched-stock-reasons">
                 {stock.reasons.length > 0 ? (
@@ -80,13 +86,6 @@ function MatchedStocksPanel({ matchedStocks }: { matchedStocks: MatchedStock[] |
       )}
     </section>
   );
-}
-
-function matchesFromResult(result: BacktestResult): MatchedStock[] | undefined {
-  if (result.latest_strategy_matches) {
-    return result.latest_strategy_matches.matches;
-  }
-  return result.matched_stocks;
 }
 
 export function ResultsOverview({
@@ -167,7 +166,7 @@ export function ResultsOverview({
               <span>{zeroTradeHint}</span>
             </div>
           ) : null}
-          <MatchedStocksPanel matchedStocks={matchesFromResult(result)} />
+          <MatchedStocksPanel dailyMatches={result.latest_strategy_matches} legacyMatches={result.matched_stocks} />
           <div className="chart">
             <ResponsiveContainer width="100%" height={220}>
               <LineChart data={result.equity_curve}>

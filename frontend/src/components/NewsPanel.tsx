@@ -22,6 +22,8 @@ function formatTime(value: string | null | undefined): string {
 
 export function NewsPanel({ news, isLoading = false, onRefresh }: Props) {
   const items = news?.items ?? [];
+  const visibleItems = items.slice(0, 6);
+  const hiddenCount = Math.max(0, items.length - visibleItems.length);
   return (
     <section className="surface news-panel" aria-label="资讯与事件">
       <div className="section-title">
@@ -42,7 +44,7 @@ export function NewsPanel({ news, isLoading = false, onRefresh }: Props) {
         </div>
       ) : (
         <div className="news-list">
-          {items.slice(0, 18).map((item, index) => (
+          {visibleItems.map((item, index) => (
             <article className={`news-item ${item.sentiment}`} key={`${item.title}-${index}`}>
               <div className="news-icon" aria-hidden="true">
                 <Newspaper size={17} />
@@ -67,6 +69,9 @@ export function NewsPanel({ news, isLoading = false, onRefresh }: Props) {
               ) : null}
             </article>
           ))}
+          {hiddenCount > 0 ? (
+            <div className="news-collapsed-note">还有 {hiddenCount} 条资讯已收起，刷新后保留最新短列表。</div>
+          ) : null}
         </div>
       )}
     </section>

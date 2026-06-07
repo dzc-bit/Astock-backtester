@@ -19,7 +19,8 @@ pub fn run() {
             commands::backend_command,
             commands::ensure_data_service,
             commands::load_saved_strategies,
-            commands::persist_saved_strategies
+            commands::persist_saved_strategies,
+            commands::workspace_diagnostics
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

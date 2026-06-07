@@ -33,6 +33,7 @@ import { StrategyWorkbench } from "./components/StrategyWorkbench";
 import { TradesTable } from "./components/TradesTable";
 import { TonghuashunBriefingPanel } from "./components/TonghuashunBriefingPanel";
 import { UpdatePanel } from "./components/UpdatePanel";
+import { detectMarketSessionPhase, initialMarketRefreshMeta, refreshIntervalForPhase } from "./marketRefresh";
 import { defaultSettings, defaultStrategy } from "./strategyDefaults";
 import type {
   BacktestResult,
@@ -42,6 +43,7 @@ import type {
   ConditionValidationResult,
   MarketBriefingResponse,
   MarketCommentaryResponse,
+  MarketRefreshMeta,
   MarketNewsResponse,
   NewsSummaryResponse,
   RealtimeMarketSnapshot,
@@ -145,6 +147,7 @@ function fallbackMarketCommentary(reason: string): MarketCommentaryResponse {
     updated_at: new Date().toISOString(),
     trade_date: new Date().toISOString().slice(0, 10),
     source: "frontend-fallback",
+    mode: "news_fallback",
     stance: "defensive",
     summary: "实时盘面暂不可用，以下仅为防守口径。行情评价接口暂时没有返回可用内容，先不要把新闻或局部数据包装成确定结论。",
     drivers: [],
@@ -178,6 +181,7 @@ export function App() {
   const [runPhases, setRunPhases] = useState<string[]>([]);
   const [runProgressMessage, setRunProgressMessage] = useState<string | null>(null);
   const [marketSnapshot, setMarketSnapshot] = useState<RealtimeMarketSnapshot | null>(null);
+  const [marketRefreshMeta, setMarketRefreshMeta] = useState<MarketRefreshMeta>(() => initialMarketRefreshMeta());
   const [isLoadingMarket, setIsLoadingMarket] = useState(false);
   const [marketNews, setMarketNews] = useState<MarketNewsResponse | null>(null);
   const [marketCommentary, setMarketCommentary] = useState<MarketCommentaryResponse | null>(null);
@@ -309,37 +313,69 @@ export function App() {
       return;
     }
     let cancelled = false;
+    let timer: number | undefined;
     const refreshMarket = async () => {
+      const phase = detectMarketSessionPhase();
+      let nextRefreshMs = refreshIntervalForPhase(phase);
       setIsLoadingMarket(true);
+      setMarketRefreshMeta((current) => ({
+        ...current,
+        phase,
+        status: "refreshing",
+        message: current.last_success_at ? "刷新中，保留上一份成功快照" : "刷新中",
+        next_refresh_ms: refreshIntervalForPhase(phase)
+      }));
       try {
         const snapshot = await loadRealtimeMarketSnapshot(dataService.base_url);
         if (!cancelled) {
-          setMarketSnapshot(snapshot);
-        }
-      } catch {
-        if (!cancelled) {
-          setMarketSnapshot({
-            status: "unavailable",
-            source: "local-service",
-            updated_at: new Date().toISOString(),
-            indexes: [],
-            breadth: null,
-            strong_sectors: [],
-            yesterday_strong_sectors: [],
-            message: "实时行情接口暂不可用，请确认本地数据服务已启动。"
+          setMarketSnapshot((current) => (snapshot.status === "unavailable" && current ? current : snapshot));
+          const nextPhase = snapshot.market_phase ?? phase;
+          setMarketRefreshMeta((current) => {
+            const usingLastSuccess = snapshot.status === "unavailable" && Boolean(current.last_success_at);
+            nextRefreshMs = refreshIntervalForPhase(nextPhase, snapshot.status === "unavailable");
+            return {
+              phase: nextPhase,
+              status: usingLastSuccess ? "using_last_success" : snapshot.status === "unavailable" ? "unavailable" : "idle",
+              message:
+                usingLastSuccess
+                  ? "实时接口暂不可用，使用最近数据"
+                  : snapshot.status === "unavailable"
+                    ? "实时接口暂不可用"
+                    : nextPhase === "trading"
+                      ? "实时行情已更新"
+                      : "非交易时段，使用最近数据",
+              last_success_at: snapshot.status === "unavailable" ? current.last_success_at ?? null : snapshot.updated_at,
+              last_error: snapshot.status === "unavailable" ? snapshot.message : undefined,
+              next_refresh_ms: nextRefreshMs
+            };
           });
+        }
+      } catch (caught) {
+        if (!cancelled) {
+          const reason = caught instanceof Error ? caught.message : "请求失败";
+          setMarketRefreshMeta((current) => ({
+            phase,
+            status: current.last_success_at ? "using_last_success" : "unavailable",
+            message: current.last_success_at ? "实时接口暂不可用，使用最近数据" : "实时接口暂不可用",
+            last_success_at: current.last_success_at ?? null,
+            last_error: reason,
+            next_refresh_ms: refreshIntervalForPhase(phase, true)
+          }));
+          nextRefreshMs = refreshIntervalForPhase(phase, true);
         }
       } finally {
         if (!cancelled) {
           setIsLoadingMarket(false);
+          timer = window.setTimeout(refreshMarket, nextRefreshMs);
         }
       }
     };
     void refreshMarket();
-    const timer = window.setInterval(refreshMarket, 60_000);
     return () => {
       cancelled = true;
-      window.clearInterval(timer);
+      if (timer !== undefined) {
+        window.clearTimeout(timer);
+      }
     };
   }, [dataService]);
 
@@ -527,7 +563,7 @@ export function App() {
         </div>
       </header>
       <div className="market-news-layout">
-        <MarketDashboard snapshot={marketSnapshot} isLoading={isLoadingMarket} />
+        <MarketDashboard snapshot={marketSnapshot} isLoading={isLoadingMarket} refreshMeta={marketRefreshMeta} />
         <NewsPanel news={marketNews} isLoading={isLoadingNews} onRefresh={refreshNews} />
       </div>
       <div className="market-insight-layout">

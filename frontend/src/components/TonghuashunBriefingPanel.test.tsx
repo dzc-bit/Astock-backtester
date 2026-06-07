@@ -111,6 +111,20 @@ it("keeps the end of a long full briefing readable in the dialog", async () => {
   );
 });
 
+it("disables original article actions when source url is missing", async () => {
+  const user = userEvent.setup();
+  const briefing = buildBriefing("fupan");
+  briefing.source_url = "";
+
+  render(<TonghuashunBriefingPanel fupan={briefing} zaopan={buildBriefing("zaopan")} />);
+
+  expect(screen.getByRole("button", { name: /暂无同花顺复盘总评原文链接/ })).toBeDisabled();
+
+  await user.click(screen.getByRole("button", { name: "查看同花顺复盘总评全文" }));
+
+  expect(screen.getByRole("button", { name: /暂无同花顺原文链接/ })).toBeDisabled();
+});
+
 it("keeps long briefing body out of the main card and opens it in the dialog", async () => {
   const user = userEvent.setup();
   const longBriefing = buildBriefing("fupan");
@@ -193,6 +207,35 @@ it("cleans placeholder table field names in the full briefing dialog", async () 
   expect(screen.queryByText("影响")).not.toBeInTheDocument();
   expect(screen.getByText("机器人")).toBeInTheDocument();
   expect(screen.getByText("午后持续拉升")).toBeInTheDocument();
+});
+
+it("labels placeholder stock gain price tables as stock quote columns", async () => {
+  const user = userEvent.setup();
+  const briefing = buildBriefing("fupan");
+  briefing.sections = [
+    {
+      title: "热门个股",
+      content: "个股涨幅与现价表格需要整理字段名。",
+      links: [],
+      tables: [
+        {
+          title: "热门个股",
+          columns: ["字段1", "字段2", "字段3"],
+          rows: [{ 字段1: "软通动力", 字段2: "20.00%", 字段3: "58.63" }]
+        }
+      ]
+    }
+  ];
+
+  render(<TonghuashunBriefingPanel fupan={briefing} zaopan={buildBriefing("zaopan")} />);
+
+  await user.click(screen.getByRole("button", { name: "查看同花顺复盘总评全文" }));
+
+  expect(screen.getByText("个股")).toBeInTheDocument();
+  expect(screen.getByText("涨幅")).toBeInTheDocument();
+  expect(screen.getByText("现价")).toBeInTheDocument();
+  expect(screen.queryByText("公司/事项")).not.toBeInTheDocument();
+  expect(screen.queryByText("异动原因")).not.toBeInTheDocument();
 });
 
 it("keeps diagnostics and long table details out of the main card while organizing them in the dialog", async () => {

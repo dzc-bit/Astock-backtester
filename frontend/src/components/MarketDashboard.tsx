@@ -1,9 +1,11 @@
 import { Activity, Radio, TrendingDown, TrendingUp } from "lucide-react";
-import type { RealtimeMarketSnapshot } from "../types";
+import { marketPhaseLabel } from "../marketRefresh";
+import type { MarketRefreshMeta, RealtimeMarketSnapshot } from "../types";
 
 type Props = {
   snapshot: RealtimeMarketSnapshot | null;
   isLoading?: boolean;
+  refreshMeta?: MarketRefreshMeta;
 };
 
 function formatPercent(value: number | null | undefined): string {
@@ -41,9 +43,24 @@ function movementClass(value: number | null | undefined): "up-text" | "down-text
   return value > 0 ? "up-text" : "down-text";
 }
 
-export function MarketDashboard({ snapshot, isLoading = false }: Props) {
+function refreshStatusLabel(meta: MarketRefreshMeta | undefined, isLoading: boolean): string {
+  if (isLoading || meta?.status === "refreshing") {
+    return "刷新中";
+  }
+  if (meta?.status === "using_last_success") {
+    return "使用最近数据";
+  }
+  if (meta?.status === "unavailable") {
+    return "实时接口暂不可用";
+  }
+  return "";
+}
+
+export function MarketDashboard({ snapshot, isLoading = false, refreshMeta }: Props) {
   const breadth = snapshot?.breadth;
   const statusLabel = snapshot?.status === "live" ? "实时" : snapshot?.status === "stale" ? "本地兜底" : "待连接";
+  const refreshLabel = refreshStatusLabel(refreshMeta, isLoading);
+  const phase = refreshMeta?.phase ?? snapshot?.market_phase;
 
   return (
     <section className="surface market-dashboard" aria-label="今日实时行情">
@@ -54,9 +71,16 @@ export function MarketDashboard({ snapshot, isLoading = false }: Props) {
         </div>
         <span className={`status-pill compact market-status ${snapshot?.status ?? "loading"}`}>
           <Radio size={15} aria-hidden="true" />
-          {isLoading ? "刷新中" : statusLabel}
+          {refreshLabel || statusLabel}
         </span>
       </div>
+      {refreshMeta || phase ? (
+        <div className="market-refresh-strip" role="status">
+          <span>{phase ? marketPhaseLabel(phase) : "行情时段待确认"}</span>
+          <strong>{refreshMeta?.message ?? snapshot?.message ?? "等待行情刷新"}</strong>
+          {refreshMeta?.last_success_at ? <small>最近成功 {formatTime(refreshMeta.last_success_at)}</small> : null}
+        </div>
+      ) : null}
 
       <div className="market-grid">
         <div className="index-strip">
@@ -124,6 +148,7 @@ export function MarketDashboard({ snapshot, isLoading = false }: Props) {
 
       <p className="market-footnote">
         来源 {snapshot?.source ?? "--"} / 更新 {formatTime(snapshot?.updated_at)} / {snapshot?.message ?? "正在等待实时行情"}
+        {snapshot?.diagnostics?.length ? ` / ${snapshot.diagnostics[0]}` : ""}
       </p>
     </section>
   );

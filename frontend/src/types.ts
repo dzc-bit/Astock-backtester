@@ -98,15 +98,28 @@ export type SectorMover = {
   source: string;
 };
 
+export type MarketSessionPhase = "trading" | "pre_open" | "lunch_break" | "post_close" | "non_trading";
+
+export type MarketRefreshMeta = {
+  phase: MarketSessionPhase;
+  status: "idle" | "refreshing" | "using_last_success" | "unavailable";
+  message: string;
+  last_success_at?: string | null;
+  last_error?: string | null;
+  next_refresh_ms: number;
+};
+
 export type RealtimeMarketSnapshot = {
   status: "live" | "stale" | "unavailable";
   source: string;
   updated_at: string;
+  market_phase?: MarketSessionPhase;
   indexes: MarketIndexQuote[];
   breadth?: MarketBreadth | null;
   strong_sectors: SectorMover[];
   yesterday_strong_sectors?: SectorMover[];
   message: string;
+  diagnostics?: string[];
 };
 
 export type MarketNewsItem = {
@@ -150,7 +163,7 @@ export type MarketBriefingResponse = {
   kind: "fupan" | "zaopan";
   updated_at: string;
   source: string;
-  source_url: string;
+  source_url?: string | null;
   summary: string;
   sections: MarketBriefingSection[];
   diagnostics: string[];
@@ -166,6 +179,7 @@ export type MarketCommentaryResponse = {
   updated_at: string;
   trade_date: string;
   source: string;
+  mode?: "intraday" | "lunch_break_review" | "post_close" | "non_trading_review" | "news_fallback";
   stance: "positive" | "neutral" | "defensive";
   summary: string;
   drivers: MarketCommentaryPoint[];

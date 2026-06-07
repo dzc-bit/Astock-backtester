@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 from typing import Callable, Iterable
 
 import pandas as pd
@@ -245,6 +245,45 @@ def _append_yesterday_sector_note(message: str, yesterday_sectors: list[SectorMo
     return f"{message} {YESTERDAY_SECTOR_TRACKING_NOTE}"
 
 
+def _market_phase(now: datetime) -> str:
+    local = now.astimezone(timezone(timedelta(hours=8)))
+    if local.weekday() >= 5:
+        return "non_trading"
+    current = local.time()
+    if current < time(9, 30):
+        return "pre_open"
+    if time(11, 30) <= current < time(13, 0):
+        return "lunch_break"
+    if current >= time(15, 0):
+        return "post_close"
+    return "trading"
+
+
+def _phase_diagnostic(phase: str) -> str | None:
+    return {
+        "non_trading": "周末或非交易日，降低实时接口刷新频率。",
+        "pre_open": "盘前非连续竞价时段，降低实时接口刷新频率。",
+        "lunch_break": "午间休市，降低实时接口刷新频率。",
+        "post_close": "收盘后，降低实时接口刷新频率。",
+    }.get(phase)
+
+
+def _is_renderable_snapshot(snapshot: RealtimeMarketSnapshot) -> bool:
+    return bool(snapshot.indexes and snapshot.breadth and snapshot.breadth.total > 0 and snapshot.strong_sectors)
+
+
+def unavailable_market_snapshot(message: str, *, diagnostics: list[str] | None = None) -> RealtimeMarketSnapshot:
+    now = datetime.now(timezone.utc)
+    return RealtimeMarketSnapshot(
+        status="unavailable",
+        source="service-fallback",
+        updated_at=now,
+        market_phase=_market_phase(now),
+        message=message,
+        diagnostics=diagnostics or [],
+    )
+
+
 @dataclass
 class RealtimeMarketProvider:
     warehouse: Warehouse
@@ -254,9 +293,15 @@ class RealtimeMarketProvider:
     _sector_member_cache: dict[str, list[str]] = field(default_factory=dict, init=False, repr=False)
     _ths_concept_rows_cache: list[dict] | None = field(default=None, init=False, repr=False)
     _ths_industry_rows_cache: list[dict] | None = field(default=None, init=False, repr=False)
+    _last_successful_snapshot: RealtimeMarketSnapshot | None = field(default=None, init=False, repr=False)
 
     def market_snapshot(self) -> RealtimeMarketSnapshot:
         now = datetime.now(timezone.utc)
+        phase = _market_phase(now)
+        diagnostics: list[str] = []
+        phase_note = _phase_diagnostic(phase)
+        if phase_note:
+            diagnostics.append(phase_note)
         self._ths_concept_rows_cache = None
         self._ths_industry_rows_cache = None
         self._last_live_sector_rows = []
@@ -268,6 +313,12 @@ class RealtimeMarketProvider:
         yesterday_sectors = local_snapshot.yesterday_strong_sectors
         breadth = live_breadth or local_snapshot.breadth
         status = "live" if indexes else local_snapshot.status
+        if not indexes:
+            diagnostics.append("实时指数接口暂不可用，尝试使用最近成功快照或本地最近交易日。")
+        if indexes and not live_breadth and local_snapshot.breadth:
+            diagnostics.append("实时红绿家数接口暂不可用，已回退到本地最近交易日统计。")
+        if indexes and not live_sectors and local_snapshot.strong_sectors:
+            diagnostics.append("实时强势题材接口暂不可用，已回退到本地最近交易日题材聚合。")
         source_parts: list[str] = []
         if indexes:
             source_parts.append("ashare-sina")
@@ -287,16 +338,42 @@ class RealtimeMarketProvider:
         else:
             message = self._build_live_message(live_breadth, live_sectors)
         message = _append_yesterday_sector_note(message, yesterday_sectors)
-        return RealtimeMarketSnapshot(
+        snapshot = RealtimeMarketSnapshot(
             status=status,
             source=source,
             updated_at=now,
+            market_phase=phase,
             indexes=indexes or local_snapshot.indexes,
             breadth=breadth,
             strong_sectors=strong_sectors,
             yesterday_strong_sectors=yesterday_sectors,
             message=message,
+            diagnostics=diagnostics,
         )
+        if snapshot.status == "live" and _is_renderable_snapshot(snapshot):
+            self._last_successful_snapshot = snapshot.model_copy(deep=True)
+            return snapshot
+        if self._last_successful_snapshot is not None and not indexes:
+            retained = self._last_successful_snapshot.model_copy(deep=True)
+            retained.status = "stale"
+            retained.updated_at = now
+            retained.market_phase = phase
+            retained.source = (
+                retained.source
+                if retained.source.endswith("+retained-last-success")
+                else f"{retained.source}+retained-last-success"
+            )
+            retained.message = _append_yesterday_sector_note(
+                f"{phase_note or '实时接口暂不可用'} 沿用最近成功行情快照。", retained.yesterday_strong_sectors
+            )
+            retained.diagnostics = [
+                *diagnostics,
+                f"沿用最近成功行情快照：{self._last_successful_snapshot.updated_at.isoformat()}。",
+            ]
+            return retained
+        if snapshot.status == "stale" and _is_renderable_snapshot(snapshot):
+            self._last_successful_snapshot = snapshot.model_copy(deep=True)
+        return snapshot
 
     def _fetch_indexes(self) -> list[MarketIndexQuote]:
         symbols = ",".join(symbol for symbol, _ in INDEXES)
@@ -736,14 +813,18 @@ class RealtimeMarketProvider:
                 status="unavailable",
                 source="local",
                 updated_at=now,
+                market_phase=_market_phase(now),
                 message=f"实时行情不可用，本地数据读取失败：{exc}",
+                diagnostics=[f"本地最近交易日读取失败：{exc}"],
             )
         if bars.empty:
             return RealtimeMarketSnapshot(
                 status="unavailable",
                 source="local",
                 updated_at=now,
+                market_phase=_market_phase(now),
                 message="实时行情不可用，本地历史数据为空。",
+                diagnostics=["本地最近交易日为空，无法生成兜底快照。"],
             )
 
         data = bars.copy()
@@ -784,11 +865,13 @@ class RealtimeMarketProvider:
             status="stale",
             source="local-latest",
             updated_at=now,
+            market_phase=_market_phase(now),
             indexes=[pseudo_index],
             breadth=breadth,
             strong_sectors=local_sectors,
             yesterday_strong_sectors=yesterday_sectors,
             message=message,
+            diagnostics=[f"已使用本地最近交易日 {latest_date.date()} 作为兜底快照。"],
         )
 
     def _with_previous_close(

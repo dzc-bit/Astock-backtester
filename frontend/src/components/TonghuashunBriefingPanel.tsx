@@ -43,6 +43,7 @@ function compactText(value: string, maxLength = 120): string {
 const defaultGenericTableColumnLabels = ["项目", "内容", "说明", "备注", "来源", "时间"];
 const themeGenericTableColumnLabels = ["题材", "异动原因", "影响", "备注", "来源", "时间"];
 const companyGenericTableColumnLabels = ["公司/事项", "内容", "影响", "备注", "来源", "时间"];
+const stockQuoteTableColumnLabels = ["个股", "涨幅", "现价", "备注", "来源", "时间"];
 
 function isGenericTableColumn(column: string): boolean {
   return /^(字段|field|column|col)[\s_-]*[0-9０-９]+$/i.test(column.trim());
@@ -50,10 +51,13 @@ function isGenericTableColumn(column: string): boolean {
 
 function genericTableColumnLabelsFor(tableTitle: string | null | undefined): string[] {
   const title = (tableTitle ?? "").trim();
+  if (/个股|股票|热门个股|异动个股|涨幅榜|跌幅榜/.test(title)) {
+    return stockQuoteTableColumnLabels;
+  }
   if (/强势|方向|题材|板块|概念|热点/.test(title)) {
     return themeGenericTableColumnLabels;
   }
-  if (/公司|事项|公告|停复牌|个股/.test(title)) {
+  if (/公司|事项|公告|停复牌/.test(title)) {
     return companyGenericTableColumnLabels;
   }
   return defaultGenericTableColumnLabels;
@@ -74,6 +78,19 @@ function cleanTableColumnLabel(column: string, index: number, tableTitle?: strin
 function hasMeaningfulTableValue(value: string | null | undefined): boolean {
   const normalized = (value ?? "").trim();
   return normalized.length > 0 && normalized !== "--" && normalized !== "-";
+}
+
+function hasSourceUrl(briefing: MarketBriefingResponse): briefing is MarketBriefingResponse & { source_url: string } {
+  return Boolean(briefing.source_url?.trim());
+}
+
+function linkUrlOrSource(linkUrl: string | null | undefined, briefing: MarketBriefingResponse): string | null {
+  const normalizedLink = linkUrl?.trim();
+  if (normalizedLink) {
+    return normalizedLink;
+  }
+  const sourceUrl = briefing.source_url?.trim();
+  return sourceUrl || null;
 }
 
 function BriefingCard({
@@ -118,9 +135,21 @@ function BriefingCard({
                 >
                   查看全文
                 </button>
-                <a href={briefing.source_url} target="_blank" rel="noreferrer" aria-label={`打开${title}原文`}>
-                  <ExternalLink size={15} aria-hidden="true" />
-                </a>
+                {hasSourceUrl(briefing) ? (
+                  <a href={briefing.source_url} target="_blank" rel="noreferrer" aria-label={`打开${title}原文`}>
+                    <ExternalLink size={15} aria-hidden="true" />
+                  </a>
+                ) : (
+                  <button
+                    className="icon-button ths-disabled-link"
+                    type="button"
+                    aria-label={`暂无${title}原文链接`}
+                    title="暂无原文链接"
+                    disabled
+                  >
+                    <ExternalLink size={15} aria-hidden="true" />
+                  </button>
+                )}
               </>
             ) : null}
           </div>
@@ -228,10 +257,16 @@ function BriefingDialog({
         <div className="ths-briefing-modal-meta">
           <span>来源 {briefing.source}</span>
           <span>更新 {formatTime(briefing.updated_at)}</span>
-          <a href={briefing.source_url} target="_blank" rel="noreferrer">
-            打开同花顺原文
-            <ExternalLink size={14} aria-hidden="true" />
-          </a>
+          {hasSourceUrl(briefing) ? (
+            <a href={briefing.source_url} target="_blank" rel="noreferrer">
+              打开同花顺原文
+              <ExternalLink size={14} aria-hidden="true" />
+            </a>
+          ) : (
+            <button className="secondary-button compact" type="button" disabled aria-label="暂无同花顺原文链接">
+              暂无原文链接
+            </button>
+          )}
         </div>
         <div className="ths-briefing-modal-body">
           <article className="ths-briefing-full-summary">
@@ -269,12 +304,15 @@ function BriefingDialog({
                     ) : null}
                     {section.links.length > 0 ? (
                       <div className="ths-briefing-link-list">
-                        {section.links.map((link, linkIndex) => (
-                          <a href={link.url ?? briefing.source_url} target="_blank" rel="noreferrer" key={`${link.title}-${linkIndex}`}>
-                            {link.title}
-                            <ExternalLink size={13} aria-hidden="true" />
-                          </a>
-                        ))}
+                        {section.links.map((link, linkIndex) => {
+                          const href = linkUrlOrSource(link.url, briefing);
+                          return href ? (
+                            <a href={href} target="_blank" rel="noreferrer" key={`${link.title}-${linkIndex}`}>
+                              {link.title}
+                              <ExternalLink size={13} aria-hidden="true" />
+                            </a>
+                          ) : null;
+                        })}
                       </div>
                     ) : null}
                     {section.tables.map((table, tableIndex) => (

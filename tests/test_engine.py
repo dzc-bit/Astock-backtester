@@ -690,7 +690,12 @@ def test_limit_up_blocks_next_day_buy_and_records_chinese_reason():
     assert result.trades == []
     blocked_events = [event for event in events if event["type"] == "trade_blocked"]
     assert blocked_events
-    assert "涨停" in blocked_events[0]["trade"].blocked_reason
+    blocked_trade = blocked_events[0]["trade"]
+    assert blocked_trade.blocked_reason == "次日开盘接近涨停，未买入：000001"
+    assert blocked_trade.shares == 0
+    assert blocked_trade.buy_amount == 0
+    assert blocked_trade.pnl_pct is None
+    assert result.metrics.trade_count == 0
 
 
 def test_missing_pre_close_does_not_guess_limit_up_block():
@@ -714,6 +719,7 @@ def test_missing_pre_close_does_not_guess_limit_up_block():
         stamp_tax_rate=0,
         limit_up_blocks_buy=True,
         fixed_holding_days=1,
+        exclude_st=False,
     )
 
     result = run_backtest(frame, simple_market_cap_strategy(), settings)
@@ -754,7 +760,62 @@ def test_limit_down_blocks_sell_keeps_position_and_reports_reason():
     assert trade.sell_price == 9.5
     blocked_events = [event for event in events if event["type"] == "trade_blocked"]
     assert blocked_events
-    assert "跌停" in blocked_events[0]["trade"].blocked_reason
+    assert blocked_events[0]["trade"].blocked_reason == "卖出日开盘接近跌停，暂不卖出：000001"
+
+
+@pytest.mark.parametrize(
+    ("symbol", "is_st", "open_price", "pre_close", "should_block"),
+    [
+        ("600001", False, 9.0, 10.0, True),
+        ("000001", True, 9.5, 10.0, True),
+        ("300001", False, 9.0, 10.0, False),
+        ("300001", False, 8.0, 10.0, True),
+        ("688001", False, 8.0, 10.0, True),
+    ],
+)
+def test_limit_down_block_uses_board_specific_thresholds(symbol, is_st, open_price, pre_close, should_block):
+    frame = pd.DataFrame(
+        [
+            backtest_row("2024-01-02", symbol=symbol, close=10.0, is_st=is_st),
+            backtest_row("2024-01-03", symbol=symbol, open_price=10.0, close=10.0, pre_close=10.0, is_st=is_st),
+            backtest_row(
+                "2024-01-04",
+                symbol=symbol,
+                open_price=open_price,
+                high=max(open_price, 9.8),
+                low=open_price,
+                close=open_price,
+                pre_close=pre_close,
+                is_st=is_st,
+            ),
+            backtest_row("2024-01-05", symbol=symbol, open_price=9.8, close=9.8, pre_close=open_price, is_st=is_st),
+        ]
+    )
+    events = []
+    settings = BacktestSettings(
+        start_date=pd.Timestamp("2024-01-02").date(),
+        end_date=pd.Timestamp("2024-01-05").date(),
+        initial_cash=100_000,
+        fixed_holding_days=1,
+        max_positions=1,
+        max_daily_buys=1,
+        min_listing_days=0,
+        slippage_rate=0,
+        fee_rate=0,
+        stamp_tax_rate=0,
+        limit_down_blocks_sell=True,
+        exclude_st=False,
+    )
+
+    result = run_backtest(frame, simple_market_cap_strategy(), settings, on_event=lambda event: events.append(event))
+    blocked_events = [event for event in events if event["type"] == "trade_blocked"]
+
+    assert bool(blocked_events) is should_block
+    assert bool(result.trades) is True
+    if should_block:
+        assert result.trades[0].sell_date.isoformat() == "2024-01-05"
+    else:
+        assert result.trades[0].sell_date.isoformat() == "2024-01-04"
 
 
 def test_conservative_execution_records_actual_buy_and_sell_prices_and_amounts():
@@ -818,3 +879,74 @@ def test_take_profit_uses_trigger_price_instead_of_open_when_not_conservative():
     trade = result.trades[0]
     assert trade.sell_price == pytest.approx(10.8)
     assert any("止盈触发" in reason for reason in trade.sell_reason)
+
+
+def test_stop_loss_uses_trigger_price_instead_of_open_when_not_conservative():
+    frame = pd.DataFrame(
+        [
+            backtest_row("2024-01-02", close=10.0),
+            backtest_row("2024-01-03", open_price=10.0, high=10.1, low=9.9, close=10.0, pre_close=10.0),
+            backtest_row("2024-01-04", open_price=9.9, high=10.0, low=9.2, close=9.5, pre_close=10.0),
+        ]
+    )
+    settings = BacktestSettings(
+        start_date=pd.Timestamp("2024-01-02").date(),
+        end_date=pd.Timestamp("2024-01-04").date(),
+        initial_cash=100_000,
+        fixed_holding_days=20,
+        stop_loss_pct=-0.06,
+        max_positions=1,
+        max_daily_buys=1,
+        min_listing_days=0,
+        slippage_rate=0,
+        fee_rate=0,
+        stamp_tax_rate=0,
+        conservative_execution=False,
+    )
+
+    result = run_backtest(frame, simple_market_cap_strategy(), settings)
+
+    trade = result.trades[0]
+    assert trade.sell_price == pytest.approx(9.4)
+    assert any("止损触发" in reason for reason in trade.sell_reason)
+
+
+@pytest.mark.parametrize(
+    ("symbol", "is_st", "open_price", "pre_close", "should_block"),
+    [
+        ("600001", False, 11.0, 10.0, True),
+        ("000001", True, 10.5, 10.0, True),
+        ("300001", False, 11.0, 10.0, False),
+        ("300001", False, 12.0, 10.0, True),
+        ("688001", False, 12.0, 10.0, True),
+    ],
+)
+def test_limit_up_block_uses_board_specific_thresholds(symbol, is_st, open_price, pre_close, should_block):
+    frame = pd.DataFrame(
+        [
+            backtest_row("2024-01-02", symbol=symbol, close=10.0, is_st=is_st),
+            backtest_row("2024-01-03", symbol=symbol, open_price=open_price, high=open_price, low=open_price, close=open_price, pre_close=pre_close, is_st=is_st),
+            backtest_row("2024-01-04", symbol=symbol, open_price=open_price, close=open_price, pre_close=open_price, is_st=is_st),
+        ]
+    )
+    events = []
+    settings = BacktestSettings(
+        start_date=pd.Timestamp("2024-01-02").date(),
+        end_date=pd.Timestamp("2024-01-04").date(),
+        initial_cash=100_000,
+        max_positions=1,
+        max_daily_buys=1,
+        min_listing_days=0,
+        slippage_rate=0,
+        fee_rate=0,
+        stamp_tax_rate=0,
+        limit_up_blocks_buy=True,
+        fixed_holding_days=1,
+        exclude_st=False,
+    )
+
+    result = run_backtest(frame, simple_market_cap_strategy(), settings, on_event=lambda event: events.append(event))
+    blocked_events = [event for event in events if event["type"] == "trade_blocked"]
+
+    assert bool(blocked_events) is should_block
+    assert bool(result.trades) is (not should_block)

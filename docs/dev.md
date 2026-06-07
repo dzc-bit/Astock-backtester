@@ -76,6 +76,14 @@ Verify the desktop app binary without creating an installer:
 npm run tauri -- build --debug --no-bundle
 ```
 
+Run Rust unit tests after changing desktop commands, path handling, or service lifecycle code:
+
+```powershell
+cargo test --manifest-path src-tauri/Cargo.toml
+```
+
+The desktop command `workspace_diagnostics` reports the resolved project root, canonical root, `.astock-cache` alias, `运行产物\本地数据仓`, and saved-strategy path. Use it when checking that the app is still using `D:\New project 6` as the real business root instead of writing business data to `AppData`.
+
 Verify a signed debug installer and updater signature:
 
 ```powershell

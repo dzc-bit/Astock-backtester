@@ -67,6 +67,8 @@ v1.1.0
 
 `latest.json` must be generated from the real `.sig` file produced next to the installer. Do not hand-edit a future version into `release-assets/latest.json` before the installer and signature exist, because the app updater verifies that signature.
 
+If `npm run tauri -- build --ci` creates the NSIS `.exe` but exits with `A public key has been found, but no private key`, the local installer can be used for manual installation checks only. Do not upload that installer as an updater release, do not reuse an older `.sig`, and do not regenerate `latest.json` until `TAURI_SIGNING_PRIVATE_KEY` is available and the matching `.sig` is produced by the same build.
+
 ## Build The Local Data Service Sidecar
 
 Before a release build, create the Windows service executable:
@@ -99,6 +101,7 @@ Remove-Item Env:\TAURI_SIGNING_PRIVATE_KEY
 - `src-tauri\target\release\bundle\nsis\*_x64-setup.exe.sig`
 
 `.sig` 文件的内容要写入 `latest.json`，不是把 `.sig` 文件路径写进去。
+如果本机没有 `%USERPROFILE%\.tauri\a-stock-receiver.key` 或对应环境变量，Tauri 仍可能先生成 `.exe`，但会在 updater 签名阶段失败。此时应记录为“安装包构建完成、签名发布阻塞”，而不是把旧 `.sig` 或旧 `latest.json` 当成本次发布资产。
 
 ## GitHub Release 资产
 

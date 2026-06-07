@@ -4,10 +4,13 @@ import json
 import threading
 from urllib.request import Request, urlopen
 
+import pandas as pd
+
 from astock_backtester.sample_data import sample_daily_bars
 from astock_backtester.data.realtime import RealtimeMarketProvider
 from astock_backtester.data.warehouse import Warehouse
 from astock_backtester.data.news import _parse_time
+from astock_backtester.models import MarketBreadth, MarketIndexQuote, RealtimeMarketSnapshot, SectorMover
 from astock_backtester.service import create_server
 
 
@@ -23,6 +26,36 @@ def _request_ndjson(url: str, payload: dict) -> list[dict]:
     request = Request(url, data=data, method="POST", headers={"Content-Type": "application/json"})
     with urlopen(request, timeout=5) as response:
         return [json.loads(line) for line in response.read().decode("utf-8").splitlines() if line.strip()]
+
+
+def _fake_realtime_snapshot() -> RealtimeMarketSnapshot:
+    from datetime import datetime, timezone
+
+    return RealtimeMarketSnapshot(
+        status="live",
+        source="fake-live",
+        updated_at=datetime(2026, 5, 27, 10, 30, tzinfo=timezone.utc),
+        indexes=[
+            MarketIndexQuote(
+                symbol="sh000001",
+                name="上证指数",
+                last=3100.0,
+                previous_close=3080.0,
+                change=20.0,
+                change_pct=0.0064935,
+                source="fake-live",
+                updated_at=datetime(2026, 5, 27, 10, 30, tzinfo=timezone.utc),
+            )
+        ],
+        breadth=MarketBreadth(up=3200, down=1800, flat=120, total=5120, source="fake-live"),
+        strong_sectors=[
+            SectorMover(name="半导体", change_pct=0.038, leading_symbol="688001", source="fake-live")
+        ],
+        yesterday_strong_sectors=[
+            SectorMover(name="机器人", change_pct=0.041, leading_symbol="300024", source="fake-yesterday")
+        ],
+        message="ok",
+    )
 
 
 def test_service_health_and_logs(tmp_path):
@@ -278,6 +311,99 @@ def test_service_streams_backtest_trade_events_before_final_result(tmp_path, bas
         thread.join(timeout=5)
 
 
+def test_service_streams_serialized_trade_blocked_event(tmp_path, basic_settings):
+    from astock_backtester.models import ConditionGroup, ConditionNode, ConditionOperator, StrategyConfig
+
+    frame = pd.DataFrame(
+        [
+            {
+                "symbol": "000001",
+                "trade_date": pd.Timestamp("2024-01-02"),
+                "open": 10.0,
+                "high": 10.0,
+                "low": 10.0,
+                "close": 10.0,
+                "volume": 1000,
+                "is_suspended": False,
+                "listing_days": 500,
+                "float_market_cap": 2_000_000_000,
+                "main_net_inflow": 0.0,
+                "is_st": False,
+            },
+            {
+                "symbol": "000001",
+                "trade_date": pd.Timestamp("2024-01-03"),
+                "open": 11.0,
+                "high": 11.0,
+                "low": 11.0,
+                "close": 11.0,
+                "pre_close": 10.0,
+                "volume": 1000,
+                "is_suspended": False,
+                "listing_days": 501,
+                "float_market_cap": 2_000_000_000,
+                "main_net_inflow": 0.0,
+                "is_st": False,
+            },
+        ]
+    )
+    strategy = StrategyConfig(
+        name="block buy",
+        entry_groups=[
+            ConditionGroup(
+                id="entry",
+                operator=ConditionOperator.AND,
+                conditions=[
+                    ConditionNode(
+                        id="cap",
+                        condition_id="market_cap_between",
+                        params={"min": 1_000_000_000, "max": 10_000_000_000},
+                    )
+                ],
+            )
+        ],
+    )
+    settings = basic_settings.model_copy(
+        update={
+            "start_date": pd.Timestamp("2024-01-02").date(),
+            "end_date": pd.Timestamp("2024-01-03").date(),
+            "fixed_holding_days": 1,
+            "min_listing_days": 0,
+            "limit_up_blocks_buy": True,
+            "slippage_rate": 0,
+            "fee_rate": 0,
+            "stamp_tax_rate": 0,
+        }
+    )
+
+    server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
+    server.state.warehouse.write_daily_bars(frame)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        events = _request_ndjson(
+            f"http://127.0.0.1:{port}/run/backtest/stream",
+            {
+                "strategy": json.loads(strategy.model_dump_json()),
+                "settings": json.loads(settings.model_dump_json()),
+            },
+        )
+
+        blocked = next(event for event in events if event["type"] == "trade_blocked")
+        result = next(event for event in events if event["type"] == "result")["result"]
+        assert blocked["trade"]["blocked_reason"] == "次日开盘接近涨停，未买入：000001"
+        assert blocked["trade"]["shares"] == 0
+        assert blocked["trade"]["buy_amount"] == 0
+        assert blocked["trade"]["pnl_pct"] is None
+        assert result["metrics"]["trade_count"] == 0
+        assert result["latest_strategy_matches"]["matches"][0]["symbol"] == "000001"
+        assert isinstance(result["latest_strategy_matches"]["matches"][0]["rank_score"], (int, float))
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
 def test_service_realtime_market_snapshot_uses_configured_provider(tmp_path):
     class FakeRealtimeProvider:
         def market_snapshot(self):
@@ -333,6 +459,96 @@ def test_service_realtime_market_snapshot_uses_configured_provider(tmp_path):
     finally:
         server.shutdown()
         thread.join(timeout=5)
+
+
+def test_service_realtime_market_snapshot_returns_json_when_provider_raises(tmp_path):
+    class BrokenRealtimeProvider:
+        def market_snapshot(self):
+            raise RuntimeError("upstream timeout")
+
+    server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
+    server.state.realtime_provider = BrokenRealtimeProvider()
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        response = _request_json("GET", f"http://127.0.0.1:{port}/realtime/market-snapshot")
+
+        assert response["status"] == "unavailable"
+        assert response["source"] == "service-fallback"
+        assert response["indexes"] == []
+        assert response["breadth"] is None
+        assert response["market_phase"] in {"trading", "pre_open", "lunch_break", "post_close", "non_trading"}
+        assert any("upstream timeout" in item for item in response["diagnostics"])
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_service_realtime_market_snapshot_uses_provider_last_success_after_raise(tmp_path):
+    class RetainingBrokenRealtimeProvider:
+        def __init__(self):
+            self._last_successful_snapshot = _fake_realtime_snapshot()
+
+        def market_snapshot(self):
+            raise RuntimeError("upstream timeout")
+
+    server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
+    server.state.realtime_provider = RetainingBrokenRealtimeProvider()
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        response = _request_json("GET", f"http://127.0.0.1:{port}/realtime/market-snapshot")
+
+        assert response["status"] == "stale"
+        assert response["indexes"][0]["name"] == "上证指数"
+        assert response["source"].endswith("+service-retained-last-success")
+        assert any("upstream timeout" in item for item in response["diagnostics"])
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_realtime_market_provider_reuses_last_successful_snapshot_on_failure(tmp_path):
+    warehouse = Warehouse(tmp_path)
+    calls: list[str] = []
+
+    class FakeResponse:
+        encoding = "gbk"
+
+        def __init__(self, text: str):
+            self.text = text
+
+        def raise_for_status(self) -> None:
+            return None
+
+    def requester(url, **kwargs):
+        calls.append(url)
+        if "hq.sinajs.cn/list=sh000001" in url:
+            if len([item for item in calls if "hq.sinajs.cn/list=sh000001" in item]) == 1:
+                text = (
+                    'var hq_str_sh000001="上证指数,3100.00,3080.00,3100.00,3120.00,3070.00,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2026-06-05,14:50:00,00";\n'
+                    'var hq_str_sz399001="深证成指,9800.00,9700.00,9800.00,9900.00,9650.00,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2026-06-05,14:50:00,00";\n'
+                    'var hq_str_sz399006="创业板指,2100.00,2080.00,2100.00,2120.00,2070.00,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2026-06-05,14:50:00,00";'
+                )
+                return FakeResponse(text)
+            raise RuntimeError("sina index timeout")
+        return FakeResponse("")
+
+    provider = RealtimeMarketProvider(warehouse, requester=requester)
+    provider._fetch_live_sectors = lambda: [SectorMover(name="AI应用", change_pct=0.035, source="test")]
+    provider._fetch_live_breadth = lambda: MarketBreadth(up=3200, down=1600, flat=100, total=4900, source="test")
+
+    first = provider.market_snapshot()
+    second = provider.market_snapshot()
+
+    assert first.status == "live"
+    assert second.status == "stale"
+    assert second.indexes[0].name == "上证指数"
+    assert second.strong_sectors[0].name == "AI应用"
+    assert second.source.endswith("+retained-last-success")
+    assert any("沿用最近成功行情快照" in item for item in second.diagnostics)
 
 
 def test_service_realtime_market_snapshot_prefers_ths_concept_page_and_skips_eastmoney_push2(tmp_path):

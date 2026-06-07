@@ -66,6 +66,7 @@ class FakeNewsProvider:
 def test_market_commentary_builds_specific_same_day_view_from_live_snapshot_and_news():
     response = MarketCommentaryProvider(FakeRealtimeProvider(), FakeNewsProvider()).current_commentary()
 
+    assert response.mode == "intraday"
     assert response.stance == "positive"
     assert response.trade_date.isoformat() == "2026-06-05"
     assert "上证指数+0.65%" in response.summary
@@ -79,6 +80,65 @@ def test_market_commentary_builds_specific_same_day_view_from_live_snapshot_and_
     assert response.diagnostics == ["实时盘面数据完整：已使用指数、红绿家数、强势题材和昨日强势追踪生成评价。"]
 
 
+def test_market_commentary_accepts_retained_post_close_snapshot_as_review():
+    class RetainedPostCloseProvider:
+        def market_snapshot(self) -> RealtimeMarketSnapshot:
+            snapshot = FakeRealtimeProvider().market_snapshot()
+            snapshot.status = "stale"
+            snapshot.market_phase = "post_close"
+            snapshot.source = "ashare-sina+retained-last-success"
+            snapshot.message = "收盘后使用最近成功行情快照。"
+            snapshot.diagnostics = ["收盘后降低刷新频率，沿用 2026-06-05 14:50 的成功快照。"]
+            return snapshot
+
+    response = MarketCommentaryProvider(RetainedPostCloseProvider(), FakeNewsProvider()).current_commentary()
+
+    assert response.mode == "post_close"
+    assert response.source == "ashare-sina+retained-last-success+commentary"
+    assert "收盘后复盘" in response.summary
+    assert "AI应用" in response.summary
+    assert any("收盘后降低刷新频率" in item for item in response.diagnostics)
+    assert not response.summary.startswith("实时盘面暂不可用")
+
+
+def test_market_commentary_labels_lunch_break_snapshot_as_review():
+    class LunchBreakProvider:
+        def market_snapshot(self) -> RealtimeMarketSnapshot:
+            snapshot = FakeRealtimeProvider().market_snapshot()
+            snapshot.status = "stale"
+            snapshot.market_phase = "lunch_break"
+            snapshot.source = "ashare-sina+retained-last-success"
+            snapshot.message = "午间休市使用最近成功行情快照。"
+            snapshot.diagnostics = ["午间休市，使用最近成功行情快照生成回顾。"]
+            return snapshot
+
+    response = MarketCommentaryProvider(LunchBreakProvider(), FakeNewsProvider()).current_commentary()
+
+    assert response.mode == "lunch_break_review"
+    assert "午间盘面回顾" in response.summary
+    assert any("午间休市" in item for item in response.diagnostics)
+
+
+def test_market_commentary_accepts_weekend_snapshot_as_recent_trading_day_review():
+    class WeekendRetainedProvider:
+        def market_snapshot(self) -> RealtimeMarketSnapshot:
+            snapshot = FakeRealtimeProvider().market_snapshot()
+            snapshot.status = "stale"
+            snapshot.market_phase = "non_trading"
+            snapshot.source = "local-latest+retained-last-success"
+            snapshot.message = "非交易日使用最近交易日快照。"
+            snapshot.diagnostics = ["周末非交易日，使用最近交易日快照生成回顾。"]
+            return snapshot
+
+    response = MarketCommentaryProvider(WeekendRetainedProvider(), FakeNewsProvider()).current_commentary()
+
+    assert response.mode == "non_trading_review"
+    assert "非交易日最近交易日回顾" in response.summary
+    assert response.trade_date.isoformat() == "2026-06-05"
+    assert any("周末非交易日" in item for item in response.diagnostics)
+    assert response.drivers[0].title == "强势题材"
+
+
 def test_market_commentary_explains_unavailable_realtime_source_without_crashing():
     class BrokenRealtimeProvider:
         def market_snapshot(self) -> RealtimeMarketSnapshot:
@@ -86,6 +146,7 @@ def test_market_commentary_explains_unavailable_realtime_source_without_crashing
 
     response = MarketCommentaryProvider(BrokenRealtimeProvider(), FakeNewsProvider()).current_commentary()
 
+    assert response.mode == "news_fallback"
     assert response.stance == "defensive"
     assert response.drivers
     assert response.drivers[0].title == "新闻线索"
@@ -103,6 +164,7 @@ def test_market_commentary_uses_news_tags_when_realtime_snapshot_fails():
 
     response = MarketCommentaryProvider(BrokenRealtimeProvider(), FakeNewsProvider()).current_commentary()
 
+    assert response.mode == "news_fallback"
     assert response.source == "news-fallback+commentary"
     assert response.stance == "defensive"
     assert "AI" in response.summary
