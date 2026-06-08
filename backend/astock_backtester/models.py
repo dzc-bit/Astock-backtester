@@ -149,6 +149,8 @@ class DataOperationResult(BaseModel):
     missing_symbols: list[str] = Field(default_factory=list)
     coverage: list[DatasetCoverage]
     logs: list[ServiceLogEntry] = Field(default_factory=list)
+    diagnostics: list[dict[str, Any]] = Field(default_factory=list)
+    failures: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class ServiceHealth(BaseModel):
@@ -295,7 +297,7 @@ class MarketBriefingResponse(BaseModel):
     kind: Literal["fupan", "zaopan"]
     updated_at: datetime
     source: str
-    source_url: str
+    source_url: str | None = None
     summary: str
     sections: list[MarketBriefingSection] = Field(default_factory=list)
     diagnostics: list[str] = Field(default_factory=list)

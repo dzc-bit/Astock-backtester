@@ -44,6 +44,7 @@ SINA_HEADERS = {
 SINA_BREADTH_BATCH_SIZE = 400
 MIN_FULL_MARKET_BREADTH_TOTAL = 3000
 MIN_LOCAL_BREADTH_RATIO = 0.65
+MIN_CONTROLLED_BACKUP_SECTOR_ROWS = 3
 THS_MARKET_SUMMARY_URL = "https://q.10jqka.com.cn/index/index/board/all/"
 THS_CONCEPT_SECTION_URL = "https://q.10jqka.com.cn/gn/"
 THS_INDUSTRY_HTML_URL = "https://q.10jqka.com.cn/thshy/index/field/199112/order/desc/page/{page}/"
@@ -352,7 +353,7 @@ class HeavyMarketCrawlerProvider:
             if breadth is not None:
                 self._last_successful_breadth = breadth
                 return breadth
-        return self._last_successful_breadth
+        return None
 
     def _fetch_public_html_breadth(self, url: str) -> MarketBreadth | None:
         try:
@@ -407,7 +408,9 @@ class RealtimeMarketProvider:
         strong_sectors = live_sectors or local_snapshot.strong_sectors
         yesterday_sectors = local_snapshot.yesterday_strong_sectors
         breadth = live_breadth or local_snapshot.breadth
-        status = "live" if indexes and live_breadth else local_snapshot.status
+        has_live_context = bool(indexes and live_breadth and live_sectors)
+        has_partial_realtime_context = bool(indexes or live_breadth or live_sectors)
+        status = "live" if has_live_context else ("stale" if has_partial_realtime_context else local_snapshot.status)
         if not live_breadth and local_snapshot.diagnostics:
             diagnostics.extend(local_snapshot.diagnostics)
         if not indexes:
@@ -470,15 +473,13 @@ class RealtimeMarketProvider:
                 f"沿用最近成功行情快照：{self._last_successful_snapshot.updated_at.isoformat()}。",
             ]
             return retained
-        if snapshot.status == "stale" and _is_renderable_snapshot(snapshot):
-            self._last_successful_snapshot = snapshot.model_copy(deep=True)
         return snapshot
 
     def _fetch_live_sectors_with_budget(self, diagnostics: list[str]) -> list[SectorMover]:
         if self.sector_time_budget is None:
-            return self._fetch_live_sectors()
+            return self._call_live_sectors(diagnostics)
         executor = ThreadPoolExecutor(max_workers=1)
-        future = executor.submit(self._fetch_live_sectors)
+        future = executor.submit(self._call_live_sectors, diagnostics)
         try:
             return future.result(timeout=self.sector_time_budget)
         except TimeoutError:
@@ -492,6 +493,12 @@ class RealtimeMarketProvider:
             return []
         finally:
             executor.shutdown(wait=False, cancel_futures=True)
+
+    def _call_live_sectors(self, diagnostics: list[str]) -> list[SectorMover]:
+        try:
+            return self._fetch_live_sectors(diagnostics)
+        except TypeError:
+            return self._fetch_live_sectors()
 
     def _fetch_indexes(self) -> list[MarketIndexQuote]:
         symbols = ",".join(symbol for symbol, _ in INDEXES)
@@ -522,46 +529,64 @@ class RealtimeMarketProvider:
             timeout = min(timeout, max_seconds)
         return min(self.timeout, timeout)
 
-    def _fetch_live_sectors(self) -> list[SectorMover]:
+    def _fetch_live_sectors(self, diagnostics: list[str] | None = None) -> list[SectorMover]:
+        diagnostics = diagnostics if diagnostics is not None else []
         ths_concept_rows = self._fetch_ths_concept_section_rows()
         ths_concept_sectors = self._parse_sector_rows(ths_concept_rows, "ths-concept-section")
         if ths_concept_sectors:
             self._last_live_sector_rows = ths_concept_rows
             return _dedupe_sectors(ths_concept_sectors, 10)
+        diagnostics.append("ths-concept-section strong-sector source returned no valid rows.")
         ths_industry_rows = self._fetch_ths_industry_html_rows()
         ths_industry_sectors = self._parse_sector_rows(ths_industry_rows, "ths-industry-html")
         if ths_industry_sectors:
             self._last_live_sector_rows = ths_industry_rows
             return _dedupe_sectors(ths_industry_sectors, 10)
-        eastmoney_concept_rows = self._fetch_eastmoney_sector_rows(["m:90+t:3+f:!50", "m:90+t:3"])
-        eastmoney_concept_sectors = self._parse_sector_rows(eastmoney_concept_rows, "eastmoney-sector")
-        if eastmoney_concept_sectors:
-            self._last_live_sector_rows = eastmoney_concept_rows
-            return _dedupe_sectors(eastmoney_concept_sectors, 10)
-        eastmoney_industry_rows = self._fetch_eastmoney_sector_rows(["m:90+t:2+f:!50", "m:90+t:2"])
-        eastmoney_industry_sectors = self._parse_sector_rows(eastmoney_industry_rows, "eastmoney-industry-sector")
-        if eastmoney_industry_sectors:
-            self._last_live_sector_rows = eastmoney_industry_rows
-            return _dedupe_sectors(eastmoney_industry_sectors, 10)
+        diagnostics.append("ths-industry-html strong-sector source returned no valid rows.")
         sina_sectors = self._fetch_sina_sectors()
         self._last_live_sector_rows = []
         if sina_sectors:
             return _dedupe_sectors(sina_sectors, 10)
-        akshare_concept_rows = self._fetch_akshare_sector_rows("concept")
+        diagnostics.append("sina-sector strong-sector source returned no valid rows.")
+        akshare_concept_rows = self._fetch_akshare_sector_rows_with_timeout("concept", "akshare-sector", diagnostics)
         akshare_concept_sectors = self._parse_sector_rows(akshare_concept_rows, "akshare-sector")
         if akshare_concept_sectors:
             self._last_live_sector_rows = akshare_concept_rows
             return _dedupe_sectors(akshare_concept_sectors, 10)
-        akshare_industry_rows = self._fetch_akshare_sector_rows("industry")
+        diagnostics.append("akshare-sector strong-sector source returned no valid rows.")
+        akshare_industry_rows = self._fetch_akshare_sector_rows_with_timeout("industry", "akshare-industry-sector", diagnostics)
         akshare_industry_sectors = self._parse_sector_rows(akshare_industry_rows, "akshare-industry-sector")
         if akshare_industry_sectors:
             self._last_live_sector_rows = akshare_industry_rows
             return _dedupe_sectors(akshare_industry_sectors, 10)
+        diagnostics.append("akshare-industry-sector strong-sector source returned no valid rows.")
+        eastmoney_concept_rows = self._call_eastmoney_sector_rows(
+            ["m:90+t:3+f:!50", "m:90+t:3"],
+            diagnostics=diagnostics,
+            source_label="eastmoney-sector",
+        )
+        eastmoney_concept_sectors = self._parse_sector_rows(eastmoney_concept_rows, "eastmoney-sector")
+        if eastmoney_concept_sectors:
+            self._last_live_sector_rows = eastmoney_concept_rows
+            return _dedupe_sectors(eastmoney_concept_sectors, 10)
+        diagnostics.append("eastmoney-sector controlled backup returned no valid rows.")
+        eastmoney_industry_rows = self._call_eastmoney_sector_rows(
+            ["m:90+t:2+f:!50", "m:90+t:2"],
+            diagnostics=diagnostics,
+            source_label="eastmoney-industry-sector",
+        )
+        eastmoney_industry_sectors = self._parse_sector_rows(eastmoney_industry_rows, "eastmoney-industry-sector")
+        if eastmoney_industry_sectors:
+            self._last_live_sector_rows = eastmoney_industry_rows
+            return _dedupe_sectors(eastmoney_industry_sectors, 10)
+        diagnostics.append("eastmoney-industry-sector controlled backup returned no valid rows.")
         ths_hot_topic_rows = self._fetch_ths_hot_topic_rows()
         if ths_hot_topic_rows:
             # Hot-reason rows are useful topic candidates, but their gains are
             # individual stock moves. Do not present them as board quote pct.
             self._last_live_sector_rows = ths_hot_topic_rows
+        else:
+            diagnostics.append("ths-hot-reason strong-topic source returned no valid rows.")
         return []
 
     def _parse_sector_rows(self, rows: list[dict], source: str) -> list[SectorMover]:
@@ -871,18 +896,50 @@ class RealtimeMarketProvider:
             return None
         return MarketBreadth(up=up, down=down, flat=flat, total=total, source="eastmoney-a-share-spot")
 
-    def _fetch_eastmoney_sector_rows(self, fs_values: str | list[str]) -> list[dict]:
+    def _call_eastmoney_sector_rows(
+        self,
+        fs_values: str | list[str],
+        diagnostics: list[str],
+        source_label: str,
+    ) -> list[dict]:
+        try:
+            return self._fetch_eastmoney_sector_rows(fs_values, diagnostics=diagnostics, source_label=source_label)
+        except TypeError:
+            # Compatibility for tests that monkeypatch the old one-argument helper.
+            return self._fetch_eastmoney_sector_rows(fs_values)
+
+    def _fetch_eastmoney_sector_rows(
+        self,
+        fs_values: str | list[str],
+        diagnostics: list[str] | None = None,
+        source_label: str = "eastmoney-sector",
+    ) -> list[dict]:
+        diagnostics = diagnostics if diagnostics is not None else []
         values = [fs_values] if isinstance(fs_values, str) else fs_values
         for url in EASTMONEY_SECTOR_URLS:
             for fs in values:
-                payload = self._request_eastmoney_sector_payload(url, fs)
+                payload = self._request_eastmoney_sector_payload(url, fs, diagnostics, source_label)
                 rows = payload.get("data", {}).get("diff", []) if isinstance(payload, dict) else []
                 valid = self._normalize_sector_rows(rows)
-                if valid:
+                if len(valid) >= MIN_CONTROLLED_BACKUP_SECTOR_ROWS:
+                    diagnostics.append(
+                        f"{source_label} controlled backup accepted host={url} fs={fs} valid_rows={len(valid)}."
+                    )
                     return valid
+                if rows:
+                    diagnostics.append(
+                        f"{source_label} controlled backup rejected host={url} fs={fs}: "
+                        f"valid_rows={len(valid)} below_min={MIN_CONTROLLED_BACKUP_SECTOR_ROWS}."
+                    )
         return []
 
-    def _request_eastmoney_sector_payload(self, url: str, fs: str) -> dict:
+    def _request_eastmoney_sector_payload(
+        self,
+        url: str,
+        fs: str,
+        diagnostics: list[str] | None = None,
+        source_label: str = "eastmoney-sector",
+    ) -> dict:
         try:
             response = self.requester(
                 url,
@@ -902,9 +959,20 @@ class RealtimeMarketProvider:
             )
             response.raise_for_status()
             payload = response.json() or {}
-        except Exception:
+        except Exception as exc:
+            if diagnostics is not None:
+                diagnostics.append(
+                    f"{source_label} controlled backup request failed host={url} fs={fs}: {exc}"
+                )
             return {}
-        return payload if isinstance(payload, dict) else {}
+        if not isinstance(payload, dict):
+            if diagnostics is not None:
+                diagnostics.append(
+                    f"{source_label} controlled backup invalid payload host={url} fs={fs}: "
+                    f"type={type(payload).__name__}"
+                )
+            return {}
+        return payload
 
     def _normalize_sector_rows(self, rows: object) -> list[dict]:
         if not isinstance(rows, list):
@@ -946,6 +1014,27 @@ class RealtimeMarketProvider:
             if _normalize_sector_change_pct(row) is not None and str(row["f14"]).strip():
                 rows.append(row)
         return rows
+
+    def _fetch_akshare_sector_rows_with_timeout(
+        self,
+        board_type: str,
+        source: str,
+        diagnostics: list[str],
+    ) -> list[dict]:
+        timeout = self._sector_request_timeout()
+        executor = ThreadPoolExecutor(max_workers=1)
+        future = executor.submit(self._fetch_akshare_sector_rows, board_type)
+        try:
+            return future.result(timeout=timeout)
+        except TimeoutError:
+            future.cancel()
+            diagnostics.append(f"{source} strong-sector source timeout after {timeout:g}s.")
+            return []
+        except Exception as exc:
+            diagnostics.append(f"{source} strong-sector source failed: {exc}")
+            return []
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
 
     def _fetch_sina_sectors(self) -> list[SectorMover]:
         try:

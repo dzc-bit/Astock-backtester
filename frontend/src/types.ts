@@ -49,6 +49,8 @@ export type FetchResult = {
   missing_symbols: string[];
   coverage: DatasetCoverage[];
   logs: ServiceLogEntry[];
+  diagnostics?: Array<Record<string, unknown>>;
+  failures?: Array<Record<string, unknown>>;
 };
 
 export type ImportResult = {

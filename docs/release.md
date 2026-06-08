@@ -14,11 +14,12 @@ https://github.com/dzc-bit/Astock-backtester/releases/latest/download/latest.jso
 
 更新包必须签名。私钥只保存在发布机器或 GitHub Actions Secret 中，不能进入仓库。
 
-首次生成密钥：
+首次生成密钥时也生成到项目运行产物目录，避免和旧版用户目录密钥混用：
 
 ```powershell
-New-Item -ItemType Directory -Force "$env:USERPROFILE\.tauri"
-npm run tauri -- signer generate -w "$env:USERPROFILE\.tauri\a-stock-receiver.key"
+$projectKeyDir = "D:\New project 6\运行产物\签名密钥"
+New-Item -ItemType Directory -Force $projectKeyDir
+npm run tauri -- signer generate -w (Join-Path $projectKeyDir "a-stock-backtester-v017.key")
 ```
 
 当前本机私钥优先路径：
@@ -27,7 +28,7 @@ npm run tauri -- signer generate -w "$env:USERPROFILE\.tauri\a-stock-receiver.ke
 D:\New project 6\运行产物\签名密钥\a-stock-backtester-v017.key
 ```
 
-旧版/备用本机私钥路径：
+历史版本曾使用的本机私钥路径如下。1.1.1 发布不要把它作为 fallback；如需迁移密钥，先做单独的签名迁移验证。
 
 ```text
 %USERPROFILE%\.tauri\a-stock-receiver.key
@@ -37,6 +38,7 @@ D:\New project 6\运行产物\签名密钥\a-stock-backtester-v017.key
 
 不要提交或打印到日志：
 
+- `D:\New project 6\运行产物\签名密钥\a-stock-backtester-v017.key`
 - `%USERPROFILE%\.tauri\a-stock-receiver.key`
 - 私钥文本
 - 私钥密码
@@ -93,7 +95,9 @@ Expected output:
 在 Windows 发布机器上执行：
 
 ```powershell
-$env:TAURI_SIGNING_PRIVATE_KEY = Get-Content -Raw "$env:USERPROFILE\.tauri\a-stock-receiver.key"
+$projectKey = "D:\New project 6\运行产物\签名密钥\a-stock-backtester-v017.key"
+if (-not (Test-Path $projectKey)) { throw "Tauri signing key not found at project runtime key path" }
+$env:TAURI_SIGNING_PRIVATE_KEY = Get-Content -Raw $projectKey
 $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = ""
 npm run build:data-service
 npm run build
@@ -107,7 +111,7 @@ Remove-Item Env:\TAURI_SIGNING_PRIVATE_KEY
 - `src-tauri\target\release\bundle\nsis\*_x64-setup.exe.sig`
 
 `.sig` 文件的内容要写入 `latest.json`，不是把 `.sig` 文件路径写进去。
-如果本机没有 `D:\New project 6\运行产物\签名密钥\a-stock-backtester-v017.key`、旧版 `%USERPROFILE%\.tauri\a-stock-receiver.key` 或对应环境变量，Tauri 仍可能先生成 `.exe`，但会在 updater 签名阶段失败。此时应记录为“安装包构建完成、签名发布阻塞”，而不是把旧 `.sig` 或旧 `latest.json` 当成本次发布资产。
+如果本机没有 `D:\New project 6\运行产物\签名密钥\a-stock-backtester-v017.key` 或对应环境变量，Tauri 仍可能先生成 `.exe`，但会在 updater 签名阶段失败。此时应记录为“安装包构建完成、签名发布阻塞”，而不是把旧 `.sig`、旧私钥路径或旧 `latest.json` 当成本次发布资产。
 
 ## 安装后 sidecar 验证
 

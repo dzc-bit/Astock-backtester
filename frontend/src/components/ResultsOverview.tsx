@@ -1,6 +1,6 @@
 import { Play } from "lucide-react";
 import { Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
-import type { BacktestResult, DailyStrategyMatches, MatchedStock } from "../types";
+import type { BacktestResult, DailyStrategyMatches } from "../types";
 
 type Props = {
   result: BacktestResult | null;
@@ -47,16 +47,16 @@ function isToday(value: string | null | undefined): boolean {
   return value === today;
 }
 
-function MatchedStocksPanel({ dailyMatches, legacyMatches }: { dailyMatches?: DailyStrategyMatches | null; legacyMatches?: MatchedStock[] }) {
-  const hasPayload = Boolean(dailyMatches) || Array.isArray(legacyMatches);
-  const rawItems = dailyMatches?.matches ?? legacyMatches ?? [];
+function MatchedStocksPanel({ dailyMatches }: { dailyMatches?: DailyStrategyMatches | null }) {
+  const hasPayload = Boolean(dailyMatches);
+  const rawItems = dailyMatches?.matches ?? [];
   const items = [...rawItems].sort((left, right) => (right.rank_score ?? 0) - (left.rank_score ?? 0));
   const matchesAreToday = isToday(dailyMatches?.trade_date);
   const title = matchesAreToday ? "今日 user 模式候选" : "本地最近交易日候选";
   const kicker = matchesAreToday ? "当日符合用户策略的个股" : "本地最近交易日/非实时";
   const dateLabel = dailyMatches
     ? `信号日 ${dailyMatches.signal_date} / 展示日 ${dailyMatches.trade_date} / 本地回测快照`
-    : "兼容旧字段 matched_stocks";
+    : "等待 latest_strategy_matches";
   const priceLabel = matchesAreToday ? "本地收盘价" : "本地最近收盘价";
   return (
     <section className="matched-stocks-panel" aria-label="策略命中">
@@ -185,7 +185,7 @@ export function ResultsOverview({
               <span>{zeroTradeHint}</span>
             </div>
           ) : null}
-          <MatchedStocksPanel dailyMatches={result.latest_strategy_matches} legacyMatches={result.matched_stocks} />
+          <MatchedStocksPanel dailyMatches={result.latest_strategy_matches} />
           <div className="chart">
             <div className="chart-head">
               <strong>历史权益曲线</strong>

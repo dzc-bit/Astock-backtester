@@ -7,14 +7,27 @@ Date: 2026-06-08
 This report covers the standalone Eastmoney capital-flow crawler added in
 `backend/astock_backtester/data/capital_flow_crawler.py`.
 
-The crawler is included in the 1.1.1 backend as a low-level provider/crawler boundary. It is intentionally not wired into the data center, local cache, warehouse, frontend, or sync jobs yet. It only reads Eastmoney and returns structured Python data plus per-symbol failures. No project data files are written by the crawler or by these tests.
+The crawler is included in the 1.1.1 backend as a low-level provider/crawler boundary. It only reads Eastmoney public XHR and returns structured Python data plus per-symbol `failures` and `diagnostics`. The crawler itself does not write `LocalCache` or `Warehouse`.
 
-## Files Added
+In 1.1.1 the higher-level data service now owns the write boundary:
+
+- `POST /fetch/daily-bars` fetches daily bars through the normal provider chain, then uses the capital-flow crawler as the primary `main_net_inflow` source before writing the merged frame.
+- `POST /fetch/capital-flow` reads existing local daily bars and backfills only missing `main_net_inflow` values.
+- Failed symbols are returned through `DataOperationResult.failures` and `DataOperationResult.diagnostics`, and the data center surfaces those structured failures without embedding upstream URLs or crawler parsing rules in React.
+
+## Files
 
 - `backend/astock_backtester/data/capital_flow_crawler.py`
+- `backend/astock_backtester/data/operations.py`
+- `backend/astock_backtester/service.py`
+- `backend/astock_backtester/models.py`
+- `frontend/src/api.ts`
+- `frontend/src/components/DataCenter.tsx`
 - `tests/test_capital_flow_crawler.py`
+- `tests/test_data_operations.py`
+- `tests/test_data_service_http.py`
 
-Other modified files already present in the working tree were left untouched.
+The crawler remains independent from realtime market snapshot, commentary, news, briefing, user-mode candidates, and risk modules.
 
 ## Eastmoney Endpoint
 
@@ -100,17 +113,19 @@ symbol + trade_date
     "failures": [
         {
             "symbol": "000001",
+            "code": "network_error",
             "error": "Failed to fetch Eastmoney capital flow for 000001: ..."
         }
     ],
+    "diagnostics": [...]
 }
 ```
 
-This shape is meant for later data-center or sync-job wiring:
+This shape is consumed by higher-level service code:
 
 - Do not fail the whole batch when one symbol fails.
-- Persist successful rows only after the caller decides the write boundary.
-- Surface `failures` as diagnostics/logs in the UI.
+- Persist successful rows only after `fetch_daily_bars_into_cache(...)` or `fetch_capital_flow_into_cache(...)` decides the write boundary.
+- Surface `failures` and `diagnostics` as service logs and data-center status.
 
 ## Verification Commands
 
@@ -235,7 +250,7 @@ All failures were remote disconnects.
 
 ## Current Conclusion
 
-The crawler can parse and batch-process Eastmoney capital-flow payloads. It is suitable for 1.1.1 as a backend-only provider boundary, not as a direct warehouse writer. The local tests cover:
+The crawler can parse and batch-process Eastmoney capital-flow payloads. It is now used in 1.1.1 as the backend capital-flow provider for data-center backfills, while still staying out of direct warehouse writes. The local tests cover:
 
 - request construction
 - `secid` mapping
@@ -246,19 +261,26 @@ The crawler can parse and batch-process Eastmoney capital-flow payloads. It is s
 - network failure diagnostics
 - header-variant retry after remote disconnect
 - partial success in batch mode
+- empty payload / empty kline failure semantics
+- malformed numeric diagnostics without dropping otherwise usable rows
+- date coverage shortfall diagnostics
+- service-level merge into `main_net_inflow`
+- independent `/fetch/capital-flow` backfill for existing daily bars
+- in-process recent successful row reuse after disconnect, marked with `recent_success_cache_used` while retaining the original failure
 
 Live access from the current machine is not stable enough for reliable batch crawling. A single request succeeded once, then immediate batch and retry tests were blocked by server-side disconnects. The evidence points to Eastmoney network-side throttling or anti-crawl behavior for this environment, not to parser failure.
 
-## Suggested Backend Integration Boundary
+## Backend Integration Boundary
 
-Recommended later backend flow:
+Implemented flow:
 
 1. Keep `CapitalFlowCrawler` as the low-level interface adapter.
-2. Add a separate backfill service that accepts `symbols`, `start_date`, and `end_date`.
-3. Use `fetch_many_fund_flows` with conservative rate limiting.
-4. Convert returned `rows` to a DataFrame and merge only `main_net_inflow` into existing daily bars by `symbol + trade_date`.
-5. Write to `LocalCache` / `Warehouse` only in that higher-level service, not inside the crawler.
-6. Report `failures` through service logs and the data-center diagnostics UI.
+2. Use `fetch_many_fund_flows(symbols, start_date, end_date, timeout=15)` from the HTTP service layer.
+3. Convert returned `rows` to a DataFrame and merge only `main_net_inflow` into existing daily bars by `symbol + trade_date`.
+4. Let `fetch_daily_bars_into_cache(...)` merge crawler values as the primary capital-flow source for newly fetched daily bars.
+5. Let `fetch_capital_flow_into_cache(...)` backfill only missing `main_net_inflow` in existing daily bars.
+6. Write to `LocalCache` / `Warehouse` only in those higher-level services, not inside the crawler.
+7. Report `failures` through `DataOperationResult.failures`, service logs, and data-center diagnostics.
 
 Suggested write fields for current strategy compatibility:
 
@@ -284,17 +306,16 @@ close
 change_pct
 ```
 
-## Suggested Frontend Alignment
+## Frontend Alignment
 
-The data center should not show a simple binary success/failure for this source. Recommended UI states:
+The data center does not show a simple binary success/failure for this source. It calls a structured backend endpoint and keeps all upstream source details in the backend:
 
-- `not_started`
-- `running`
-- `partial`
-- `blocked_by_source`
-- `completed`
+- `fetchCapitalFlow(...)` calls `POST /fetch/capital-flow`.
+- `FetchResult` carries optional `diagnostics` and `failures`.
+- `DataCenter` displays failed symbols and diagnostic codes in the operation status.
+- React does not contain upstream URLs, crawler logic, or Eastmoney field-cleaning rules.
 
-Useful frontend summary fields:
+Useful structured fields:
 
 ```ts
 type CapitalFlowBackfillSummary = {
@@ -316,4 +337,4 @@ For the current environment, the UI should expect `blocked_by_source` or `partia
 - Do not write failed/missing rows as zero; keep missing values missing.
 - Do not let a failed symbol abort the whole backfill.
 - Do not hide `RemoteDisconnected` from the user; it is the important operational signal.
-- Consider proxy rotation, delayed retries, or a secondary provider before attempting all-market historical backfill.
+- If mainland IP or upstream risk control blocks requests, keep fixed timeouts, limited public header variants, fast failure, in-process recent successful row reuse, and clear diagnostics. Do not add login, cookie pools, proxy pools, CAPTCHA bypass, or paid scraping.

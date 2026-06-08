@@ -14,10 +14,12 @@ import requests
 
 from astock_backtester.data.briefing import MarketBriefingProvider
 from astock_backtester.data.cache import LocalCache
+from astock_backtester.data.capital_flow_crawler import CapitalFlowCrawler
 from astock_backtester.data.importer import read_daily_bars
 from astock_backtester.data.operations import (
     build_daily_bars_coverage,
     build_service_health,
+    fetch_capital_flow_into_cache,
     fetch_daily_bars_into_cache,
     import_daily_bars_into_cache,
 )
@@ -41,6 +43,7 @@ class DataServiceState:
         self.warehouse = Warehouse(cache_dir)
         self.akshare_provider = AkshareProvider()
         self.provider = CompositeProvider([ADataProvider(), self.akshare_provider, HttpAStockProvider()])
+        self.capital_flow_crawler = CapitalFlowCrawler()
         self.sync_manager = SyncJobManager(warehouse=self.warehouse, provider=self.provider)
         self.realtime_provider = RealtimeMarketProvider(self.warehouse)
         self.news_provider = MarketNewsProvider()
@@ -299,6 +302,20 @@ class DataServiceHandler(BaseHTTPRequestHandler):
                     cache=self.server.state.cache,
                     warehouse=self.server.state.warehouse,
                     fetcher=self._fetch_daily_bars_from_provider,
+                    capital_flow_fetcher=self._fetch_capital_flow_from_crawler,
+                    symbols=payload["symbols"],
+                    start_date=payload["start_date"],
+                    end_date=payload["end_date"],
+                )
+                for entry in result.logs:
+                    self.server.state.log(entry.level, entry.message)
+                self._send_json(result.model_dump(mode="json"))
+                return
+            if self.path == "/fetch/capital-flow":
+                result = fetch_capital_flow_into_cache(
+                    cache=self.server.state.cache,
+                    warehouse=self.server.state.warehouse,
+                    capital_flow_fetcher=self._fetch_capital_flow_from_crawler,
                     symbols=payload["symbols"],
                     start_date=payload["start_date"],
                     end_date=payload["end_date"],
@@ -342,6 +359,14 @@ class DataServiceHandler(BaseHTTPRequestHandler):
         if not frames:
             return pd.DataFrame()
         return pd.concat(frames, ignore_index=True)
+
+    def _fetch_capital_flow_from_crawler(self, symbols: list[str], start_date: str, end_date: str) -> dict[str, Any]:
+        return self.server.state.capital_flow_crawler.fetch_many_fund_flows(
+            symbols,
+            start_date,
+            end_date,
+            timeout=15,
+        )
 
 
 def create_server(host: str, port: int, cache_dir: str | Path) -> DataServiceServer:

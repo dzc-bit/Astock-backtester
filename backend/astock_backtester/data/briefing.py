@@ -423,6 +423,15 @@ def _section_from_mapping(item: dict[str, Any]) -> MarketBriefingSection | None:
     return MarketBriefingSection(title=title, content=content or None, links=links, tables=tables)
 
 
+def _first_section_link_url(sections: list[MarketBriefingSection]) -> str | None:
+    for section in sections:
+        for link in section.links:
+            url = (link.url or "").strip()
+            if url:
+                return url
+    return None
+
+
 @dataclass
 class MarketBriefingProvider:
     timeout: float = 8.0
@@ -441,7 +450,7 @@ class MarketBriefingProvider:
             soup = self._fetch_ths_html(THS_ZAOPAN_URL)
             return self._parse_zaopan(soup)
         except Exception as exc:
-            return self._fallback("zaopan", THS_ZAOPAN_URL, f"同花顺早盘读取失败：{exc}")
+            return self._zaopan_market_or_local_fallback([f"同花顺早盘读取失败：{exc}"])
 
     def _fetch_ths_html(self, url: str) -> BeautifulSoup:
         response = self._request_ths(url)
@@ -533,6 +542,7 @@ class MarketBriefingProvider:
         expanded_sections, article_diagnostics = self._expand_article_links(sections[:8], THS_FUPAN_URL)
         diagnostics.extend(article_diagnostics)
         source = "ths-fupan"
+        source_url: str | None = THS_FUPAN_URL
         if not summary and not expanded_sections:
             fallback_sections, fallback_diagnostics = self._market_fallback_sections()
             diagnostics.append("同花顺复盘页未解析到有效章节。")
@@ -541,13 +551,14 @@ class MarketBriefingProvider:
                 expanded_sections = fallback_sections
                 summary = fallback_sections[0].content or "同花顺复盘页暂不可用，已使用公开行情与本地最近交易日生成回顾。"
                 source = "ths-fupan+market-fallback"
+                source_url = _first_section_link_url(fallback_sections)
             else:
                 return self._local_brief_fupan(diagnostics)
         return MarketBriefingResponse(
             kind="fupan",
             updated_at=datetime.now(timezone.utc),
             source=source,
-            source_url=THS_FUPAN_URL,
+            source_url=source_url,
             summary=summary or "同花顺复盘已读取，但页面暂未提供摘要。",
             sections=expanded_sections,
             diagnostics=diagnostics,
@@ -605,23 +616,6 @@ class MarketBriefingProvider:
             diagnostics=diagnostics,
         )
 
-    def _fallback(
-        self,
-        kind: Literal["fupan", "zaopan"],
-        source_url: str,
-        diagnostic: str,
-    ) -> MarketBriefingResponse:
-        label = "复盘" if kind == "fupan" else "早盘"
-        return MarketBriefingResponse(
-            kind=kind,
-            updated_at=datetime.now(timezone.utc),
-            source=f"ths-{kind}+fallback",
-            source_url=source_url,
-            summary=f"同花顺{label}暂不可用，已保留{label}评价入口。",
-            sections=[],
-            diagnostics=[diagnostic],
-        )
-
     def _fupan_market_or_local_fallback(self, diagnostics: list[str]) -> MarketBriefingResponse:
         fallback_sections, fallback_diagnostics = self._market_fallback_sections()
         diagnostics.extend(fallback_diagnostics)
@@ -630,12 +624,27 @@ class MarketBriefingProvider:
                 kind="fupan",
                 updated_at=datetime.now(timezone.utc),
                 source="ths-fupan+market-fallback",
-                source_url=THS_FUPAN_URL,
+                source_url=_first_section_link_url(fallback_sections),
                 summary=fallback_sections[0].content or "同花顺复盘页暂不可用，已使用公开行情生成回顾线索。",
                 sections=fallback_sections,
                 diagnostics=diagnostics,
             )
         return self._local_brief_fupan(diagnostics)
+
+    def _zaopan_market_or_local_fallback(self, diagnostics: list[str]) -> MarketBriefingResponse:
+        fallback_sections, fallback_diagnostics = self._market_fallback_sections()
+        diagnostics.extend(fallback_diagnostics)
+        if fallback_sections:
+            return MarketBriefingResponse(
+                kind="zaopan",
+                updated_at=datetime.now(timezone.utc),
+                source="ths-zaopan+market-fallback",
+                source_url=_first_section_link_url(fallback_sections),
+                summary=fallback_sections[0].content or "同花顺早盘页暂不可用，已使用公开行情生成早盘线索。",
+                sections=fallback_sections,
+                diagnostics=diagnostics,
+            )
+        return self._local_brief_zaopan(diagnostics)
 
     def _local_brief_fupan(self, diagnostics: list[str]) -> MarketBriefingResponse:
         diagnostics = list(diagnostics)
@@ -655,7 +664,31 @@ class MarketBriefingProvider:
             kind="fupan",
             updated_at=datetime.now(timezone.utc),
             source="ths-fupan+local-brief",
-            source_url=THS_FUPAN_URL,
+            source_url=None,
+            summary=content,
+            sections=[section],
+            diagnostics=diagnostics,
+        )
+
+    def _local_brief_zaopan(self, diagnostics: list[str]) -> MarketBriefingResponse:
+        diagnostics = list(diagnostics)
+        diagnostics.append("同花顺早盘和公开行情兜底均不可用，已生成本地简短防守早盘。")
+        content = (
+            "同花顺结构化早盘暂不可用，公开行情兜底也未形成可用结构。"
+            "当前只给防守口径：不把新闻、局部行情或空页面包装成确定早盘结论，"
+            "等待同花顺正文、指数表或活跃个股表恢复后再确认盘前线索。"
+        )
+        section = MarketBriefingSection(
+            title="本地简短早盘",
+            content=content,
+            links=[],
+            tables=[],
+        )
+        return MarketBriefingResponse(
+            kind="zaopan",
+            updated_at=datetime.now(timezone.utc),
+            source="ths-zaopan+local-brief",
+            source_url=None,
             summary=content,
             sections=[section],
             diagnostics=diagnostics,

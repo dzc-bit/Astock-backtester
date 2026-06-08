@@ -74,7 +74,78 @@ def test_fetch_fund_flow_builds_eastmoney_request_and_filters_dates():
 def test_fetch_fund_flow_returns_empty_rows_for_missing_payload():
     crawler = CapitalFlowCrawler(json_get=lambda url, params, headers, timeout: {"data": None})
 
-    assert crawler.fetch_fund_flow("600519", "2024-01-01", "2024-01-31") == []
+    with pytest.raises(CapitalFlowFetchError, match="empty_payload"):
+        crawler.fetch_fund_flow("600519", "2024-01-01", "2024-01-31")
+
+
+def test_fetch_many_fund_flows_reports_empty_payload_and_empty_klines_as_failures():
+    def fake_json_get(url, params, headers, timeout):
+        if params["secid"] == "1.600519":
+            return {"data": None}
+        return {"data": {"klines": []}}
+
+    crawler = CapitalFlowCrawler(json_get=fake_json_get)
+
+    result = crawler.fetch_many_fund_flows(["600519", "000001"], "2024-01-01", "2024-01-31")
+
+    assert result["rows"] == []
+    assert result["failures"] == [
+        {"symbol": "600519", "code": "empty_payload", "error": "empty_payload: Eastmoney payload missing data for 600519"},
+        {"symbol": "000001", "code": "empty_klines", "error": "empty_klines: Eastmoney payload has no klines for 000001"},
+    ]
+
+
+def test_fetch_many_fund_flows_keeps_bad_numeric_rows_and_reports_diagnostics():
+    def fake_json_get(url, params, headers, timeout):
+        return {
+            "data": {
+                "klines": [
+                    "2024-01-02,bad-number,-1500000,-500000,1200000,800000,4.2,-3.1,-1.1,2.5,1.7,1688.0,1.5",
+                    "2024-01-03,2000000,-1500000,-500000,1200000,800000,4.2,-3.1,-1.1,2.5,1.7,1688.0,1.5",
+                ]
+            }
+        }
+
+    crawler = CapitalFlowCrawler(json_get=fake_json_get)
+
+    result = crawler.fetch_many_fund_flows(["600519"], "2024-01-01", "2024-01-31")
+
+    assert len(result["rows"]) == 2
+    assert result["rows"][0]["main_net_inflow"] is None
+    assert result["rows"][1]["main_net_inflow"] == 2000000.0
+    assert result["failures"] == []
+    assert any(
+        item["symbol"] == "600519"
+        and item["code"] == "malformed_numeric"
+        and item["field"] == "main_net_inflow"
+        and item["trade_date"] == "2024-01-02"
+        for item in result["diagnostics"]
+    )
+
+
+def test_fetch_many_fund_flows_reports_date_coverage_shortfall():
+    def fake_json_get(url, params, headers, timeout):
+        return {
+            "data": {
+                "klines": [
+                    "2024-01-03,2000000,-1500000,-500000,1200000,800000,4.2,-3.1,-1.1,2.5,1.7,1688.0,1.5",
+                ]
+            }
+        }
+
+    crawler = CapitalFlowCrawler(json_get=fake_json_get)
+
+    result = crawler.fetch_many_fund_flows(["600519"], "2024-01-02", "2024-01-05")
+
+    assert len(result["rows"]) == 1
+    assert result["failures"] == []
+    assert any(
+        item["symbol"] == "600519"
+        and item["code"] == "date_coverage_shortfall"
+        and item["first_trade_date"] == "2024-01-03"
+        and item["last_trade_date"] == "2024-01-03"
+        for item in result["diagnostics"]
+    )
 
 
 def test_fetch_fund_flow_estimates_limit_from_date_span():
@@ -86,7 +157,8 @@ def test_fetch_fund_flow_estimates_limit_from_date_span():
 
     crawler = CapitalFlowCrawler(json_get=fake_json_get)
 
-    crawler.fetch_fund_flow("600519", "2024-01-01", "2024-03-31")
+    with pytest.raises(CapitalFlowFetchError, match="empty_klines"):
+        crawler.fetch_fund_flow("600519", "2024-01-01", "2024-03-31")
 
     assert calls[0]["lmt"] == "118"
 
@@ -174,6 +246,37 @@ def test_fetch_many_fund_flows_keeps_successful_rows_and_reports_failures():
     assert "Failed to fetch Eastmoney capital flow for 000001" in result["failures"][0]["error"]
     assert "https://data.eastmoney.com/zjlx/detail.html: remote disconnected" in result["failures"][0]["error"]
     assert "https://quote.eastmoney.com/: remote disconnected" in result["failures"][0]["error"]
+
+
+def test_fetch_many_fund_flows_uses_recent_success_cache_after_disconnect():
+    calls = 0
+
+    def fake_json_get(url, params, headers, timeout):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return {
+                "data": {
+                    "klines": [
+                        "2024-01-02,2000000,-1500000,-500000,1200000,800000,4.2,-3.1,-1.1,2.5,1.7,1688.0,1.5",
+                    ]
+                }
+            }
+        raise OSError("remote disconnected")
+
+    crawler = CapitalFlowCrawler(json_get=fake_json_get)
+
+    first = crawler.fetch_many_fund_flows(["600519"], "2024-01-02", "2024-01-02")
+    second = crawler.fetch_many_fund_flows(["600519"], "2024-01-02", "2024-01-02")
+
+    assert first["rows"][0]["main_net_inflow"] == 2000000.0
+    assert second["rows"][0]["main_net_inflow"] == 2000000.0
+    assert second["failures"][0]["symbol"] == "600519"
+    assert second["failures"][0]["code"] == "network_error"
+    assert any(
+        item["symbol"] == "600519" and item["code"] == "recent_success_cache_used"
+        for item in second["diagnostics"]
+    )
 
 
 def test_normalize_code_accepts_common_a_share_symbol_forms():

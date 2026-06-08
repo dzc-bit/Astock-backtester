@@ -303,6 +303,22 @@ def test_service_fetch_daily_bars_uses_configured_provider(tmp_path):
     server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
     provider = FakeProvider()
     server.state.provider = provider
+
+    class FakeCapitalFlowCrawler:
+        def fetch_many_fund_flows(self, symbols, start_date, end_date, timeout=15):
+            return {
+                "rows": [
+                    {
+                        "symbol": "000001",
+                        "trade_date": "2026-05-26",
+                        "main_net_inflow": 1_500_000.0,
+                    }
+                ],
+                "failures": [],
+                "diagnostics": [],
+            }
+
+    server.state.capital_flow_crawler = FakeCapitalFlowCrawler()
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -324,6 +340,112 @@ def test_service_fetch_daily_bars_uses_configured_provider(tmp_path):
         assert response["coverage"][0]["end_date"] == "2026-05-26"
         stored = server.state.warehouse.read_daily_bars(symbols=["000001"])
         assert stored["trade_date"].dt.strftime("%Y-%m-%d").tolist() == ["2026-05-26"]
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_service_fetch_daily_bars_merges_capital_flow_from_configured_crawler(tmp_path):
+    class FakeProvider:
+        def fetch_daily_bars(self, symbol, start_date, end_date):
+            return pd.DataFrame(
+                {
+                    "symbol": [symbol],
+                    "trade_date": ["2026-05-26"],
+                    "open": [10.0],
+                    "high": [10.5],
+                    "low": [9.8],
+                    "close": [10.2],
+                    "volume": [1000],
+                    "amount": [10200.0],
+                    "float_market_cap": [1000000000.0],
+                    "total_market_cap": [1200000000.0],
+                    "main_net_inflow": [float("nan")],
+                }
+            )
+
+    class FakeCapitalFlowCrawler:
+        def __init__(self):
+            self.calls = []
+
+        def fetch_many_fund_flows(self, symbols, start_date, end_date, timeout=15):
+            self.calls.append((symbols, start_date, end_date, timeout))
+            return {
+                "rows": [{"symbol": "000001", "trade_date": "2026-05-26", "main_net_inflow": 8800000.0}],
+                "failures": [],
+                "diagnostics": [],
+            }
+
+    server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
+    crawler = FakeCapitalFlowCrawler()
+    server.state.provider = FakeProvider()
+    server.state.capital_flow_crawler = crawler
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        response = _request_json(
+            "POST",
+            f"http://127.0.0.1:{port}/fetch/daily-bars",
+            {"symbols": ["000001"], "start_date": "2026-05-26", "end_date": "2026-05-29"},
+        )
+
+        assert crawler.calls == [(["000001"], "2026-05-26", "2026-05-29", 15)]
+        assert response["status"] == "ok"
+        assert response["diagnostics"][0]["code"] == "capital_flow_crawler_merge"
+        stored = server.state.warehouse.read_daily_bars(symbols=["000001"])
+        assert stored["main_net_inflow"].tolist() == [8800000.0]
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_service_fetch_capital_flow_backfills_existing_rows_and_reports_failures(tmp_path):
+    class FakeCapitalFlowCrawler:
+        def fetch_many_fund_flows(self, symbols, start_date, end_date, timeout=15):
+            assert symbols == ["000001", "000002"]
+            assert start_date == "2026-05-26"
+            assert end_date == "2026-05-29"
+            return {
+                "rows": [{"symbol": "000001", "trade_date": "2026-05-26", "main_net_inflow": 8800000.0}],
+                "failures": [{"symbol": "000002", "code": "network_error", "error": "remote disconnected"}],
+                "diagnostics": [{"symbol": "000002", "code": "network_error", "message": "remote disconnected"}],
+            }
+
+    server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
+    server.state.capital_flow_crawler = FakeCapitalFlowCrawler()
+    server.state.warehouse.write_daily_bars(
+        pd.DataFrame(
+            {
+                "symbol": ["000001", "000002"],
+                "trade_date": pd.to_datetime(["2026-05-26", "2026-05-26"]),
+                "open": [10.0, 20.0],
+                "high": [10.5, 20.5],
+                "low": [9.8, 19.8],
+                "close": [10.2, 20.2],
+                "volume": [1000, 2000],
+                "main_net_inflow": [float("nan"), float("nan")],
+            }
+        )
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        response = _request_json(
+            "POST",
+            f"http://127.0.0.1:{port}/fetch/capital-flow",
+            {"symbols": ["000001", "000002"], "start_date": "2026-05-26", "end_date": "2026-05-29"},
+        )
+
+        assert response["status"] == "partial"
+        assert response["imported_rows"] == 1
+        assert response["fetched_symbols"] == ["000001"]
+        assert response["missing_symbols"] == ["000002"]
+        assert response["failures"] == [{"symbol": "000002", "code": "network_error", "error": "remote disconnected"}]
+        assert response["diagnostics"][0]["code"] == "network_error"
+        stored = server.state.warehouse.read_daily_bars(symbols=["000001", "000002"])
+        assert stored.loc[stored["symbol"] == "000001", "main_net_inflow"].tolist() == [8800000.0]
     finally:
         server.shutdown()
         thread.join(timeout=5)
@@ -754,6 +876,7 @@ def test_service_realtime_market_snapshot_falls_back_to_eastmoney_sector_api_wit
                         "diff": [
                             {"f12": "BK1036", "f14": "半导体", "f3": 2.5, "f128": "688001"},
                             {"f12": "BK0985", "f14": "机器人概念", "f3": 1.8, "f128": "300024"},
+                            {"f12": "BK1122", "f14": "AI应用", "f3": 1.5, "f128": "300001"},
                         ]
                     }
                 }
@@ -809,6 +932,8 @@ def test_realtime_provider_retries_eastmoney_sector_hosts_before_giving_up(tmp_p
                 "data": {
                     "diff": [
                         {"f12": "BK1036", "f14": "半导体", "f3": 2.5, "f128": "688001"},
+                        {"f12": "BK0985", "f14": "机器人概念", "f3": 1.8, "f128": "300024"},
+                        {"f12": "BK1122", "f14": "AI应用", "f3": 1.5, "f128": "300001"},
                     ]
                 }
             }
@@ -827,6 +952,43 @@ def test_realtime_provider_retries_eastmoney_sector_hosts_before_giving_up(tmp_p
     assert any(url.startswith("https://82.push2.eastmoney.com") for url in requested_urls)
 
 
+def test_realtime_provider_rejects_too_few_eastmoney_sector_rows_with_diagnostics(tmp_path):
+    class FakeResponse:
+        def raise_for_status(self):
+            return
+
+        def json(self):
+            return {
+                "data": {
+                    "diff": [
+                        {"f12": "BK1036", "f14": "半导体", "f3": 2.5, "f128": "688001"},
+                    ]
+                }
+            }
+
+    diagnostics: list[str] = []
+    provider = RealtimeMarketProvider(Warehouse(tmp_path), requester=lambda url, **kwargs: FakeResponse())
+
+    rows = provider._fetch_eastmoney_sector_rows(["m:90+t:3+f:!50"], diagnostics=diagnostics)
+
+    assert rows == []
+    assert any("valid_rows=1" in item and "below_min=3" in item for item in diagnostics)
+
+
+def test_realtime_provider_reports_eastmoney_sector_request_failures(tmp_path):
+    def requester(url, **kwargs):
+        raise OSError("remote disconnected")
+
+    diagnostics: list[str] = []
+    provider = RealtimeMarketProvider(Warehouse(tmp_path), requester=requester)
+
+    rows = provider._fetch_eastmoney_sector_rows(["m:90+t:3+f:!50"], diagnostics=diagnostics)
+
+    assert rows == []
+    assert any("request failed" in item and "remote disconnected" in item for item in diagnostics)
+    assert any("m:90+t:3+f:!50" in item for item in diagnostics)
+
+
 def test_realtime_provider_treats_eastmoney_sub_one_sector_changes_as_percent_units(tmp_path):
     class FakeResponse:
         def raise_for_status(self):
@@ -837,6 +999,8 @@ def test_realtime_provider_treats_eastmoney_sub_one_sector_changes_as_percent_un
                 "data": {
                     "diff": [
                         {"f12": "BK1036", "f14": "半导体", "f3": 0.8, "f128": "688001"},
+                        {"f12": "BK0985", "f14": "机器人概念", "f3": 0.7, "f128": "300024"},
+                        {"f12": "BK1122", "f14": "AI应用", "f3": 0.6, "f128": "300001"},
                     ]
                 }
             }
@@ -879,6 +1043,8 @@ def test_realtime_provider_bounds_slow_ths_sector_sources_before_eastmoney_fallb
                     "data": {
                         "diff": [
                             {"f12": "BK1036", "f14": "半导体", "f3": 2.5, "f128": "688001"},
+                            {"f12": "BK0985", "f14": "机器人概念", "f3": 1.8, "f128": "300024"},
+                            {"f12": "BK1122", "f14": "AI应用", "f3": 1.5, "f128": "300001"},
                         ]
                     }
                 }
@@ -935,6 +1101,33 @@ def test_realtime_provider_uses_akshare_sector_fallback_when_eastmoney_sector_un
     assert abs(sectors[0].change_pct - 0.025) < 0.000001
 
 
+def test_realtime_provider_times_out_slow_akshare_sector_before_eastmoney_backup(tmp_path):
+    provider = RealtimeMarketProvider(Warehouse(tmp_path))
+    provider.sector_source_timeout = 0.01
+    provider._fetch_ths_concept_section_rows = lambda: []
+    provider._fetch_ths_industry_html_rows = lambda: []
+    provider._fetch_sina_sectors = lambda: []
+
+    def slow_akshare_rows(board_type):
+        time.sleep(0.2)
+        return [{"f12": "BK1036", "f14": "akshare-sector-name", "f3": 9.9}]
+
+    provider._fetch_akshare_sector_rows = slow_akshare_rows
+    provider._fetch_eastmoney_sector_rows = lambda fs_values: [
+        {"f12": "BK1036", "f14": "eastmoney-sector-name", "f3": 2.5}
+    ]
+    diagnostics: list[str] = []
+
+    started_at = time.perf_counter()
+    sectors = provider._fetch_live_sectors(diagnostics)
+    elapsed = time.perf_counter() - started_at
+
+    assert elapsed < 0.15
+    assert sectors[0].name == "eastmoney-sector-name"
+    assert sectors[0].source == "eastmoney-sector"
+    assert any("akshare-sector" in item and "timeout" in item.lower() for item in diagnostics)
+
+
 def test_realtime_provider_prefers_sina_sector_before_akshare_fallback(tmp_path, monkeypatch):
     class FakeAkshare:
         def stock_board_concept_name_em(self):
@@ -956,6 +1149,48 @@ def test_realtime_provider_prefers_sina_sector_before_akshare_fallback(tmp_path,
 
     assert sectors[0].name == "机器人行业"
     assert sectors[0].source == "sina-sector"
+
+
+def test_realtime_provider_prefers_sina_sector_before_eastmoney_backup(tmp_path):
+    provider = RealtimeMarketProvider(Warehouse(tmp_path))
+    eastmoney_calls = []
+
+    provider._fetch_ths_concept_section_rows = lambda: []
+    provider._fetch_ths_industry_html_rows = lambda: []
+    provider._fetch_sina_sectors = lambda: [SectorMover(name="sina-sector-name", change_pct=0.03, source="sina-sector")]
+
+    def eastmoney_rows(fs_values):
+        eastmoney_calls.append(fs_values)
+        return [{"f12": "BK1036", "f14": "eastmoney-sector-name", "f3": 5.0}]
+
+    provider._fetch_eastmoney_sector_rows = eastmoney_rows
+
+    sectors = provider._fetch_live_sectors([])
+
+    assert sectors[0].name == "sina-sector-name"
+    assert sectors[0].source == "sina-sector"
+    assert eastmoney_calls == []
+
+
+def test_realtime_provider_reports_failed_live_sector_sources(tmp_path):
+    provider = RealtimeMarketProvider(Warehouse(tmp_path))
+    diagnostics: list[str] = []
+
+    provider._fetch_ths_concept_section_rows = lambda: []
+    provider._fetch_ths_industry_html_rows = lambda: []
+    provider._fetch_sina_sectors = lambda: []
+    provider._fetch_akshare_sector_rows = lambda board_type: []
+    provider._fetch_eastmoney_sector_rows = lambda fs_values: []
+    provider._fetch_ths_hot_topic_rows = lambda: []
+
+    sectors = provider._fetch_live_sectors(diagnostics)
+
+    assert sectors == []
+    assert any("ths-concept-section" in item for item in diagnostics)
+    assert any("ths-industry-html" in item for item in diagnostics)
+    assert any("sina-sector" in item for item in diagnostics)
+    assert any("akshare-sector" in item for item in diagnostics)
+    assert any("eastmoney-sector" in item for item in diagnostics)
 
 
 def test_service_realtime_market_snapshot_parses_sub_one_ths_concept_pct_as_percent_unit(tmp_path):
@@ -1358,6 +1593,22 @@ def test_realtime_provider_heavy_breadth_uses_browser_provider_after_public_html
     assert breadth.source == "browser-market-provider"
 
 
+def test_heavy_market_crawler_does_not_reuse_cached_breadth_as_current_live_data():
+    def requester(*args, **kwargs):
+        raise RuntimeError("public market crawler blocked")
+
+    provider = HeavyMarketCrawlerProvider(requester=requester, timeout=0.01)
+    provider._last_successful_breadth = MarketBreadth(
+        up=3300,
+        down=1500,
+        flat=300,
+        total=5100,
+        source="heavy-market-crawler",
+    )
+
+    assert provider.fetch_breadth() is None
+
+
 def test_realtime_provider_live_message_labels_heavy_breadth_source(tmp_path):
     provider = RealtimeMarketProvider(Warehouse(tmp_path))
 
@@ -1609,10 +1860,57 @@ def test_realtime_provider_returns_breadth_without_waiting_for_slow_sector_sourc
     elapsed = time.perf_counter() - started_at
 
     assert elapsed < 0.15
+    assert snapshot.status == "stale"
     assert snapshot.breadth is not None
     assert snapshot.breadth.source == "fast-breadth"
     assert snapshot.strong_sectors[0].source == "local-market-group"
     assert any("实时强势题材接口超时" in item for item in snapshot.diagnostics)
+
+
+def test_realtime_provider_does_not_cache_stale_snapshot_with_local_fallback_sectors(tmp_path):
+    warehouse = Warehouse(tmp_path)
+    provider = RealtimeMarketProvider(warehouse)
+    provider._fetch_indexes = lambda: [
+        MarketIndexQuote(
+            symbol="sh000001",
+            name="涓婅瘉鎸囨暟",
+            last=3100.0,
+            previous_close=3080.0,
+            change=20.0,
+            change_pct=0.0064935,
+            source="fake-live",
+        )
+    ]
+    provider._fetch_live_breadth = lambda: MarketBreadth(
+        up=3200,
+        down=1700,
+        flat=200,
+        total=5100,
+        source="fast-breadth",
+    )
+    provider._fetch_live_sectors = lambda: []
+
+    def local_snapshot(now):
+        return RealtimeMarketSnapshot(
+            status="stale",
+            source="local-latest",
+            updated_at=now,
+            indexes=[],
+            breadth=None,
+            strong_sectors=[SectorMover(name="鏈湴棰樻潗", change_pct=0.02, source="local-market-group")],
+            yesterday_strong_sectors=[],
+            message="local",
+        )
+
+    provider._snapshot_from_local = local_snapshot
+
+    snapshot = provider.market_snapshot()
+
+    assert snapshot.status == "stale"
+    assert snapshot.breadth is not None
+    assert snapshot.breadth.source == "fast-breadth"
+    assert snapshot.strong_sectors[0].source == "local-market-group"
+    assert provider._last_successful_snapshot is None
 
 
 def test_service_realtime_market_snapshot_tracks_yesterday_strong_sectors_from_local_history(tmp_path):

@@ -574,6 +574,41 @@ export async function fetchDailyBars(
   );
 }
 
+export async function fetchCapitalFlow(
+  baseUrl: string,
+  symbols: string[],
+  startDate: string,
+  endDate: string
+): Promise<FetchResult> {
+  if (!isTauriRuntime()) {
+    return {
+      status: "ok",
+      imported_rows: symbols.length,
+      requested_symbols: symbols,
+      fetched_symbols: symbols,
+      missing_symbols: [],
+      coverage: [
+        { dataset: "daily_bars", symbols: symbols.length, start_date: startDate, end_date: endDate, missing_rows: 0 },
+        { dataset: "capital_flow", symbols: symbols.length, start_date: startDate, end_date: endDate, missing_rows: 0 },
+        { dataset: "market_cap", symbols: symbols.length, start_date: startDate, end_date: endDate, missing_rows: 0 }
+      ],
+      logs: [{ level: "info", message: `Capital-flow crawler merged ${symbols.length} rows as primary main_net_inflow source` }],
+      diagnostics: [{ code: "capital_flow_crawler_merge", merged_rows: symbols.length, source: "capital_flow_crawler" }],
+      failures: []
+    };
+  }
+  return serviceFetch<FetchResult>(
+    baseUrl,
+    "/fetch/capital-flow",
+    {
+      symbols,
+      start_date: startDate,
+      end_date: endDate
+    },
+    { timeoutMs: LONG_RUNNING_SERVICE_TIMEOUT_MS }
+  );
+}
+
 export async function importDailyBars(baseUrl: string, source: "sample" | "file", path?: string): Promise<ImportResult> {
   if (!isTauriRuntime()) {
     return {

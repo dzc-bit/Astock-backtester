@@ -520,6 +520,7 @@ def test_market_briefing_provider_uses_market_fallback_when_ths_page_has_no_sect
     ).latest_fupan()
 
     assert response.source == "ths-fupan+market-fallback"
+    assert response.source_url == "https://quote.eastmoney.com/center/gridlist.html"
     assert response.summary == "上证指数小幅回升，机器人与算力方向保持活跃。"
     assert response.sections[0].title == "公开行情回顾"
     assert response.sections[0].tables[0].columns == ["名称", "最新值", "涨跌额", "涨跌幅"]
@@ -552,6 +553,7 @@ def test_market_briefing_provider_uses_market_fallback_when_ths_request_fails():
     ).latest_fupan()
 
     assert response.source == "ths-fupan+market-fallback"
+    assert response.source_url == "https://quote.eastmoney.com/center/gridlist.html"
     assert response.summary == "同花顺复盘页暂不可用，公开行情显示指数震荡，强势方向仅作为线索。"
     assert response.sections[0].title == "公开行情回顾"
     assert response.sections[0].links[0].url == "https://quote.eastmoney.com/center/gridlist.html"
@@ -567,6 +569,7 @@ def test_market_briefing_provider_returns_local_brief_section_when_fupan_and_mar
     response = MarketBriefingProvider(requester=requester).latest_fupan()
 
     assert response.source == "ths-fupan+local-brief"
+    assert response.source_url is None
     assert response.sections
     assert response.sections[0].title == "本地简短复盘"
     assert "只给防守口径" in (response.sections[0].content or "")
@@ -656,6 +659,8 @@ def test_market_briefing_provider_labels_zaopan_fallback_source_when_ths_unavail
     response = MarketBriefingProvider(requester=requester).latest_zaopan()
 
     assert response.kind == "zaopan"
-    assert response.source == "ths-zaopan+fallback"
-    assert response.source_url == "https://stock.10jqka.com.cn/zaopan/"
-    assert response.diagnostics == ["同花顺早盘读取失败：zaopan blocked"]
+    assert response.source == "ths-zaopan+local-brief"
+    assert response.source_url is None
+    assert response.sections
+    assert response.diagnostics[0] == "同花顺早盘读取失败：zaopan blocked"
+    assert any("本地简短防守早盘" in item for item in response.diagnostics)

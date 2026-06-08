@@ -497,3 +497,38 @@ def test_market_commentary_rejects_live_snapshot_with_partial_breadth_total():
     assert "后端简短判断" in response.summary
     assert not any("实时盘面数据完整" in item for item in response.diagnostics)
     assert any("红绿家数不完整" in item for item in response.diagnostics)
+
+
+def test_market_commentary_rejects_live_snapshot_with_local_fallback_sectors():
+    class LocalSectorRealtimeProvider:
+        def market_snapshot(self) -> RealtimeMarketSnapshot:
+            return RealtimeMarketSnapshot(
+                status="live",
+                source="ashare-sina+sina-a-share-live+local-market-group",
+                updated_at=datetime(2026, 6, 5, 14, 50, tzinfo=timezone.utc),
+                indexes=[
+                    MarketIndexQuote(
+                        symbol="sh000001",
+                        name="上证指数",
+                        last=3100.0,
+                        previous_close=3080.0,
+                        change=20.0,
+                        change_pct=0.0065,
+                        source="ashare-sina",
+                    )
+                ],
+                breadth=MarketBreadth(up=3300, down=1500, flat=300, total=5100, source="sina-a-share-live"),
+                strong_sectors=[
+                    SectorMover(name="AI应用", change_pct=0.042, leading_symbol="300001", source="local-market-group")
+                ],
+                yesterday_strong_sectors=[],
+                message="live breadth with local sectors",
+                diagnostics=["实时强势题材接口暂不可用，已回退到本地最近交易日题材聚合。"],
+            )
+
+    response = MarketCommentaryProvider(LocalSectorRealtimeProvider(), FakeNewsProvider()).current_commentary()
+
+    assert response.source == "local-brief-commentary"
+    assert response.mode == "local_brief_review"
+    assert not any("实时盘面数据完整" in item for item in response.diagnostics)
+    assert any("local fallback" in item for item in response.diagnostics)

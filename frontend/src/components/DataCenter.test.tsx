@@ -5,6 +5,7 @@ import { DataCenter } from "./DataCenter";
 
 const apiMocks = vi.hoisted(() => ({
   ensureDataService: vi.fn(),
+  fetchCapitalFlow: vi.fn(),
   fetchDailyBars: vi.fn(),
   importDailyBars: vi.fn(),
   loadDataServiceHealth: vi.fn(),
@@ -68,6 +69,17 @@ describe("DataCenter", () => {
       missing_symbols: [],
       coverage,
       logs: [{ level: "info", message: "Fetched 3 daily bar rows" }]
+    });
+    apiMocks.fetchCapitalFlow.mockResolvedValue({
+      status: "ok",
+      imported_rows: 1,
+      requested_symbols: ["600519"],
+      fetched_symbols: ["600519"],
+      missing_symbols: [],
+      coverage,
+      logs: [{ level: "info", message: "Capital-flow crawler merged 1 rows as primary main_net_inflow source" }],
+      diagnostics: [{ code: "capital_flow_crawler_merge", merged_rows: 1, source: "capital_flow_crawler" }],
+      failures: []
     });
     apiMocks.importDailyBars.mockResolvedValue({
       status: "ok",
@@ -183,6 +195,54 @@ describe("DataCenter", () => {
     expect(onCoverageChange).toHaveBeenCalledWith(coverage);
     expect(await screen.findByText("Fetched 3 daily bar rows")).toBeInTheDocument();
     expect(screen.getAllByText("建议补齐").length).toBeGreaterThan(0);
+  });
+
+  it("backfills capital flow through the service crawler boundary", async () => {
+    const user = setupUser();
+    const onCoverageChange = vi.fn();
+
+    render(<DataCenter cacheDir=".astock-cache" coverage={coverage} onCoverageChange={onCoverageChange} />);
+
+    await screen.findByText(/http:\/\/127\.0\.0\.1:9011/);
+    await user.clear(screen.getByLabelText("\u80a1\u7968\u4ee3\u7801"));
+    await user.type(screen.getByLabelText("\u80a1\u7968\u4ee3\u7801"), "600519 000001");
+    await user.click(screen.getByRole("button", { name: "补齐资金流" }));
+
+    await waitFor(() => expect(apiMocks.fetchCapitalFlow).toHaveBeenCalledWith(
+      "http://127.0.0.1:9011",
+      ["600519", "000001"],
+      "2026-06-01",
+      "2026-06-05"
+    ));
+    expect(onCoverageChange).toHaveBeenCalledWith(coverage);
+    expect(await screen.findByText(/Capital-flow crawler merged 1 rows/)).toBeInTheDocument();
+  });
+
+  it("surfaces capital-flow crawler failures in the operation status", async () => {
+    const user = setupUser();
+    apiMocks.fetchCapitalFlow.mockResolvedValue({
+      status: "partial",
+      imported_rows: 1,
+      requested_symbols: ["600519", "000001"],
+      fetched_symbols: ["600519"],
+      missing_symbols: ["000001"],
+      coverage,
+      logs: [{ level: "warning", message: "Capital-flow crawler failed for symbols: 000001" }],
+      diagnostics: [{ symbol: "000001", code: "network_error", message: "remote disconnected" }],
+      failures: [{ symbol: "000001", code: "network_error", error: "remote disconnected" }]
+    });
+
+    render(<DataCenter cacheDir=".astock-cache" coverage={coverage} onCoverageChange={vi.fn()} />);
+
+    await screen.findByText(/http:\/\/127\.0\.0\.1:9011/);
+    await user.clear(screen.getByLabelText("股票代码"));
+    await user.type(screen.getByLabelText("股票代码"), "600519 000001");
+    await user.click(screen.getByRole("button", { name: "补齐资金流" }));
+
+    expect(await screen.findByRole("status", { name: "数据中心状态" })).toHaveTextContent(
+      "部分失败: 000001"
+    );
+    expect(screen.getByRole("status", { name: "数据中心状态" })).toHaveTextContent("network_error");
   });
 
   afterEach(() => {

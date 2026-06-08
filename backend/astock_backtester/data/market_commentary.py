@@ -117,6 +117,8 @@ def _snapshot_missing_reasons(snapshot: RealtimeMarketSnapshot) -> list[str]:
         reasons.append(f"红绿家数不完整({snapshot.breadth.source} total={snapshot.breadth.total})")
     if not snapshot.strong_sectors:
         reasons.append("缺少强势题材")
+    elif any(str(sector.source).startswith("local-") for sector in snapshot.strong_sectors):
+        reasons.append("strong sectors are local fallback, not live provider")
     return reasons
 
 

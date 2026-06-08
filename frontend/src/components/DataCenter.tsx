@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   ensureDataService,
+  fetchCapitalFlow,
   fetchDailyBars,
   importDailyBars,
   loadDailyBarsCoverage,
@@ -18,7 +19,7 @@ type Props = {
   onServiceReady?: (service: DataServiceStatus) => void;
 };
 
-type BusyAction = "refresh" | "fetch" | "sample" | "file" | "sync" | null;
+type BusyAction = "refresh" | "fetch" | "capital-flow" | "sample" | "file" | "sync" | null;
 
 function formatLocalDate(date: Date): string {
   const year = date.getFullYear();
@@ -72,8 +73,25 @@ function formatList(values: string[]): string {
   return values.length === 0 ? "无" : values.join(", ");
 }
 
-function operationMessage(logs: { message: string }[]): string {
-  return logs.at(-1)?.message ?? "数据操作已完成";
+type OperationResultMessage = {
+  logs: { message: string }[];
+  failures?: Array<Record<string, unknown>>;
+  diagnostics?: Array<Record<string, unknown>>;
+};
+
+function operationMessage(result: OperationResultMessage): string {
+  const failureSymbols = (result.failures ?? [])
+    .map((item) => item.symbol)
+    .filter((value): value is string => typeof value === "string" && value.length > 0);
+  if (failureSymbols.length > 0) {
+    const diagnosticCodes = (result.diagnostics ?? [])
+      .map((item) => item.code)
+      .filter((value): value is string => typeof value === "string" && value.length > 0);
+    const codeText = diagnosticCodes.length > 0 ? ` / ${Array.from(new Set(diagnosticCodes)).join(", ")}` : "";
+    const logText = result.logs.at(-1)?.message;
+    return `部分失败: ${Array.from(new Set(failureSymbols)).join(", ")}${codeText}${logText ? ` / ${logText}` : ""}`;
+  }
+  return result.logs.at(-1)?.message ?? "数据操作已完成";
 }
 
 function isSyncRunning(job: SyncJobStatus | null): boolean {
@@ -250,7 +268,7 @@ export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceRead
     setMessage("正在补全缺失数据");
     try {
       const result = await fetchDailyBars(service.base_url, symbols, startDate, endDate);
-      setMessage(operationMessage(result.logs));
+      setMessage(operationMessage(result));
       onCoverageChange(result.coverage);
       const nextRange = coverageFillDateRange(result.coverage);
       const fetchedEndDate = latestCoverageEndDate(result.coverage);
@@ -279,6 +297,32 @@ export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceRead
     }
   };
 
+  const handleCapitalFlowBackfill = async () => {
+    if (!service || symbols.length === 0) {
+      return;
+    }
+    setBusyAction("capital-flow");
+    setMessage("\u6b63\u5728\u8865\u9f50\u8d44\u91d1\u6d41");
+    try {
+      const result = await fetchCapitalFlow(service.base_url, symbols, startDate, endDate);
+      setMessage(operationMessage(result));
+      onCoverageChange(result.coverage);
+      await refreshLogs(service);
+      await refreshDetails(service, symbols, startDate, endDate);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "\u8865\u9f50\u8d44\u91d1\u6d41\u5931\u8d25");
+      let activeService = service;
+      try {
+        activeService = await reconnectService();
+      } catch {
+        // Keep the original operation error visible if reconnect also fails.
+      }
+      await refreshLogs(activeService);
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
   const handleImportSample = async () => {
     if (!service) {
       return;
@@ -287,7 +331,7 @@ export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceRead
     setMessage("正在导入示例数据");
     try {
       const result = await importDailyBars(service.base_url, "sample");
-      setMessage(operationMessage(result.logs));
+      setMessage(operationMessage(result));
       onCoverageChange(result.coverage);
       await refreshLogs(service);
       await refreshDetails(service);
@@ -313,7 +357,7 @@ export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceRead
     setMessage("正在导入本地文件");
     try {
       const result = await importDailyBars(service.base_url, "file", importPath.trim());
-      setMessage(operationMessage(result.logs));
+      setMessage(operationMessage(result));
       onCoverageChange(result.coverage);
       await refreshLogs(service);
       await refreshDetails(service);
@@ -413,6 +457,9 @@ export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceRead
           </button>
           <button className="primary-button" type="button" onClick={handleFetch} disabled={!service || busy || symbols.length === 0}>
             {busyAction === "fetch" ? "正在补全缺失数据" : "补全缺失数据"}
+          </button>
+          <button className="secondary-button" type="button" onClick={handleCapitalFlowBackfill} disabled={!service || busy || symbols.length === 0}>
+            {busyAction === "capital-flow" ? "\u6b63\u5728\u8865\u9f50\u8d44\u91d1\u6d41" : "\u8865\u9f50\u8d44\u91d1\u6d41"}
           </button>
           <button className="secondary-button" type="button" onClick={handleImportSample} disabled={!service || busy}>
             {busyAction === "sample" ? "正在导入示例数据" : "导入示例数据"}

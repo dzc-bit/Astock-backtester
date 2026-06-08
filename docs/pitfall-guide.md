@@ -40,27 +40,31 @@
 
 1. 同花顺概念页。
 2. 同花顺行业页。
-3. 东方财富板块接口，概念和行业都试，多 host 快速失败。
-4. Sina 行业板块。
-5. AKShare 板块。
-6. 仍失败才回退本地最近交易日题材聚合或空态。
+3. Sina 行业板块。
+4. AKShare 概念/行业板块。
+5. 东方财富板块接口只能作为受控备选，概念和行业都试，多 host 快速失败。
+6. 同花顺热点归因只作为题材候选，不伪装成板块涨幅。
+7. 仍失败才回退本地最近交易日题材聚合或空态。
 
 板块源要有单源短超时，否则同花顺一个慢请求会吃完整体预算，东方财富 fallback 根本来不及执行。红绿家数和强势板块可以共享页面展示，但 provider 链路不能互相偷数据。
 
 重型爬虫边界：
 
 1. 优先公开 XHR，其次 Playwright headless DOM。
-2. 固定超时、快速失败、缓存最近成功结果。
+2. 固定超时、快速失败、可记录最近成功结果。
 3. 不阻塞首页刷新。
 4. 不做登录、cookie 池、代理池、验证码绕过、付费抓取。
 5. 所有失败写 diagnostics，不能静默把局部数据包装成完整数据。
+6. 最近成功红绿家数不能参与本次 `live` 判定；当前公开 XHR/DOM 都失败时应返回失败，让上层统一走最近成功完整快照或本地最近交易日，并标记为 `stale`。
 
 资金流补齐边界：
 
 1. `backend/astock_backtester/data/capital_flow_crawler.py` 已纳入 1.1.1，但只作为低层只读 crawler/provider。
-2. 它返回结构化资金流行和 `failures`，不直接写 `Warehouse` 或 `LocalCache`。
-3. 大陆 IP 或风控导致东方财富断连时，只允许做固定超时、少量公开 header 变体重试和清晰 diagnostics；不做登录、cookie 池、代理池、验证码绕过或付费抓取。
-4. 后续若接入 UI 或数据中心，必须由更高层 backfill 服务合并 `main_net_inflow`，并把失败 symbol 作为 diagnostics 返回。
+2. 它返回结构化资金流行、`failures` 和 `diagnostics`，不直接写 `Warehouse` 或 `LocalCache`。
+3. 大陆 IP 或风控导致东方财富断连时，只允许做固定超时、少量公开 header 变体重试、同进程最近成功行缓存和清晰 diagnostics；不做登录、cookie 池、代理池、验证码绕过或付费抓取。
+4. 1.1.1 已由更高层 backfill 服务接入数据中心：`/fetch/daily-bars` 优先合并 crawler 的 `main_net_inflow`，`/fetch/capital-flow` 只补齐已有日线的资金流缺口。
+5. 最近成功行缓存命中时必须追加 `recent_success_cache_used`，同时保留原始 `failures`，不能把断连伪装成实时成功。
+6. 写仓只能发生在高层服务里，失败 symbol 必须作为 `failures/diagnostics` 返回 UI，不能让 crawler 直接写仓。
 
 ## 4. 行情评价
 
@@ -74,11 +78,11 @@
 
 如果复盘来源不是同花顺正文，要在文案中明确：
 
-1. `ths-fupan`：同花顺复盘。
-2. `ths-fupan+market-fallback`：公开行情复盘兜底。
-3. `ths-fupan+local-brief`：本地简短复盘。
+1. `ths-fupan` / `ths-zaopan`：同花顺复盘 / 早盘正文。
+2. `ths-fupan+market-fallback` / `ths-zaopan+market-fallback`：公开行情兜底，`source_url` 必须是真实公开行情链接。
+3. `ths-fupan+local-brief` / `ths-zaopan+local-brief`：本地简短防守口径，`source_url` 必须为空。
 
-不要把公开行情兜底或本地短判断写成“同花顺复盘公开页面”。
+不要把公开行情兜底或本地短判断写成“同花顺公开页面”。
 
 ## 5. 同花顺复盘和早盘
 
@@ -87,8 +91,8 @@
 1. 原文按钮必须打开真实 `source_url` 或文章链接；无链接时禁用并说明。
 2. 清洗重复时间戳、纯数字汤、`% %`、行业名后跟神秘数字等噪声。
 3. 个股表格要识别为“个股 / 涨幅 / 现价”，不要误标为题材原因。
-4. 同花顺主页请求失败时，`/market/fupan` 不能只返回空入口；应先走公开行情结构化 fallback，再退到本地简短复盘 section。
-5. 本地简短复盘只能给防守口径，不能伪装成已读取复盘正文。
+4. 同花顺主页请求失败时，`/market/fupan` 和 `/market/zaopan` 不能只返回空入口；应先走公开行情结构化 fallback，再退到本地简短 section。
+5. 本地简短复盘 / 早盘只能给防守口径，不能伪装成已读取同花顺正文。
 
 ## 6. user 模式候选
 

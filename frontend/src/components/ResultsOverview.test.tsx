@@ -113,6 +113,21 @@ it("prefers latest strategy matches over legacy matched stocks and sorts by rank
   expect(cards[0]).toHaveTextContent("评分 2.40");
 });
 
+it("does not display legacy matched stocks without latest strategy matches", () => {
+  render(
+    <ResultsOverview
+      result={buildResult({
+        matched_stocks: [{ symbol: "OLD", name: "legacy", close: 1, change_pct: 0, reasons: ["legacy"] }]
+      })}
+      onRun={vi.fn()}
+      onOpenRiskAlerts={vi.fn()}
+    />
+  );
+
+  expect(screen.queryByText("OLD")).not.toBeInTheDocument();
+  expect(screen.queryByText("legacy")).not.toBeInTheDocument();
+});
+
 it("shows a friendly empty state when no stocks match today", () => {
   const today = shanghaiToday();
 
