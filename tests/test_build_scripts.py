@@ -20,6 +20,13 @@ def test_build_data_service_targets_tauri_bin_executable():
     assert "--distpath $distDir" in script
 
 
+def test_build_data_service_collects_curl_cffi_native_dependencies():
+    script = Path("scripts/build-data-service.ps1").read_text(encoding="utf-8")
+
+    assert "--collect-all curl_cffi" in script
+    assert "--hidden-import curl_cffi.requests" in script
+
+
 def test_tauri_bundle_builds_data_service_before_packaging():
     config = json.loads(Path("src-tauri/tauri.conf.json").read_text(encoding="utf-8"))
 

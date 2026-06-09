@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from datetime import datetime
 from typing import Any
 
 import pandas as pd
@@ -8,7 +9,12 @@ import pandas as pd
 from astock_backtester.data.cache import LocalCache
 from astock_backtester.data.importer import normalize_daily_bars
 from astock_backtester.data.trading_calendar import a_share_trade_dates
-from astock_backtester.data.warehouse import Warehouse
+from astock_backtester.data.warehouse import (
+    KNOWN_CAPITAL_FLOW_SOURCE_GAP_DATES,
+    KNOWN_CAPITAL_FLOW_LISTING_LAG_DAYS,
+    Warehouse,
+    _uses_symbol_capital_flow_source_start,
+)
 from astock_backtester.models import (
     DailyBarsCoverageItem,
     DailyBarsCoverageResponse,
@@ -206,99 +212,199 @@ def fetch_capital_flow_into_cache(
     start_date: str,
     end_date: str,
     warehouse: Warehouse | None = None,
+    refresh_coverage: bool = True,
 ) -> DataOperationResult:
     requested_symbols = [str(symbol) for symbol in symbols]
     frame = _read_existing_daily_bars(cache, warehouse, requested_symbols, start_date, end_date)
     logs: list[ServiceLogEntry] = []
     diagnostics: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = []
-    if frame.empty:
-        coverage = _safe_coverage(cache, warehouse)
+
+    skipped_symbols = _symbols_with_complete_capital_flow(frame, requested_symbols, start_date, end_date)
+    fetch_symbols = sorted(symbol for symbol in requested_symbols if symbol not in set(skipped_symbols))
+    if not fetch_symbols:
+        coverage = _safe_coverage(cache, warehouse) if refresh_coverage else []
         return DataOperationResult(
-            status="partial",
+            status="ok",
             imported_rows=0,
+            returned_rows=0,
             requested_symbols=requested_symbols,
             fetched_symbols=[],
-            missing_symbols=requested_symbols,
-            coverage=coverage,
-            logs=[ServiceLogEntry(level="warning", message="No existing daily bars found for capital-flow backfill")],
-            diagnostics=[
-                {
-                    "code": "capital_flow_backfill_no_daily_rows",
-                    "source": "capital_flow_crawler",
-                    "requested_symbols": len(requested_symbols),
-                }
-            ],
-        )
-
-    existing_symbols = {str(symbol) for symbol in frame["symbol"].dropna().astype(str).unique()}
-    symbols_without_daily_rows = sorted(symbol for symbol in requested_symbols if symbol not in existing_symbols)
-    if symbols_without_daily_rows:
-        diagnostics.extend(
-            {
-                "code": "capital_flow_backfill_no_daily_rows_for_symbol",
-                "source": "capital_flow_crawler",
-                "symbol": symbol,
-                "message": f"No existing daily bars found for {symbol}; capital-flow backfill skipped for that symbol",
-            }
-            for symbol in symbols_without_daily_rows
-        )
-
-    candidate_frame = frame
-    if "main_net_inflow" in candidate_frame.columns:
-        candidate_frame = candidate_frame.loc[candidate_frame["main_net_inflow"].isna()]
-    if candidate_frame.empty:
-        coverage = _safe_coverage(cache, warehouse)
-        missing_symbols = symbols_without_daily_rows
-        if missing_symbols:
-            logs.append(
-                ServiceLogEntry(
-                    level="warning",
-                    message=f"Missing daily bars for capital-flow symbols: {', '.join(missing_symbols)}",
-                )
-            )
-        return DataOperationResult(
-            status="partial" if missing_symbols else "ok",
-            imported_rows=0,
-            requested_symbols=requested_symbols,
-            fetched_symbols=[],
-            missing_symbols=missing_symbols,
+            missing_symbols=[],
+            skipped_symbols=skipped_symbols,
             coverage=coverage,
             logs=[
                 ServiceLogEntry(level="info", message="Capital-flow coverage already complete for requested rows"),
-                *logs,
             ],
             diagnostics=[
                 {
                     "code": "capital_flow_backfill_not_needed",
                     "source": "capital_flow_crawler",
                     "requested_symbols": len(requested_symbols),
+                    "skipped_symbols": skipped_symbols,
                 },
-                *diagnostics,
             ],
         )
 
-    fetch_symbols = sorted(candidate_frame["symbol"].astype(str).unique().tolist())
-    merged_frame, merge_logs, merge_diagnostics, failures, fetched_symbols = _merge_capital_flow_from_fetcher(
-        frame=frame,
+    rows, fetch_logs, fetch_diagnostics, failures = _fetch_capital_flow_rows(
         fetcher=capital_flow_fetcher,
         requested_symbols=fetch_symbols,
         start_date=start_date,
         end_date=end_date,
+    )
+    logs.extend(fetch_logs)
+    diagnostics.extend(fetch_diagnostics)
+    if _diagnostics_include_not_needed(fetch_diagnostics) and not rows and not failures:
+        coverage = _safe_coverage(cache, warehouse) if refresh_coverage else []
+        all_skipped_symbols = sorted({*skipped_symbols, *fetch_symbols})
+        return DataOperationResult(
+            status="ok",
+            imported_rows=0,
+            returned_rows=0,
+            requested_symbols=requested_symbols,
+            fetched_symbols=[],
+            missing_symbols=[],
+            skipped_symbols=all_skipped_symbols,
+            coverage=coverage,
+            logs=[
+                ServiceLogEntry(level="info", message="Capital-flow coverage already complete for requested rows"),
+            ],
+            diagnostics=[
+                *diagnostics,
+                {
+                    "code": "capital_flow_backfill_not_needed",
+                    "source": "capital_flow_crawler",
+                    "requested_symbols": len(requested_symbols),
+                    "skipped_symbols": all_skipped_symbols,
+                },
+            ],
+        )
+    merged_frame, merged_rows, existing_fetched_symbols = _merge_capital_flow_rows(
+        frame,
+        rows,
         only_missing=True,
     )
-    logs.extend(merge_logs)
-    diagnostics.extend(merge_diagnostics)
+    existing_imported_by_symbol = _capital_flow_imported_rows_by_symbol(
+        frame,
+        merged_frame,
+        only_missing=True,
+    )
+    standalone_frame = _standalone_daily_bars_from_capital_flow_rows(
+        rows,
+        fetch_symbols,
+        start_date=start_date,
+        end_date=end_date,
+        existing_frame=frame,
+    )
+    standalone_rows = int(len(standalone_frame))
+    standalone_symbols = (
+        sorted(standalone_frame["symbol"].astype(str).unique().tolist())
+        if not standalone_frame.empty
+        else []
+    )
+    imported_rows = int(merged_rows + standalone_rows)
+    returned_by_symbol = _capital_flow_returned_rows_by_symbol(rows)
+    returned_symbols = sorted(symbol for symbol, count in returned_by_symbol.items() if count > 0)
+    fetched_symbols = sorted({*existing_fetched_symbols, *standalone_symbols, *returned_symbols})
+    standalone_imported_by_symbol = _frame_row_counts_by_symbol(standalone_frame)
+    imported_by_symbol = _merge_symbol_counts(existing_imported_by_symbol, standalone_imported_by_symbol)
+    incomplete_symbols = _symbols_with_remaining_existing_capital_flow_gap(
+        merged_frame,
+        fetch_symbols,
+        diagnostics,
+    )
+    known_gap_symbols = _symbols_with_only_known_capital_flow_gaps(merged_frame, incomplete_symbols)
+    if known_gap_symbols:
+        diagnostics.extend(
+            {
+                "code": "capital_flow_known_source_gap_remaining",
+                "source": "capital_flow_crawler",
+                "symbol": symbol,
+                "message": "Only known public-source capital-flow gap dates remain for this symbol.",
+            }
+            for symbol in known_gap_symbols
+        )
+        incomplete_symbols = [
+            symbol for symbol in incomplete_symbols if symbol not in set(known_gap_symbols)
+        ]
+    logs.append(
+        ServiceLogEntry(
+            level="warning" if imported_rows == 0 else "info",
+            message=f"Capital-flow crawler merged {imported_rows} rows as primary main_net_inflow source",
+        )
+    )
+    diagnostics.append(
+        {
+            "code": "capital_flow_crawler_merge",
+            "requested_symbols": len(fetch_symbols),
+            "merged_rows": imported_rows,
+            "source": "capital_flow_crawler",
+        }
+    )
+    diagnostics.append(
+        {
+            "code": "capital_flow_crawler_fetch_summary",
+            "source": "capital_flow_crawler",
+            "requested_symbols": len(fetch_symbols),
+            "processed_symbols": len(fetch_symbols),
+            "returned_rows": len(rows),
+            "imported_rows": imported_rows,
+            "failed_symbols": sorted(
+                {
+                    str(item.get("symbol"))
+                    for item in failures
+                    if isinstance(item, dict) and item.get("symbol")
+                }
+            ),
+            "skipped_symbols": skipped_symbols,
+        }
+    )
+    diagnostics.extend(
+        {
+            "code": "capital_flow_symbol_summary",
+            "source": "capital_flow_crawler",
+            "symbol": symbol,
+            "returned_rows": returned_by_symbol.get(symbol, 0),
+            "imported_rows": imported_by_symbol.get(symbol, 0),
+        }
+        for symbol in fetch_symbols
+    )
+    failures.extend(_capital_flow_incomplete_failures(diagnostics, incomplete_symbols, failures))
+    if standalone_rows > 0:
+        diagnostics.append(
+            {
+                "code": "capital_flow_crawler_standalone_rows",
+                "requested_symbols": len(fetch_symbols),
+                "standalone_rows": standalone_rows,
+                "source": "capital_flow_crawler",
+                "message": "Capital-flow rows were written before daily OHLCV rows; daily-bar coverage will remain incomplete until historical prices are fetched.",
+            }
+        )
+    if imported_rows == 0:
+        diagnostics.append(
+            {
+                "code": "capital_flow_crawler_zero_merge",
+                "requested_symbols": len(fetch_symbols),
+                "source": "capital_flow_crawler",
+                "message": "Capital-flow crawler returned no rows that could be merged into main_net_inflow",
+            }
+        )
 
-    if fetched_symbols:
-        cache.write_daily_bars(merged_frame)
+    if imported_rows > 0:
+        frames_to_write = [item for item in [merged_frame, standalone_frame] if not item.empty]
+        write_frame = normalize_daily_bars(pd.concat(frames_to_write, ignore_index=True))
+        cache.write_daily_bars(write_frame)
         if warehouse is not None:
-            warehouse.write_daily_bars(merged_frame)
+            warehouse.write_daily_bars(write_frame)
 
     missing_symbols = sorted(
         {
             *(symbol for symbol in fetch_symbols if symbol not in fetched_symbols),
-            *symbols_without_daily_rows,
+            *(
+                str(item.get("symbol"))
+                for item in failures
+                if isinstance(item, dict) and item.get("symbol")
+            ),
         }
     )
     if failures:
@@ -312,18 +418,76 @@ def fetch_capital_flow_into_cache(
             )
     if missing_symbols:
         logs.append(ServiceLogEntry(level="warning", message=f"Missing capital-flow symbols: {', '.join(missing_symbols)}"))
-    coverage = _safe_coverage(cache, warehouse)
+    coverage = _safe_coverage(cache, warehouse) if refresh_coverage else []
     return DataOperationResult(
         status="partial" if missing_symbols or failures else "ok",
-        imported_rows=int(_count_merged_main_net_inflow(frame, merged_frame, only_missing=True)),
+        imported_rows=imported_rows,
+        returned_rows=len(rows),
         requested_symbols=requested_symbols,
         fetched_symbols=fetched_symbols,
         missing_symbols=missing_symbols,
+        skipped_symbols=skipped_symbols,
         coverage=coverage,
         logs=logs,
         diagnostics=diagnostics,
         failures=failures,
     )
+
+
+def _fetch_capital_flow_rows(
+    fetcher: CapitalFlowFetcher,
+    requested_symbols: Sequence[str],
+    start_date: str,
+    end_date: str,
+) -> tuple[list[dict[str, Any]], list[ServiceLogEntry], list[dict[str, Any]], list[dict[str, Any]]]:
+    logs: list[ServiceLogEntry] = []
+    diagnostics: list[dict[str, Any]] = []
+    failures: list[dict[str, Any]] = []
+    try:
+        result = fetcher(list(requested_symbols), start_date, end_date)
+    except Exception as exc:
+        failure = {"code": "capital_flow_crawler_error", "error": str(exc), "source": "capital_flow_crawler"}
+        failures.append(failure)
+        diagnostics.append({**failure, "message": str(exc)})
+        logs.append(ServiceLogEntry(level="warning", message=f"Capital-flow crawler failed: {exc}"))
+        return [], logs, diagnostics, failures
+
+    rows = result.get("rows", []) if isinstance(result, dict) else []
+    raw_failures = result.get("failures", []) if isinstance(result, dict) else []
+    raw_diagnostics = result.get("diagnostics", []) if isinstance(result, dict) else []
+    failures = [item for item in raw_failures if isinstance(item, dict)]
+    diagnostics.extend(item for item in raw_diagnostics if isinstance(item, dict))
+    return [item for item in rows if isinstance(item, dict)], logs, diagnostics, failures
+
+
+def _capital_flow_incomplete_failures(
+    diagnostics: Sequence[dict[str, Any]],
+    requested_symbols: Sequence[str],
+    existing_failures: Sequence[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    selected = {str(symbol) for symbol in requested_symbols}
+    failed = {str(item.get("symbol")) for item in existing_failures if isinstance(item, dict) and item.get("symbol")}
+    incomplete: list[dict[str, Any]] = []
+    for item in diagnostics:
+        symbol = item.get("symbol")
+        if item.get("code") != "date_coverage_shortfall" or not symbol:
+            continue
+        symbol_text = str(symbol)
+        if symbol_text not in selected or symbol_text in failed:
+            continue
+        incomplete.append(
+            {
+                "symbol": symbol_text,
+                "code": "date_coverage_shortfall",
+                "error": f"date_coverage_shortfall: {item.get('message') or 'capital-flow date coverage is incomplete'}",
+            }
+        )
+        failed.add(symbol_text)
+    return incomplete
+
+
+def _diagnostics_include_not_needed(diagnostics: Sequence[dict[str, Any]]) -> bool:
+    return any(isinstance(item, dict) and item.get("code") == "capital_flow_backfill_not_needed" for item in diagnostics)
 
 
 def _read_existing_daily_bars(
@@ -356,6 +520,72 @@ def _read_existing_daily_bars(
     return frame.reset_index(drop=True)
 
 
+def _symbols_with_complete_capital_flow(
+    frame: pd.DataFrame,
+    symbols: Sequence[str],
+    start_date: str,
+    end_date: str,
+) -> list[str]:
+    if frame.empty or "symbol" not in frame or "trade_date" not in frame or "main_net_inflow" not in frame:
+        return []
+    expected_dates = _date_range(pd.Timestamp(start_date), pd.Timestamp(end_date))
+    if not expected_dates:
+        return []
+    normalized = frame.copy()
+    normalized["symbol"] = normalized["symbol"].astype(str)
+    normalized["trade_date"] = pd.to_datetime(normalized["trade_date"], errors="coerce")
+    warehouse_start = normalized["trade_date"].min()
+    complete: list[str] = []
+    for symbol in symbols:
+        data = normalized.loc[normalized["symbol"] == str(symbol)]
+        if data.empty:
+            continue
+        present_dates = set(data.loc[data["main_net_inflow"].notna(), "trade_date"].dropna().tolist())
+        flow_start = min(present_dates) if present_dates else None
+        first_daily_date = data["trade_date"].dropna().min()
+        source_start_boundary = (
+            flow_start is not None
+            and pd.notna(first_daily_date)
+            and pd.notna(warehouse_start)
+            and (
+                _uses_symbol_capital_flow_source_start(
+                    str(symbol),
+                    pd.Timestamp(flow_start),
+                    pd.Timestamp(first_daily_date),
+                    pd.Timestamp(warehouse_start),
+                )
+                or _uses_listing_day_capital_flow_source_start(data, pd.Timestamp(flow_start))
+            )
+        )
+        effective_expected_dates = {
+            trade_date
+            for trade_date in expected_dates
+            if trade_date not in KNOWN_CAPITAL_FLOW_SOURCE_GAP_DATES
+            and not (
+                source_start_boundary
+                and flow_start is not None
+                and pd.Timestamp(trade_date) < pd.Timestamp(flow_start)
+            )
+        }
+        if effective_expected_dates.issubset(present_dates):
+            complete.append(str(symbol))
+    return sorted(complete)
+
+
+def _uses_listing_day_capital_flow_source_start(data: pd.DataFrame, flow_start: pd.Timestamp) -> bool:
+    if "listing_days" not in data or data.empty:
+        return False
+    first_daily_date = data["trade_date"].dropna().min()
+    if pd.isna(first_daily_date):
+        return False
+    first_rows = data.loc[data["trade_date"] == first_daily_date]
+    listing_days = pd.to_numeric(first_rows["listing_days"], errors="coerce").dropna()
+    if listing_days.empty or listing_days.min() > 10:
+        return False
+    lag_days = (pd.Timestamp(flow_start) - pd.Timestamp(first_daily_date)).days
+    return 0 <= lag_days <= KNOWN_CAPITAL_FLOW_LISTING_LAG_DAYS
+
+
 def _merge_capital_flow_from_fetcher(
     frame: pd.DataFrame,
     fetcher: CapitalFlowFetcher,
@@ -367,21 +597,14 @@ def _merge_capital_flow_from_fetcher(
 ) -> tuple[pd.DataFrame, list[ServiceLogEntry], list[dict[str, Any]], list[dict[str, Any]], list[str]]:
     logs: list[ServiceLogEntry] = []
     diagnostics: list[dict[str, Any]] = []
-    failures: list[dict[str, Any]] = []
-    try:
-        result = fetcher(list(requested_symbols), start_date, end_date)
-    except Exception as exc:
-        failure = {"code": "capital_flow_crawler_error", "error": str(exc), "source": "capital_flow_crawler"}
-        failures.append(failure)
-        diagnostics.append({**failure, "message": str(exc)})
-        logs.append(ServiceLogEntry(level="warning", message=f"Capital-flow crawler failed: {exc}"))
-        return frame, logs, diagnostics, failures, []
-
-    rows = result.get("rows", []) if isinstance(result, dict) else []
-    raw_failures = result.get("failures", []) if isinstance(result, dict) else []
-    raw_diagnostics = result.get("diagnostics", []) if isinstance(result, dict) else []
-    failures = [item for item in raw_failures if isinstance(item, dict)]
-    diagnostics.extend(item for item in raw_diagnostics if isinstance(item, dict))
+    rows, fetch_logs, fetch_diagnostics, failures = _fetch_capital_flow_rows(
+        fetcher=fetcher,
+        requested_symbols=requested_symbols,
+        start_date=start_date,
+        end_date=end_date,
+    )
+    logs.extend(fetch_logs)
+    diagnostics.extend(fetch_diagnostics)
     merged_frame, merged_rows, fetched_symbols = _merge_capital_flow_rows(frame, rows, only_missing=only_missing)
     logs.append(
         ServiceLogEntry(
@@ -405,8 +628,123 @@ def _merge_capital_flow_from_fetcher(
                 "source": "capital_flow_crawler",
                 "message": "Capital-flow crawler returned no rows that could be merged into main_net_inflow",
             }
-        )
+    )
     return merged_frame, logs, diagnostics, failures, fetched_symbols
+
+
+def _standalone_daily_bars_from_capital_flow_rows(
+    rows: Sequence[dict[str, Any]],
+    symbols: Sequence[str],
+    *,
+    start_date: str,
+    end_date: str,
+    existing_frame: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    selected = {str(symbol) for symbol in symbols}
+    if not rows or not selected:
+        return pd.DataFrame()
+    frame = pd.DataFrame(list(rows))
+    required = {"symbol", "trade_date", "main_net_inflow"}
+    if frame.empty or not required.issubset(frame.columns):
+        return pd.DataFrame()
+    frame["symbol"] = frame["symbol"].astype(str)
+    frame["trade_date"] = pd.to_datetime(frame["trade_date"], errors="coerce")
+    frame["main_net_inflow"] = pd.to_numeric(frame["main_net_inflow"], errors="coerce")
+    frame = frame.loc[frame["symbol"].isin(selected)]
+    frame = frame.loc[frame["trade_date"] >= pd.Timestamp(start_date)]
+    frame = frame.loc[frame["trade_date"] <= pd.Timestamp(end_date)]
+    if existing_frame is not None and not existing_frame.empty and {"symbol", "trade_date"}.issubset(existing_frame.columns):
+        existing = existing_frame[["symbol", "trade_date"]].copy()
+        existing["symbol"] = existing["symbol"].astype(str)
+        existing["trade_date"] = pd.to_datetime(existing["trade_date"], errors="coerce")
+        existing_pairs = set(zip(existing["symbol"], existing["trade_date"], strict=False))
+        frame = frame.loc[
+            [
+                (symbol, trade_date) not in existing_pairs
+                for symbol, trade_date in zip(frame["symbol"], frame["trade_date"], strict=False)
+            ]
+        ]
+    frame = frame.dropna(subset=["trade_date", "main_net_inflow"])
+    if frame.empty:
+        return pd.DataFrame()
+    out = frame[["symbol", "trade_date", "main_net_inflow"]].drop_duplicates(
+        ["symbol", "trade_date"],
+        keep="last",
+    )
+    out["open"] = float("nan")
+    out["high"] = float("nan")
+    out["low"] = float("nan")
+    out["close"] = float("nan")
+    out["volume"] = 0.0
+    out["amount"] = 0.0
+    out["change_pct"] = float("nan")
+    out["change"] = float("nan")
+    out["turnover_rate"] = float("nan")
+    out["pre_close"] = float("nan")
+    out["float_market_cap"] = float("nan")
+    out["total_market_cap"] = float("nan")
+    out["is_st"] = False
+    out["is_suspended"] = False
+    out["listing_days"] = 9999
+    out["source"] = "capital-flow-crawler"
+    return normalize_daily_bars(out)
+
+
+def _frame_row_counts_by_symbol(frame: pd.DataFrame) -> dict[str, int]:
+    if frame.empty or "symbol" not in frame:
+        return {}
+    return {
+        str(symbol): int(count)
+        for symbol, count in frame["symbol"].dropna().astype(str).value_counts().items()
+    }
+
+
+def _merge_symbol_counts(*items: dict[str, int]) -> dict[str, int]:
+    merged: dict[str, int] = {}
+    for item in items:
+        for symbol, count in item.items():
+            merged[symbol] = merged.get(symbol, 0) + int(count)
+    return merged
+
+
+def _capital_flow_returned_rows_by_symbol(rows: Sequence[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    seen: set[tuple[str, str]] = set()
+    for row in rows:
+        symbol = str(row.get("symbol") or "").strip()
+        trade_date = str(row.get("trade_date") or "").strip()
+        if not symbol or not trade_date:
+            continue
+        key = (symbol, trade_date)
+        if key in seen:
+            continue
+        seen.add(key)
+        counts[symbol] = counts.get(symbol, 0) + 1
+    return counts
+
+
+def _capital_flow_imported_rows_by_symbol(
+    before: pd.DataFrame,
+    after: pd.DataFrame,
+    *,
+    only_missing: bool,
+) -> dict[str, int]:
+    if before.empty or after.empty:
+        return {}
+    left = normalize_daily_bars(before).set_index(["symbol", "trade_date"])
+    right = normalize_daily_bars(after).set_index(["symbol", "trade_date"])
+    common = left.index.intersection(right.index)
+    if common.empty:
+        return {}
+    before_values = left.loc[common, "main_net_inflow"]
+    after_values = right.loc[common, "main_net_inflow"]
+    mask = before_values.isna() & after_values.notna() if only_missing else after_values.notna()
+    target = common[mask.to_numpy()]
+    counts: dict[str, int] = {}
+    for symbol, _trade_date in target:
+        symbol_text = str(symbol)
+        counts[symbol_text] = counts.get(symbol_text, 0) + 1
+    return counts
 
 
 def _symbols_with_missing_main_net_inflow(frame: pd.DataFrame, symbols: Sequence[str]) -> list[str]:
@@ -418,6 +756,64 @@ def _symbols_with_missing_main_net_inflow(frame: pd.DataFrame, symbols: Sequence
         return []
     missing = data.loc[data["main_net_inflow"].isna(), "symbol"]
     return sorted({str(symbol) for symbol in missing.tolist()})
+
+
+def _symbols_with_remaining_existing_capital_flow_gap(
+    frame: pd.DataFrame,
+    symbols: Sequence[str],
+    diagnostics: Sequence[dict[str, Any]],
+) -> list[str]:
+    provider_by_symbol = _capital_flow_provider_by_symbol(diagnostics)
+    if frame.empty:
+        return sorted(
+            {
+                str(item.get("symbol"))
+                for item in diagnostics
+                if isinstance(item, dict)
+                and item.get("code") == "date_coverage_shortfall"
+                and provider_by_symbol.get(str(item.get("symbol"))) != "sina"
+                and item.get("symbol")
+            }
+        )
+    missing_symbols = _symbols_with_missing_main_net_inflow(frame, symbols)
+    return sorted(symbol for symbol in missing_symbols if provider_by_symbol.get(symbol) != "sina")
+
+
+def _symbols_with_only_known_capital_flow_gaps(frame: pd.DataFrame, symbols: Sequence[str]) -> list[str]:
+    if frame.empty or "main_net_inflow" not in frame or "trade_date" not in frame or "symbol" not in frame:
+        return []
+    known_dates = {pd.Timestamp(value) for value in KNOWN_CAPITAL_FLOW_SOURCE_GAP_DATES}
+    out: list[str] = []
+    normalized = frame.copy()
+    normalized["symbol"] = normalized["symbol"].astype(str)
+    normalized["trade_date"] = pd.to_datetime(normalized["trade_date"], errors="coerce")
+    for symbol in symbols:
+        missing_dates = set(
+            normalized.loc[
+                (normalized["symbol"] == str(symbol)) & normalized["main_net_inflow"].isna(),
+                "trade_date",
+            ].dropna()
+        )
+        if missing_dates and missing_dates.issubset(known_dates):
+            out.append(str(symbol))
+    return sorted(out)
+
+
+def _capital_flow_provider_by_symbol(diagnostics: Sequence[dict[str, Any]]) -> dict[str, str]:
+    providers: dict[str, str] = {}
+    for item in diagnostics:
+        if not isinstance(item, dict):
+            continue
+        symbol = item.get("symbol")
+        provider = item.get("provider")
+        if not symbol or not provider:
+            continue
+        symbol_text = str(symbol)
+        if item.get("code") == "provider_fallback_used":
+            providers[symbol_text] = str(provider)
+        else:
+            providers.setdefault(symbol_text, str(provider))
+    return providers
 
 
 def _merge_capital_flow_rows(
@@ -491,7 +887,17 @@ def _safe_coverage(cache: LocalCache, warehouse: Warehouse | None) -> list[Datas
         ]
 
 
-def build_service_health(cache: LocalCache, warehouse: Warehouse, port: int | None = None) -> ServiceHealth:
+def build_service_health(
+    cache: LocalCache,
+    warehouse: Warehouse,
+    port: int | None = None,
+    *,
+    process_id: int | None = None,
+    executable_path: str | None = None,
+    executable_sha256: str | None = None,
+    started_at: datetime | str | None = None,
+    instance_id: str | None = None,
+) -> ServiceHealth:
     try:
         coverage = warehouse.coverage()
     except Exception:
@@ -509,5 +915,10 @@ def build_service_health(cache: LocalCache, warehouse: Warehouse, port: int | No
         ok=True,
         cache_path=str(cache.root.resolve()),
         port=port,
+        process_id=process_id,
+        executable_path=executable_path,
+        executable_sha256=executable_sha256,
+        started_at=started_at,
+        instance_id=instance_id,
         coverage=coverage,
     )

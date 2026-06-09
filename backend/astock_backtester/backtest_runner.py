@@ -6,6 +6,7 @@ from collections.abc import Callable
 from astock_backtester.conditions import registered_conditions
 from astock_backtester.engine import run_backtest
 from astock_backtester.indicators import (
+    add_capital_flow_positive_count,
     add_capital_flow_sum,
     add_macd,
     add_market_heat,
@@ -38,6 +39,7 @@ def enrich_for_strategy(frame: Any, strategy: StrategyConfig) -> Any:
     return_windows = window_params(strategy, {"past_return_at_most", "past_return_between"}, {2, 3, 5, 10, 20})
     volume_windows = window_params(strategy, {"volume_ratio_between"}, {2, 3, 5, 10})
     flow_windows = window_params(strategy, {"capital_flow_n_day_sum_at_least"}, set())
+    flow_positive_count_windows = window_params(strategy, {"capital_flow_n_day_positive_count_at_least"}, set())
     high_low_windows = window_params(
         strategy,
         {"breakout_above_n_day_high", "breakdown_below_n_day_low"},
@@ -48,6 +50,8 @@ def enrich_for_strategy(frame: Any, strategy: StrategyConfig) -> Any:
     frame = add_volume_ratio(frame, volume_windows)
     if flow_windows:
         frame = add_capital_flow_sum(frame, flow_windows)
+    if flow_positive_count_windows:
+        frame = add_capital_flow_positive_count(frame, flow_positive_count_windows)
     if high_low_windows:
         frame = add_prior_high_low(frame, high_low_windows)
     frame = add_macd(frame)

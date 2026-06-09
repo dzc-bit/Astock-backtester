@@ -43,12 +43,33 @@ def _clean_text(value: str | None, max_length: int | None = None) -> str:
     return text
 
 
+_THS_BOARD_CODE_PATTERN = re.compile(r"(?<!\d)88\d{4}(?!\d)")
+
+
+def _clean_display_text(value: str | None, max_length: int | None = None) -> str:
+    text = _clean_text(value, max_length=max_length)
+    if not text:
+        return ""
+    return _clean_text(_THS_BOARD_CODE_PATTERN.sub("", text))
+
+
 def _node_text(node: Tag | None, max_length: int | None = None) -> str:
     return _clean_text(node.get_text(" ", strip=True) if node else "", max_length=max_length)
 
 
 _TIMESTAMP_PATTERN = re.compile(r"\d{4}[-/年]\d{1,2}[-/月]\d{1,2}日?(?:\s+\d{1,2}:\d{2}(?::\d{2})?)?")
 _NUMERIC_TOKEN_PATTERN = re.compile(r"^[+-]?\d+(?:\.\d+)?%?$")
+_CN_FIELD_KEYWORDS = (
+    "名称",
+    "板块",
+    "股票数",
+    "计算方式",
+    "涨幅",
+    "涨跌幅",
+    "最新",
+    "同比指数盈利",
+)
+_SENTENCE_PUNCTUATION_PATTERN = re.compile(r"[，。；、：,.!?！？]")
 
 
 def _is_percent_text(value: str) -> bool:
@@ -61,6 +82,48 @@ def _is_number_text(value: str) -> bool:
 
 def _is_rank_text(value: str) -> bool:
     return bool(re.fullmatch(r"\d{1,3}", value.strip()))
+
+
+def _numeric_soup_tokens(text: str) -> list[str]:
+    return [
+        token
+        for token in re.split(r"\s+", text)
+        if token and (_NUMERIC_TOKEN_PATTERN.match(token) or re.search(r"\d", token))
+    ]
+
+
+def _is_headerless_market_number_row(row: list[str]) -> bool:
+    if len(row) < 4:
+        return False
+    first = row[0].strip()
+    if not first or _is_number_text(first):
+        return False
+    numeric_cells = [cell for cell in row[1:] if _is_number_text(cell) or _is_percent_text(cell)]
+    has_market_shape = any(_is_percent_text(cell) for cell in row[1:]) and len(numeric_cells) >= 3
+    return has_market_shape and not any(keyword in first for keyword in _CN_FIELD_KEYWORDS)
+
+
+def _is_disallowed_section_title(title: str | None) -> bool:
+    compact = re.sub(r"\s+", "", title or "")
+    return "同比指数盈利" in compact
+
+
+def _is_ths_board_code_cell(value: str | None) -> bool:
+    return bool(re.fullmatch(r"88\d{4}", (value or "").strip()))
+
+
+def _drop_ths_board_code_columns(rows: list[list[str]]) -> list[list[str]]:
+    if len(rows) < 2:
+        return rows
+    width = max(len(row) for row in rows)
+    drop_indexes: set[int] = set()
+    for index in range(width):
+        cells = [row[index].strip() for row in rows[1:] if index < len(row) and row[index].strip()]
+        if cells and all(_is_ths_board_code_cell(cell) for cell in cells):
+            drop_indexes.add(index)
+    if not drop_indexes:
+        return rows
+    return [[cell for index, cell in enumerate(row) if index not in drop_indexes] for row in rows]
 
 
 def _is_stock_gain_price_row(row: list[str], title: str | None) -> bool:
@@ -115,6 +178,8 @@ def _is_noisy_content_line(text: str) -> bool:
     compact = re.sub(r"\s+", "", cleaned)
     if re.fullmatch(r"[%％]+", compact):
         return True
+    if compact == "同比指数盈利":
+        return True
     timestamp_count = len(_TIMESTAMP_PATTERN.findall(cleaned))
     without_timestamps = _TIMESTAMP_PATTERN.sub("", cleaned).strip()
     if timestamp_count >= 2 and len(without_timestamps) <= 24:
@@ -123,11 +188,15 @@ def _is_noisy_content_line(text: str) -> bool:
     cjk_count = len(re.findall(r"[\u4e00-\u9fff]", without_timestamps))
     digit_count = len(re.findall(r"\d", without_timestamps))
     text_length = max(len(re.sub(r"\s+", "", without_timestamps)), 1)
-    numeric_tokens = [
-        token
-        for token in re.split(r"\s+", without_timestamps)
-        if token and (_NUMERIC_TOKEN_PATTERN.match(token) or re.search(r"\d", token))
-    ]
+    numeric_tokens = _numeric_soup_tokens(without_timestamps)
+    has_field_keywords = sum(1 for keyword in _CN_FIELD_KEYWORDS if keyword in without_timestamps) >= 2
+    if (
+        has_field_keywords
+        and len(numeric_tokens) >= 3
+        and (_is_percent_text(without_timestamps) or timestamp_count > 0)
+        and not _SENTENCE_PUNCTUATION_PATTERN.search(without_timestamps)
+    ):
+        return True
     if digit_count >= 8 and cjk_count <= 6 and digit_count / text_length >= 0.35:
         return True
     if len(numeric_tokens) >= 4 and cjk_count <= 8 and not re.search(r"[，。；、：]", without_timestamps):
@@ -157,7 +226,7 @@ def _readable_content_from_node(node: Tag | None) -> str:
     if not blocks:
         blocks = [_node_text(node)]
     filtered = [block for block in blocks if block and not _is_noisy_content_line(block)]
-    return "\n\n".join(_clean_text(block) for block in filtered)
+    return "\n\n".join(_clean_display_text(block) for block in filtered)
 
 
 def _ths_headers(referer: str = THS_REFERER) -> dict[str, str]:
@@ -194,12 +263,16 @@ def _section_title(node: Tag, fallback: str) -> str:
 
 
 def _table_from_node(table: Tag, title: str | None = None) -> MarketBriefingTable | None:
-    rows: list[list[str]] = []
+    raw_rows: list[list[str]] = []
     for tr in table.select("tr"):
         cells = [_node_text(cell, max_length=160) for cell in tr.select("th,td")]
         cells = [cell for cell in cells if cell]
         if cells:
-            rows.append(cells)
+            raw_rows.append(cells)
+    rows = [
+        [_clean_display_text(cell) for cell in row]
+        for row in _drop_ths_board_code_columns(raw_rows)
+    ]
     if not rows:
         return None
 
@@ -209,6 +282,8 @@ def _table_from_node(table: Tag, title: str | None = None) -> MarketBriefingTabl
         data_rows = rows[1:]
     else:
         data_rows = rows
+        if not _is_stock_like_title(title) and all(_is_headerless_market_number_row(row) for row in data_rows):
+            return None
         if not _is_stock_like_title(title) and all(_is_noisy_content_line(" ".join(row)) for row in data_rows):
             return None
         if data_rows and len(data_rows[0]) >= 3 and _is_rank_text(data_rows[0][0]):
@@ -235,7 +310,7 @@ def _links_from_node(node: Tag, base_url: str, limit: int = 8) -> list[MarketBri
     seen: set[str] = set()
     for anchor in node.select("a[href]"):
         href = str(anchor.get("href") or "").strip()
-        title = _clean_text(str(anchor.get("title") or "") or anchor.get_text(" ", strip=True), max_length=120)
+        title = _clean_display_text(str(anchor.get("title") or "") or anchor.get_text(" ", strip=True), max_length=120)
         if not href or not title:
             continue
         url = urljoin(base_url, href)
@@ -313,7 +388,7 @@ def _article_body(soup: BeautifulSoup) -> str | None:
     paragraphs = [paragraph for paragraph in paragraphs if len(paragraph) >= 8 and not _is_noisy_content_line(paragraph)]
     if not paragraphs:
         return None
-    return "\n\n".join(paragraphs)
+    return "\n\n".join(_clean_display_text(paragraph) for paragraph in paragraphs)
 
 
 def _safe_float(value: Any) -> float | None:
@@ -393,13 +468,15 @@ def _market_code(code: str) -> str:
 
 
 def _section_from_mapping(item: dict[str, Any]) -> MarketBriefingSection | None:
-    title = _clean_text(str(item.get("title") or "公开行情回顾"))
-    content = _clean_text(str(item.get("content") or ""))
+    title = _clean_display_text(str(item.get("title") or "公开行情回顾"))
+    if _is_disallowed_section_title(title):
+        return None
+    content = _clean_display_text(str(item.get("content") or ""))
     raw_links = item.get("links") if isinstance(item.get("links"), list) else []
     links = [
-        MarketBriefingLink(title=_clean_text(str(link.get("title") or "")), url=str(link.get("url") or "") or None)
+        MarketBriefingLink(title=_clean_display_text(str(link.get("title") or "")), url=str(link.get("url") or "") or None)
         for link in raw_links
-        if isinstance(link, dict) and _clean_text(str(link.get("title") or ""))
+        if isinstance(link, dict) and _clean_display_text(str(link.get("title") or ""))
     ]
     raw_tables = item.get("tables") if isinstance(item.get("tables"), list) else []
     tables: list[MarketBriefingTable] = []
@@ -413,9 +490,15 @@ def _section_from_mapping(item: dict[str, Any]) -> MarketBriefingSection | None:
         columns = table.get("columns") if isinstance(table.get("columns"), list) else []
         tables.append(
             MarketBriefingTable(
-                title=_clean_text(str(table.get("title") or "")) or None,
-                columns=[_clean_text(str(column)) for column in columns if _clean_text(str(column))],
-                rows=[{_clean_text(str(key)): _clean_text(str(value)) for key, value in row.items()} for row in normalized_rows],
+                title=_clean_display_text(str(table.get("title") or "")) or None,
+                columns=[_clean_display_text(str(column)) for column in columns if _clean_display_text(str(column))],
+                rows=[
+                    {
+                        _clean_display_text(str(key)): _clean_display_text(str(value))
+                        for key, value in row.items()
+                    }
+                    for row in normalized_rows
+                ],
             )
         )
     if not content and not tables and not links:
@@ -522,13 +605,17 @@ class MarketBriefingProvider:
             return
 
     def _parse_fupan(self, soup: BeautifulSoup) -> MarketBriefingResponse:
-        summary = _node_text(soup.select_one("#fpzj"))
+        summary = _clean_display_text(_node_text(soup.select_one("#fpzj")))
+        if _is_noisy_content_line(summary):
+            summary = ""
         sections: list[MarketBriefingSection] = []
         diagnostics: list[str] = []
         headers = soup.select(".fp_item_hd")
         contents = soup.select(".fp_item_cnt")
         for header, content in zip(headers, contents):
-            title = _node_text(header.select_one("h1,h2,h3")) or _node_text(header, max_length=40)
+            title = _clean_display_text(_node_text(header.select_one("h1,h2,h3")) or _node_text(header, max_length=40))
+            if _is_disallowed_section_title(title):
+                continue
             content_without_tables = _remove_non_textual_nodes(content)
             tables = [
                 table
@@ -559,7 +646,7 @@ class MarketBriefingProvider:
             updated_at=datetime.now(timezone.utc),
             source=source,
             source_url=source_url,
-            summary=summary or "同花顺复盘已读取，但页面暂未提供摘要。",
+            summary=summary or (expanded_sections[0].content if expanded_sections and expanded_sections[0].content else "同花顺复盘已读取，但页面暂未提供摘要。"),
             sections=expanded_sections,
             diagnostics=diagnostics,
         )

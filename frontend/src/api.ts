@@ -5,13 +5,12 @@ import type {
   BacktestSettingsConfig,
   DataServiceHealth,
   DataServiceStatus,
-  DatasetCoverage,
   DailyBarsCoverageResponse,
   FetchResult,
   ImportResult,
   ConditionValidationResult,
+  ClsFinanceResponse,
   MarketBriefingResponse,
-  MarketCommentaryResponse,
   MarketNewsResponse,
   NewsSummaryResponse,
   RealtimeMarketSnapshot,
@@ -104,6 +103,8 @@ async function callBackend<T>(payload: Record<string, unknown>): Promise<T> {
 
 const DEFAULT_SERVICE_TIMEOUT_MS = 12_000;
 const LONG_RUNNING_SERVICE_TIMEOUT_MS = 300_000;
+const HEALTH_SERVICE_TIMEOUT_MS = 60_000;
+const CLS_FINANCE_SERVICE_TIMEOUT_MS = 30_000;
 
 type ServiceFetchOptions = {
   timeoutMs?: number;
@@ -155,11 +156,6 @@ export async function ensureDataService(cacheDir: string): Promise<DataServiceSt
   return invoke<DataServiceStatus>("ensure_data_service", { cacheDir });
 }
 
-export async function loadCoverage(cacheDir: string): Promise<DatasetCoverage[]> {
-  const response = await callBackend<{ coverage: DatasetCoverage[] }>({ command: "coverage", cache_dir: cacheDir });
-  return response.coverage;
-}
-
 export async function loadDataServiceHealth(baseUrl: string): Promise<DataServiceHealth> {
   if (!isTauriRuntime()) {
     return {
@@ -173,7 +169,7 @@ export async function loadDataServiceHealth(baseUrl: string): Promise<DataServic
       ]
     };
   }
-  return serviceFetch<DataServiceHealth>(baseUrl, "/health");
+  return serviceFetch<DataServiceHealth>(baseUrl, "/health", undefined, { timeoutMs: HEALTH_SERVICE_TIMEOUT_MS });
 }
 
 export async function loadDataServiceLogs(baseUrl: string): Promise<{ items: Array<{ level: "info" | "warning" | "error"; message: string; timestamp?: string }> }> {
@@ -224,6 +220,132 @@ export async function loadRealtimeMarketSnapshot(baseUrl: string): Promise<Realt
     };
   }
   return serviceFetch<RealtimeMarketSnapshot>(baseUrl, "/realtime/market-snapshot");
+}
+
+type RealtimeSnapshotStreamEvent =
+  | Partial<RealtimeMarketSnapshot> & {
+      type: "indexes";
+      indexes: RealtimeMarketSnapshot["indexes"];
+      updated_at?: string;
+    }
+  | Partial<RealtimeMarketSnapshot> & {
+      type: "breadth";
+      breadth?: RealtimeMarketSnapshot["breadth"];
+      updated_at?: string;
+    }
+  | Partial<RealtimeMarketSnapshot> & {
+      type: "sectors";
+      strong_sectors?: RealtimeMarketSnapshot["strong_sectors"];
+      yesterday_strong_sectors?: RealtimeMarketSnapshot["yesterday_strong_sectors"];
+      updated_at?: string;
+    }
+  | { type: "result"; snapshot: RealtimeMarketSnapshot }
+  | { type: "error"; message?: string };
+
+type RealtimeSnapshotStreamHandlers = {
+  onSnapshot?: (snapshot: RealtimeMarketSnapshot) => void;
+};
+
+function partialRealtimeSnapshot(
+  current: RealtimeMarketSnapshot | null,
+  event: Exclude<RealtimeSnapshotStreamEvent, { type: "result" | "error" }>
+): RealtimeMarketSnapshot {
+  const now = event.updated_at ?? current?.updated_at ?? new Date().toISOString();
+  const next: RealtimeMarketSnapshot = {
+    status: current?.status ?? "stale",
+    source: current?.source ?? "stream-partial",
+    updated_at: now,
+    market_phase: event.market_phase ?? current?.market_phase ?? "trading",
+    indexes: current?.indexes ?? [],
+    breadth: current?.breadth ?? null,
+    strong_sectors: current?.strong_sectors ?? [],
+    yesterday_strong_sectors: current?.yesterday_strong_sectors ?? [],
+    message: current?.message ?? "实时行情分块加载中",
+    diagnostics: event.diagnostics ?? current?.diagnostics ?? []
+  };
+  if (event.type === "indexes") {
+    next.indexes = event.indexes;
+    next.source = event.indexes[0]?.source ?? next.source;
+    next.message = "实时指数已返回，继续加载红绿家数和板块";
+  } else if (event.type === "breadth") {
+    next.breadth = event.breadth ?? null;
+    next.source = event.breadth?.source ?? next.source;
+    next.message = "实时红绿家数已返回，继续加载板块";
+  } else if (event.type === "sectors") {
+    next.strong_sectors = event.strong_sectors ?? [];
+    next.yesterday_strong_sectors = event.yesterday_strong_sectors ?? next.yesterday_strong_sectors;
+    next.source = next.strong_sectors[0]?.source ?? next.source;
+    next.message = "实时板块已返回，正在完成行情快照";
+  }
+  return next;
+}
+
+export async function loadRealtimeMarketSnapshotStream(
+  baseUrl: string,
+  handlers: RealtimeSnapshotStreamHandlers = {}
+): Promise<RealtimeMarketSnapshot> {
+  if (!isTauriRuntime()) {
+    const snapshot = await loadRealtimeMarketSnapshot(baseUrl);
+    handlers.onSnapshot?.(snapshot);
+    return snapshot;
+  }
+
+  const response = await fetch(`${baseUrl}/realtime/market-snapshot/stream`, {
+    headers: { Accept: "application/x-ndjson" }
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`HTTP ${response.status}: ${text || "local data service request failed"}`);
+  }
+  if (!response.body) {
+    throw new Error("Realtime market stream is not available in this browser.");
+  }
+
+  const decoder = new TextDecoder();
+  const reader = response.body.getReader();
+  let buffer = "";
+  let current: RealtimeMarketSnapshot | null = null;
+  let finalResult: RealtimeMarketSnapshot | null = null;
+  let streamError: string | null = null;
+
+  const handleLine = (line: string) => {
+    if (!line.trim()) {
+      return;
+    }
+    const event = JSON.parse(line) as RealtimeSnapshotStreamEvent;
+    if (event.type === "error") {
+      streamError = event.message ?? "Realtime market stream failed.";
+      return;
+    }
+    if (event.type === "result") {
+      finalResult = event.snapshot;
+      current = event.snapshot;
+      handlers.onSnapshot?.(event.snapshot);
+      return;
+    }
+    current = partialRealtimeSnapshot(current, event);
+    handlers.onSnapshot?.(current);
+  };
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) {
+      break;
+    }
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split(/\r?\n/);
+    buffer = lines.pop() ?? "";
+    for (const line of lines) {
+      handleLine(line);
+    }
+  }
+  buffer += decoder.decode();
+  handleLine(buffer);
+
+  if (!finalResult) {
+    throw new Error(streamError ?? "Realtime market stream ended before a final result was produced.");
+  }
+  return finalResult;
 }
 
 export async function loadMarketNews(baseUrl: string): Promise<MarketNewsResponse> {
@@ -283,32 +405,71 @@ export async function loadMarketBriefing(baseUrl: string, kind: "fupan" | "zaopa
   return serviceFetch<MarketBriefingResponse>(baseUrl, `/market/${kind}`);
 }
 
-export async function loadMarketCommentary(baseUrl: string): Promise<MarketCommentaryResponse> {
+export async function loadClsFinance(baseUrl: string): Promise<ClsFinanceResponse> {
   if (!isTauriRuntime()) {
     return {
-      updated_at: new Date("2026-06-01T15:30:00+08:00").toISOString(),
-      trade_date: "2026-06-01",
+      updated_at: new Date("2026-06-09T15:05:00+08:00").toISOString(),
       source: "browser-preview",
-      stance: "neutral",
-      summary: "指数震荡偏强，但赚钱效应主要集中在半导体和 AI 应用，追高要看量能承接。",
-      drivers: [
+      source_url: "https://www.cls.cn/finance",
+      preclose_px: 3959.337,
+      tline: [
+        { date: 20260609, minute: 930, last_px: 3977.539, change: 0.0047 },
+        { date: 20260609, minute: 1030, last_px: 3966.391, change: -0.0028 },
+        { date: 20260609, minute: 1330, last_px: 3998.12, change: 0.0098 },
+        { date: 20260609, minute: 1500, last_px: 4015.5, change: 0.0142 }
+      ],
+      anchors: [
         {
-          title: "半导体",
-          detail: "指数与板块共振，资金仍在围绕硬科技做切换；代表股：中芯国际、北方华创。",
-          weight: "high"
+          code: "cls80025",
+          name: "PCB",
+          article_id: 2394344,
+          c_time: "2026-06-09 09:31:30",
+          direction: "up",
+          url: "https://www.cls.cn/plate?code=cls80025"
         },
         {
-          title: "AI 应用",
-          detail: "应用端更偏轮动，适合等分歧后的确认信号；代表股：昆仑万维。",
-          weight: "medium"
+          code: "cls80081",
+          name: "油气设服",
+          article_id: 2394352,
+          c_time: "2026-06-09 09:39:24",
+          direction: "down",
+          url: "https://www.cls.cn/plate?code=cls80081"
         }
       ],
-      risks: ["如果成交额不能继续放大，强势题材容易冲高回落。"],
-      next_watch: ["明日先看半导体与 AI 应用是否继续放量。", "指数红但个股弱时，降低追涨仓位。"],
+      emotion: {
+        market_degree: 56,
+        shsz_balance: "2.64万亿",
+        shsz_balance_change: "-1524亿",
+        up_limit: 130,
+        open_limit: 25,
+        performance: "1.74%",
+        breadth: {
+          up: 3322,
+          down: 2049,
+          flat: 156,
+          total: 5527,
+          source: "browser-preview",
+          distribution: { suspend: 12 }
+        }
+      },
+      up_pool: [
+        {
+          symbol: "601869",
+          name: "长飞光纤",
+          change_pct: 0.1,
+          last: 484.33,
+          time: "2026-06-09 13:34:47",
+          reason: "光纤|全球光纤光缆行业领先企业。",
+          limit_up_days: 1,
+          plates: [{ code: "cls81670", name: "光纤光缆", change_pct: 0.0393 }]
+        }
+      ],
       diagnostics: []
     };
   }
-  return serviceFetch<MarketCommentaryResponse>(baseUrl, "/market/commentary");
+  return serviceFetch<ClsFinanceResponse>(baseUrl, "/market/finance", undefined, {
+    timeoutMs: CLS_FINANCE_SERVICE_TIMEOUT_MS
+  });
 }
 
 export async function loadNewsSummary(baseUrl: string): Promise<NewsSummaryResponse> {
@@ -581,6 +742,36 @@ export async function fetchCapitalFlow(
   endDate: string
 ): Promise<FetchResult> {
   if (!isTauriRuntime()) {
+    if (symbols.length === 0) {
+      return {
+        status: "ok",
+        imported_rows: 0,
+        requested_symbols: [],
+        fetched_symbols: [],
+        missing_symbols: [],
+        coverage: [
+          { dataset: "daily_bars", symbols: 2, start_date: startDate, end_date: endDate, missing_rows: 0 },
+          { dataset: "capital_flow", symbols: 2, start_date: startDate, end_date: endDate, missing_rows: 0 },
+          { dataset: "market_cap", symbols: 2, start_date: startDate, end_date: endDate, missing_rows: 0 }
+        ],
+        logs: [{ level: "info", message: "Capital-flow backfill started for all preview symbols" }],
+        diagnostics: [{ code: "capital_flow_backfill_job_started", requested_symbols: 2, source: "capital_flow_crawler" }],
+        failures: [],
+        job: {
+          job_id: "preview-capital-flow",
+          mode: "capital_flow_backfill",
+          status: "completed",
+          total_symbols: 2,
+          completed_symbols: 2,
+          failed_symbols: 0,
+          imported_rows: 2,
+          current_symbol: null,
+          start_date: startDate,
+          end_date: endDate,
+          errors: []
+        }
+      };
+    }
     return {
       status: "ok",
       imported_rows: symbols.length,
@@ -677,19 +868,28 @@ export async function loadSyncJob(baseUrl: string, jobId: string): Promise<{ job
   return serviceFetch<{ job: SyncJobStatus }>(baseUrl, `/sync/jobs/${jobId}`);
 }
 
-export async function runBacktestWithDataService(
-  baseUrl: string,
-  strategy: StrategyConfig,
-  settings: BacktestSettingsConfig
-): Promise<BacktestResult> {
+export async function cancelSyncJob(baseUrl: string, jobId: string): Promise<{ job: SyncJobStatus }> {
   if (!isTauriRuntime()) {
-    return demoResult;
+    return {
+      job: {
+        job_id: jobId,
+        mode: "capital_flow_backfill",
+        status: "cancelled",
+        total_symbols: 2,
+        completed_symbols: 1,
+        failed_symbols: 0,
+        processed_symbols: 1,
+        skipped_symbols: 0,
+        imported_rows: 1,
+        returned_rows: 1,
+        current_symbol: null,
+        start_date: "2026-06-01",
+        end_date: "2026-06-05",
+        errors: []
+      }
+    };
   }
-  const response = await serviceFetch<{ result: BacktestResult }>(baseUrl, "/run/backtest", {
-    strategy,
-    settings
-  });
-  return response.result;
+  return serviceFetch<{ job: SyncJobStatus }>(baseUrl, `/sync/jobs/${jobId}/cancel`, {});
 }
 
 export async function runBacktestStreamWithDataService(

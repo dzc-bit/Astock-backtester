@@ -36,6 +36,21 @@ export const conditionLibrary = [
     ]
   },
   {
+    id: "capital_flow_today_at_least",
+    label: "当日主力净流入",
+    category: "资金流向",
+    params: [{ key: "min", label: "净流入下限", type: "currency", options: [1_000_000, 3_000_000, 5_000_000, 10_000_000] }]
+  },
+  {
+    id: "capital_flow_n_day_positive_count_at_least",
+    label: "近N日主力净流入为正天数",
+    category: "资金流向",
+    params: [
+      { key: "window", label: "统计窗口", type: "days", options: [3, 5, 10] },
+      { key: "min_count", label: "最少正流入天数", type: "number", options: [2, 3, 5, 7] }
+    ]
+  },
+  {
     id: "macd_histogram_at_least",
     label: "MACD柱线下限",
     category: "趋势",

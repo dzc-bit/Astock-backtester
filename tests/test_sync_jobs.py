@@ -3,8 +3,10 @@ from __future__ import annotations
 import time
 import pandas as pd
 from time import sleep
+from threading import Event
 
 from astock_backtester.data.sync import SyncJobManager
+from astock_backtester.data.cache import LocalCache
 from astock_backtester.data.warehouse import Warehouse
 
 
@@ -100,3 +102,232 @@ def test_full_market_job_can_run_asynchronously_and_report_progress(tmp_path):
     assert eventually.status == "completed"
     assert eventually.completed_symbols == 3
     assert warehouse.read_daily_bars()["symbol"].nunique() == 3
+
+
+def test_capital_flow_job_reports_completed_with_errors_when_rows_import_with_failures(tmp_path):
+    cache = LocalCache(tmp_path)
+    warehouse = Warehouse(tmp_path)
+    warehouse.write_daily_bars(
+        pd.DataFrame(
+            {
+                "symbol": ["000001"],
+                "trade_date": ["2026-05-26"],
+                "open": [10.0],
+                "high": [10.5],
+                "low": [9.8],
+                "close": [10.2],
+                "volume": [1000],
+                "main_net_inflow": [float("nan")],
+            }
+        )
+    )
+
+    def fake_capital_flow_fetcher(symbols, start_date, end_date):
+        return {
+            "rows": [{"symbol": "000001", "trade_date": "2026-05-26", "main_net_inflow": 8800000.0}],
+            "failures": [{"symbol": "000001", "code": "date_coverage_shortfall", "message": "partial range"}],
+            "diagnostics": [],
+        }
+
+    manager = SyncJobManager(
+        warehouse=warehouse,
+        provider=FakeProvider(),
+        cache=cache,
+        capital_flow_fetcher=fake_capital_flow_fetcher,
+    )
+
+    status = manager.start_capital_flow_backfill(["000001"], "2026-05-26", "2026-05-29")
+
+    eventually = None
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        eventually = manager.get_job(status.job_id)
+        if eventually and eventually.status != "running":
+            break
+        sleep(0.02)
+
+    assert eventually is not None
+    assert eventually.status == "completed_with_errors"
+    assert eventually.completed_symbols == 0
+    assert eventually.failed_symbols == 1
+    assert eventually.imported_rows == 1
+    assert eventually.errors == ["000001: partial range"]
+
+
+def test_capital_flow_job_counts_no_failure_zero_import_as_completed(tmp_path):
+    cache = LocalCache(tmp_path)
+    warehouse = Warehouse(tmp_path)
+
+    def fake_capital_flow_fetcher(symbols, start_date, end_date):
+        return {
+            "rows": [],
+            "failures": [],
+            "diagnostics": [{"code": "capital_flow_backfill_not_needed"}],
+        }
+
+    manager = SyncJobManager(
+        warehouse=warehouse,
+        provider=FakeProvider(),
+        cache=cache,
+        capital_flow_fetcher=fake_capital_flow_fetcher,
+    )
+
+    status = manager.start_capital_flow_backfill(["000001"], "2026-05-26", "2026-05-29")
+
+    eventually = None
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        eventually = manager.get_job(status.job_id)
+        if eventually and eventually.status != "running":
+            break
+        sleep(0.02)
+
+    assert eventually is not None
+    assert eventually.status == "completed"
+    assert eventually.completed_symbols == 1
+    assert eventually.failed_symbols == 0
+    assert eventually.imported_rows == 0
+    assert eventually.errors == []
+
+
+def test_capital_flow_job_treats_shortfall_diagnostics_as_retryable_failure(tmp_path):
+    cache = LocalCache(tmp_path)
+    warehouse = Warehouse(tmp_path)
+
+    def fake_capital_flow_fetcher(symbols, start_date, end_date):
+        return {
+            "rows": [{"symbol": "000001", "trade_date": "2026-05-26", "main_net_inflow": 8800000.0}],
+            "failures": [],
+            "diagnostics": [
+                {
+                    "symbol": "000001",
+                    "code": "date_coverage_shortfall",
+                    "message": "returned 2026-05-26 to 2026-05-26 for requested 2026-05-26 to 2026-05-29",
+                }
+            ],
+        }
+
+    manager = SyncJobManager(
+        warehouse=warehouse,
+        provider=FakeProvider(),
+        cache=cache,
+        capital_flow_fetcher=fake_capital_flow_fetcher,
+    )
+
+    status = manager.start_capital_flow_backfill(["000001"], "2026-05-26", "2026-05-29")
+
+    eventually = None
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        eventually = manager.get_job(status.job_id)
+        if eventually and eventually.status != "running":
+            break
+        sleep(0.02)
+
+    assert eventually is not None
+    assert eventually.status == "completed_with_errors"
+    assert eventually.processed_symbols == 1
+    assert eventually.completed_symbols == 0
+    assert eventually.failed_symbols == 1
+    assert eventually.imported_rows == 1
+    assert eventually.returned_rows == 1
+    assert eventually.last_error is not None
+    assert "000001" in eventually.last_error
+    assert "date_coverage_shortfall" in eventually.last_error
+
+
+def test_capital_flow_job_can_be_cancelled_between_batches(tmp_path):
+    cache = LocalCache(tmp_path)
+    warehouse = Warehouse(tmp_path)
+    started = Event()
+    release = Event()
+
+    def fake_capital_flow_fetcher(symbols, start_date, end_date):
+        started.set()
+        release.wait(timeout=5)
+        return {
+            "rows": [
+                {"symbol": symbols[0], "trade_date": "2026-06-05", "main_net_inflow": 1000000.0}
+            ],
+            "failures": [],
+            "diagnostics": [],
+        }
+
+    manager = SyncJobManager(
+        warehouse=warehouse,
+        provider=FakeProvider(),
+        cache=cache,
+        capital_flow_fetcher=fake_capital_flow_fetcher,
+        capital_flow_batch_size=1,
+    )
+
+    status = manager.start_capital_flow_backfill(["000001", "000002", "000003"], "2026-06-05", "2026-06-05")
+    assert started.wait(timeout=5)
+    cancelled = manager.cancel_job(status.job_id)
+    assert cancelled is not None
+    assert cancelled.status == "cancelling"
+    release.set()
+
+    eventually = None
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        eventually = manager.get_job(status.job_id)
+        if eventually and eventually.status == "cancelled":
+            break
+        sleep(0.02)
+
+    assert eventually is not None
+    assert eventually.status == "cancelled"
+    assert eventually.processed_symbols == 1
+    assert eventually.completed_symbols == 1
+    assert eventually.imported_rows == 1
+    assert warehouse.read_daily_bars()["symbol"].tolist() == ["000001"]
+
+
+def test_capital_flow_job_batches_symbols_and_accumulates_row_stats(tmp_path):
+    cache = LocalCache(tmp_path)
+    warehouse = Warehouse(tmp_path)
+    calls = []
+
+    def fake_capital_flow_fetcher(symbols, start_date, end_date):
+        calls.append(list(symbols))
+        rows = [
+            {"symbol": symbol, "trade_date": "2026-06-05", "main_net_inflow": 1000000.0}
+            for symbol in symbols
+            if symbol != "000003"
+        ]
+        failures = (
+            [{"symbol": "000003", "code": "network_error", "error": "remote disconnected"}]
+            if "000003" in symbols
+            else []
+        )
+        return {"rows": rows, "failures": failures, "diagnostics": failures}
+
+    manager = SyncJobManager(
+        warehouse=warehouse,
+        provider=FakeProvider(),
+        cache=cache,
+        capital_flow_fetcher=fake_capital_flow_fetcher,
+        capital_flow_batch_size=2,
+    )
+
+    status = manager.start_capital_flow_backfill(["000001", "000002", "000003"], "2026-06-05", "2026-06-05")
+
+    eventually = None
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        eventually = manager.get_job(status.job_id)
+        if eventually and eventually.status != "running":
+            break
+        sleep(0.02)
+
+    assert eventually is not None
+    assert eventually.status == "completed_with_errors"
+    assert calls == [["000001", "000002"], ["000003"]]
+    assert eventually.processed_symbols == 3
+    assert eventually.completed_symbols == 2
+    assert eventually.failed_symbols == 1
+    assert eventually.returned_rows == 2
+    assert eventually.imported_rows == 2
+    assert eventually.last_error == "000003: remote disconnected"
+    assert eventually.recent_failures[-1]["symbol"] == "000003"

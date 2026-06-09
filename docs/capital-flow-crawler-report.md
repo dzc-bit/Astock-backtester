@@ -4,15 +4,16 @@ Date: 2026-06-08
 
 ## Scope
 
-This report covers the standalone Eastmoney capital-flow crawler added in
+This report covers the standalone capital-flow crawler added in
 `backend/astock_backtester/data/capital_flow_crawler.py`.
 
-The crawler is included in the 1.1.1 backend as a low-level provider/crawler boundary. It only reads Eastmoney public XHR and returns structured Python data plus per-symbol `failures` and `diagnostics`. The crawler itself does not write `LocalCache` or `Warehouse`.
+The crawler is included in the 1.1.1 backend as a low-level provider/crawler boundary. It reads Eastmoney public XHR as the primary source and can switch to a controlled Baidu public fallback when Eastmoney disconnects or under-covers the requested range. It returns structured Python data plus per-symbol `failures` and `diagnostics`. The crawler itself does not write `LocalCache` or `Warehouse`.
 
 In 1.1.1 the higher-level data service now owns the write boundary:
 
 - `POST /fetch/daily-bars` fetches daily bars through the normal provider chain, then uses the capital-flow crawler as the primary `main_net_inflow` source before writing the merged frame.
-- `POST /fetch/capital-flow` reads existing local daily bars and backfills only missing `main_net_inflow` values.
+- `POST /fetch/capital-flow` backfills missing `main_net_inflow` values. It can write capital-flow-only rows before OHLCV rows exist, so funds can be imported independently of daily K-line data.
+- Backtests, realtime local fallback, and daily-bar coverage require OHLC-complete rows; capital-flow-only rows do not make a symbol tradable or daily-bar coverage-complete.
 - Failed symbols are returned through `DataOperationResult.failures` and `DataOperationResult.diagnostics`, and the data center surfaces those structured failures without embedding upstream URLs or crawler parsing rules in React.
 
 ## Files
@@ -29,7 +30,9 @@ In 1.1.1 the higher-level data service now owns the write boundary:
 
 The crawler remains independent from realtime market snapshot, commentary, news, briefing, user-mode candidates, and risk modules.
 
-## Eastmoney Endpoint
+## Sources
+
+Eastmoney remains the primary source:
 
 Endpoint:
 
@@ -50,8 +53,11 @@ lmt={limit}
 Request behavior:
 
 - Fixed timeout is passed by the caller.
+- Requests use bounded retries, small backoff, and per-symbol diagnostics.
 - The crawler tries two public header variants: `data.eastmoney.com/zjlx/detail.html` first, then `quote.eastmoney.com`.
-- If both variants fail, the raised error keeps both source diagnostics.
+- If both basic requests disconnect, the crawler retries the same public header variants with Eastmoney's common `ut` request parameter.
+- Response parsing accepts plain JSON and JSONP-wrapped payloads.
+- If Eastmoney fails or returns an incomplete requested range, the batch path can switch to Baidu public capital-flow rows and keeps the original Eastmoney diagnostics.
 - It does not use login, cookies, proxy pools, CAPTCHA bypass, or paid scraping.
 
 Market mapping:

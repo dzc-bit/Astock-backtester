@@ -1,6 +1,14 @@
 from __future__ import annotations
 
-from astock_backtester.data.briefing import MarketBriefingProvider, THS_FUPAN_URL, THS_REFERER
+from bs4 import BeautifulSoup
+
+from astock_backtester.data.briefing import (
+    MarketBriefingProvider,
+    THS_FUPAN_URL,
+    THS_REFERER,
+    _is_noisy_content_line,
+    _table_from_node,
+)
 
 
 class FakeHtmlResponse:
@@ -12,6 +20,46 @@ class FakeHtmlResponse:
 
     def raise_for_status(self) -> None:
         return
+
+
+def test_is_noisy_content_line_filters_ambiguous_profit_and_cn_label_numeric_soup():
+    assert _is_noisy_content_line("同比指数盈利")
+    assert _is_noisy_content_line(
+        "板块名称 最新涨幅 涨跌幅% 股票数（只） 1293.69 +14.46 +1.13% 363.54亿 2026-06-05 15:00:00"
+    )
+    assert not _is_noisy_content_line("机器人板块午后持续走强，资金围绕题材龙头博弈。")
+
+
+def test_table_from_node_rejects_headerless_mystery_market_number_rows():
+    soup = BeautifulSoup(
+        """
+        <table>
+          <tr><td>半导体</td><td>1293.69</td><td>+14.46</td><td>+1.13%</td><td>363.54亿</td></tr>
+          <tr><td>机器人</td><td>1102.18</td><td>+22.40</td><td>+2.07%</td><td>251.11亿</td></tr>
+        </table>
+        """,
+        "html.parser",
+    )
+
+    assert _table_from_node(soup.table, title="指数表现") is None
+
+
+def test_table_from_node_keeps_readable_table_with_explicit_headers():
+    soup = BeautifulSoup(
+        """
+        <table>
+          <tr><th>板块名称</th><th>涨跌幅</th><th>解读</th></tr>
+          <tr><td>机器人</td><td>+2.07%</td><td>午后持续走强</td></tr>
+        </table>
+        """,
+        "html.parser",
+    )
+
+    table = _table_from_node(soup.table, title="板块表现")
+
+    assert table is not None
+    assert table.columns == ["板块名称", "涨跌幅", "解读"]
+    assert table.rows == [{"板块名称": "机器人", "涨跌幅": "+2.07%", "解读": "午后持续走强"}]
 
 
 def test_market_briefing_provider_keeps_full_ths_fupan_summary_and_section_body():
@@ -466,6 +514,95 @@ def test_market_briefing_provider_filters_cn_label_numeric_soup_and_percent_symb
     assert response.sections[0].content == "机器人板块午后持续走强，资金围绕题材龙头博弈。"
     assert "同比指数盈利" not in (response.sections[0].content or "")
     assert "% %" not in (response.sections[0].content or "")
+
+
+def test_market_briefing_provider_drops_ambiguous_profit_section_title_entirely():
+    html = """
+    <html><body>
+      <div id="fpzj">复盘摘要：指数小幅反弹。</div>
+      <div class="fp_item_hd"><h2>同比指数盈利</h2></div>
+      <div class="fp_item_cnt">
+        <p>2700 0 股票数（只） 同比指数盈利% 计算方式: (个股收盘价-开盘价)/开盘价*100%-对应指数涨幅; (比率+数量)</p>
+      </div>
+      <div class="fp_item_hd"><h2>同花顺解盘</h2></div>
+      <div class="fp_item_cnt">
+        <p>机器人板块午后持续走强，资金围绕题材龙头博弈。</p>
+      </div>
+    </body></html>
+    """
+
+    response = MarketBriefingProvider(requester=lambda *args, **kwargs: FakeHtmlResponse(html)).latest_fupan()
+
+    dumped = str(response.model_dump(mode="json"))
+    assert [section.title for section in response.sections] == ["同花顺解盘"]
+    assert "同比指数盈利" not in dumped
+    assert "计算方式" not in dumped
+
+
+def test_market_briefing_provider_drops_ambiguous_profit_summary_text():
+    html = """
+    <html><body>
+      <div id="fpzj">同比指数盈利</div>
+      <div class="fp_item_hd"><h2>同花顺解盘</h2></div>
+      <div class="fp_item_cnt">
+        <p>机器人板块午后持续走强，资金围绕题材龙头博弈。</p>
+      </div>
+    </body></html>
+    """
+
+    response = MarketBriefingProvider(requester=lambda *args, **kwargs: FakeHtmlResponse(html)).latest_fupan()
+
+    assert response.summary == "机器人板块午后持续走强，资金围绕题材龙头博弈。"
+    assert "同比指数盈利" not in str(response.model_dump(mode="json"))
+
+
+def test_market_briefing_provider_removes_ths_board_codes_from_key_sector_text():
+    html = """
+    <html><body>
+      <div id="fpzj">复盘摘要：权重方向轮动。</div>
+      <div class="fp_item_hd"><h2>重点板块</h2></div>
+      <div class="fp_item_cnt">
+        <p>银行 881155 保险 881156 钢铁 881112 房地产 881153 活跃。</p>
+        <table>
+          <tr><th>板块</th><th>解读</th></tr>
+          <tr><td>银行 881155</td><td>低估值方向修复</td></tr>
+          <tr><td>保险 881156</td><td>权重承接改善</td></tr>
+        </table>
+      </div>
+    </body></html>
+    """
+
+    response = MarketBriefingProvider(requester=lambda *args, **kwargs: FakeHtmlResponse(html)).latest_fupan()
+
+    dumped = str(response.model_dump(mode="json"))
+    assert "881155" not in dumped
+    assert "881156" not in dumped
+    assert "银行  保险" not in dumped
+    assert response.sections[0].content == "银行 保险 钢铁 房地产 活跃。"
+    assert response.sections[0].tables[0].rows[0]["板块"] == "银行"
+
+
+def test_market_briefing_provider_removes_separate_ths_board_code_column():
+    html = """
+    <html><body>
+      <div id="fpzj">复盘摘要：权重方向轮动。</div>
+      <div class="fp_item_hd"><h2>重点板块</h2></div>
+      <div class="fp_item_cnt">
+        <table>
+          <tr><th>板块</th><th>代码</th><th>解读</th></tr>
+          <tr><td>银行</td><td>881155</td><td>低估值方向修复</td></tr>
+          <tr><td>保险</td><td>881156</td><td>权重承接改善</td></tr>
+        </table>
+      </div>
+    </body></html>
+    """
+
+    response = MarketBriefingProvider(requester=lambda *args, **kwargs: FakeHtmlResponse(html)).latest_fupan()
+
+    table = response.sections[0].tables[0]
+    assert table.columns == ["板块", "解读"]
+    assert table.rows == [{"板块": "银行", "解读": "低估值方向修复"}, {"板块": "保险", "解读": "权重承接改善"}]
+    assert "881155" not in str(response.model_dump(mode="json"))
 
 
 def test_market_briefing_provider_filters_div_numeric_soup_and_keeps_readable_sentences():

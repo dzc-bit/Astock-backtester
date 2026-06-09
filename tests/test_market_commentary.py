@@ -229,7 +229,7 @@ def test_market_commentary_uses_news_tags_when_realtime_snapshot_is_slow():
 def test_market_commentary_default_snapshot_timeout_allows_longer_realtime_reads():
     provider = MarketCommentaryProvider(FakeRealtimeProvider(), FakeNewsProvider())
 
-    assert provider.snapshot_timeout == 10.0
+    assert provider.snapshot_timeout == 30.0
 
 
 def test_market_commentary_uses_fupan_when_realtime_snapshot_is_slow():
@@ -254,6 +254,44 @@ def test_market_commentary_uses_fupan_when_realtime_snapshot_is_slow():
     assert response.drivers[0].title == "同花顺复盘"
     assert any("实时盘面读取失败，已用同花顺复盘" in item for item in response.diagnostics)
     assert not response.summary.startswith("实时盘面暂不可用")
+
+
+def test_market_commentary_ignores_noisy_briefing_fallback_text():
+    class BrokenRealtimeProvider:
+        def market_snapshot(self) -> RealtimeMarketSnapshot:
+            raise TimeoutError("snapshot timeout")
+
+    class NoisyFupanProvider:
+        def latest_fupan(self) -> MarketBriefingResponse:
+            return MarketBriefingResponse(
+                kind="fupan",
+                updated_at=datetime(2026, 6, 5, 15, 35, tzinfo=timezone.utc),
+                source="ths-fupan",
+                source_url="https://stock.10jqka.com.cn/fupan/",
+                summary="同比指数盈利",
+                sections=[
+                    MarketBriefingSection(
+                        title="指数表现",
+                        content="板块名称 最新涨幅 涨跌幅% 股票数（只） 1293.69 +14.46 +1.13% 363.54亿 2026-06-05 15:00:00",
+                        links=[],
+                        tables=[],
+                    )
+                ],
+                diagnostics=[],
+            )
+
+    response = MarketCommentaryProvider(
+        BrokenRealtimeProvider(),
+        FakeNewsProvider(),
+        briefing_provider=NoisyFupanProvider(),
+        snapshot_timeout=None,
+    ).current_commentary()
+
+    dumped = str(response.model_dump(mode="json"))
+    assert response.source == "local-brief-commentary"
+    assert "同比指数盈利" not in dumped
+    assert "1293.69" not in dumped
+    assert "363.54亿" not in dumped
 
 
 def test_market_commentary_labels_market_fallback_briefing_as_public_market_fallback():

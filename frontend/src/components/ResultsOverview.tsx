@@ -47,6 +47,20 @@ function isToday(value: string | null | undefined): boolean {
   return value === today;
 }
 
+function normalizedEquityCurve(result: BacktestResult | null): BacktestResult["equity_curve"] {
+  if (!result) {
+    return [];
+  }
+  const byDate = new Map<string, BacktestResult["equity_curve"][number]>();
+  for (const point of result.equity_curve) {
+    if (!point.trade_date || !Number.isFinite(point.equity)) {
+      continue;
+    }
+    byDate.set(point.trade_date, point);
+  }
+  return Array.from(byDate.values()).sort((left, right) => left.trade_date.localeCompare(right.trade_date));
+}
+
 function MatchedStocksPanel({ dailyMatches }: { dailyMatches?: DailyStrategyMatches | null }) {
   const hasPayload = Boolean(dailyMatches);
   const rawItems = dailyMatches?.matches ?? [];
@@ -115,8 +129,9 @@ export function ResultsOverview({
   onOpenRiskAlerts
 }: Props) {
   const issueCount = result?.preflight_issues.length ?? 0;
-  const chartStart = result?.equity_curve[0]?.trade_date;
-  const chartEnd = result?.equity_curve.at(-1)?.trade_date;
+  const chartData = normalizedEquityCurve(result);
+  const chartStart = chartData[0]?.trade_date;
+  const chartEnd = chartData.at(-1)?.trade_date;
   const zeroTradeHint = result && result.metrics.trade_count === 0
     ? "本次没有产生交易。常见原因是日期范围过短、股票池过窄、条件过严或本地字段缺失。"
     : null;
@@ -193,7 +208,7 @@ export function ResultsOverview({
             </div>
             <div className="chart-body">
               <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={220}>
-                <LineChart data={result.equity_curve}>
+                <LineChart data={chartData}>
                   <XAxis dataKey="trade_date" />
                   <YAxis />
                   <Tooltip />

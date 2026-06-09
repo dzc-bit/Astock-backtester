@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { runBacktestStreamWithDataService } from "./api";
+import { loadRealtimeMarketSnapshotStream, runBacktestStreamWithDataService } from "./api";
 import type { BacktestResult, BacktestSettingsConfig, StrategyConfig, Trade } from "./types";
 
 const strategy: StrategyConfig = {
@@ -105,5 +105,73 @@ describe("backtest stream", () => {
     ).resolves.toEqual(result);
 
     expect(trades).toEqual([blockedTrade]);
+  });
+});
+
+describe("realtime market snapshot stream", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    Reflect.deleteProperty(window, "__TAURI_INTERNALS__");
+  });
+
+  it("emits renderable partial snapshots before the final realtime result", async () => {
+    Object.defineProperty(window, "__TAURI_INTERNALS__", {
+      configurable: true,
+      value: {}
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(
+          jsonLineStream([
+            JSON.stringify({
+              type: "indexes",
+              updated_at: "2026-05-27T10:30:00Z",
+              market_phase: "trading",
+              indexes: [{ symbol: "sh000001", name: "上证指数", last: 3100, source: "fake-live" }]
+            }),
+            JSON.stringify({
+              type: "breadth",
+              updated_at: "2026-05-27T10:30:01Z",
+              market_phase: "trading",
+              breadth: { up: 3200, down: 1700, flat: 200, total: 5100, source: "fake-live" }
+            }),
+            JSON.stringify({
+              type: "sectors",
+              updated_at: "2026-05-27T10:30:02Z",
+              market_phase: "trading",
+              strong_sectors: [{ name: "半导体", change_pct: 0.036, leading_symbol: "688001", source: "fake-live" }],
+              yesterday_strong_sectors: [{ name: "机器人", change_pct: 0.022, leading_symbol: "300024", source: "fake-yesterday" }]
+            }),
+            JSON.stringify({
+              type: "result",
+              snapshot: {
+                status: "live",
+                source: "fake-live",
+                updated_at: "2026-05-27T10:30:03Z",
+                market_phase: "trading",
+                indexes: [{ symbol: "sh000001", name: "上证指数", last: 3100, source: "fake-live" }],
+                breadth: { up: 3200, down: 1700, flat: 200, total: 5100, source: "fake-live" },
+                strong_sectors: [{ name: "半导体", change_pct: 0.036, leading_symbol: "688001", source: "fake-live" }],
+                yesterday_strong_sectors: [{ name: "机器人", change_pct: 0.022, leading_symbol: "300024", source: "fake-yesterday" }],
+                message: "ok",
+                diagnostics: []
+              }
+            })
+          ]),
+          { status: 200 }
+        )
+      )
+    );
+    const partials: string[] = [];
+
+    const result = await loadRealtimeMarketSnapshotStream("http://127.0.0.1:9010", {
+      onSnapshot: (snapshot) => {
+        partials.push(`${snapshot.indexes.length}/${snapshot.breadth?.total ?? 0}/${snapshot.strong_sectors.length}`);
+      }
+    });
+
+    expect(result.status).toBe("live");
+    expect(partials).toEqual(["1/0/0", "1/5100/0", "1/5100/1", "1/5100/1"]);
   });
 });

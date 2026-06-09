@@ -35,6 +35,12 @@ REQUIRED_BASE_COLUMNS = {
 
 BOARD_LOT_SIZE = 100
 
+CAPITAL_FLOW_CONDITIONS = {
+    "capital_flow_n_day_sum_at_least",
+    "capital_flow_today_at_least",
+    "capital_flow_n_day_positive_count_at_least",
+}
+
 
 def _stock_pool_mask(data: pd.DataFrame, settings: BacktestSettings) -> pd.Series:
     symbols = data["symbol"].astype(str)
@@ -75,7 +81,8 @@ def _preflight(frame: pd.DataFrame, strategy: StrategyConfig) -> list[PreflightI
         for group in strategy.entry_groups
         for node in group.conditions
     } | {node.condition_id for node in strategy.market_filters + strategy.exit_rules}
-    if "capital_flow_n_day_sum_at_least" in condition_ids and "main_net_inflow" not in frame.columns:
+    requires_capital_flow = bool(condition_ids & CAPITAL_FLOW_CONDITIONS)
+    if requires_capital_flow and "main_net_inflow" not in frame.columns:
         issues.append(
             PreflightIssue(
                 code="missing_capital_flow",
@@ -84,7 +91,7 @@ def _preflight(frame: pd.DataFrame, strategy: StrategyConfig) -> list[PreflightI
                 message="Selected strategy requires capital-flow data.",
             )
         )
-    if "capital_flow_n_day_sum_at_least" in condition_ids and "main_net_inflow" in frame.columns:
+    if requires_capital_flow and "main_net_inflow" in frame.columns:
         if frame["main_net_inflow"].isna().all():
             issues.append(
                 PreflightIssue(
@@ -154,6 +161,14 @@ def _filter_mask_for_node(node, data: pd.DataFrame) -> pd.Series:
         column = f"main_net_inflow_sum_{window}d"
         if column in data:
             return data[column] >= float(params["min"])
+        return mask
+    if condition_id == "capital_flow_today_at_least":
+        return data["main_net_inflow"] >= float(params["min"])
+    if condition_id == "capital_flow_n_day_positive_count_at_least":
+        window = int(params["window"])
+        column = f"main_net_inflow_positive_count_{window}d"
+        if column in data:
+            return data[column] >= int(params["min_count"])
         return mask
     if condition_id == "market_rising_ratio_at_least":
         return data["market_rising_ratio"] >= float(params["min_ratio"])
@@ -517,16 +532,6 @@ def run_backtest(
                         on_event({"type": "trade_blocked", "trade": position})
                     continue
                 raw_sell_price = float(current["open"])
-                if (
-                    settings.stop_loss_pct is not None
-                    and (current["low"] / position.buy_price - 1) <= settings.stop_loss_pct
-                ):
-                    raw_sell_price = position.buy_price * (1 + settings.stop_loss_pct)
-                elif (
-                    settings.take_profit_pct is not None
-                    and (current["high"] / position.buy_price - 1) >= settings.take_profit_pct
-                ):
-                    raw_sell_price = position.buy_price * (1 + settings.take_profit_pct)
                 sell_price = _sell_execution_price(raw_sell_price, settings)
                 proceeds = sell_price * position.shares * (1 - settings.fee_rate - settings.stamp_tax_rate)
                 cash += proceeds
@@ -566,6 +571,20 @@ def run_backtest(
                     ),
                 }
             )
+        market_value = _mark_to_market(open_positions, today_by_symbol)
+        equity = cash + market_value
+        peak_equity = max(peak_equity, equity)
+        drawdown = (equity / peak_equity) - 1 if peak_equity else 0.0
+        equity_curve.append(
+            EquityPoint(
+                trade_date=pd.Timestamp(signal_date).date(),
+                equity=equity,
+                cash=cash,
+                market_value=market_value,
+                drawdown_pct=drawdown,
+            )
+        )
+
         if next_date is not None and len(open_positions) < settings.max_positions:
             current_market_value = _mark_to_market(open_positions, today_by_symbol)
             current_equity = cash + current_market_value
@@ -614,20 +633,6 @@ def run_backtest(
                 open_positions.append(opened_trade)
                 if on_event is not None:
                     on_event({"type": "trade_opened", "trade": opened_trade})
-
-        market_value = _mark_to_market(open_positions, today_by_symbol)
-        equity = cash + market_value
-        peak_equity = max(peak_equity, equity)
-        drawdown = (equity / peak_equity) - 1 if peak_equity else 0.0
-        equity_curve.append(
-            EquityPoint(
-                trade_date=pd.Timestamp(signal_date).date(),
-                equity=equity,
-                cash=cash,
-                market_value=market_value,
-                drawdown_pct=drawdown,
-            )
-        )
 
     final_equity = equity_curve[-1].equity if equity_curve else settings.initial_cash
     return BacktestResult(

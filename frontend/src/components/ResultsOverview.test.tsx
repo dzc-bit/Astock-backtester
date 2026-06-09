@@ -6,7 +6,7 @@ import { ResultsOverview } from "./ResultsOverview";
 
 vi.mock("recharts", () => ({
   ResponsiveContainer: ({ children }: { children: ReactNode }) => <div data-testid="responsive-container">{children}</div>,
-  LineChart: ({ children }: { children: ReactNode }) => <div data-testid="line-chart">{children}</div>,
+  LineChart: ({ children, data }: { children: ReactNode; data?: unknown[] }) => <div data-testid="line-chart" data-points={data?.length ?? 0}>{children}</div>,
   Tooltip: () => null,
   XAxis: () => null,
   YAxis: () => null,
@@ -181,4 +181,24 @@ it("does not label old backtest matches as today's hits and separates the equity
   expect(screen.queryByText("今日 user 模式候选")).not.toBeInTheDocument();
   expect(screen.getByText("历史权益曲线")).toBeInTheDocument();
   expect(screen.getByText("回测区间 2024-01-04 至 2024-03-13")).toBeInTheDocument();
+});
+
+it("normalizes the equity curve by date before rendering the chart", () => {
+  render(
+    <ResultsOverview
+      result={buildResult({
+        equity_curve: [
+          { trade_date: "2024-01-04", equity: 100000, cash: 100000, market_value: 0, drawdown_pct: 0 },
+          { trade_date: "2024-01-04", equity: 99999, cash: 99999, market_value: 0, drawdown_pct: -0.00001 },
+          { trade_date: "2024-01-06", equity: Number.NaN, cash: 0, market_value: 0, drawdown_pct: 0 },
+          { trade_date: "2024-01-05", equity: 101000, cash: 51000, market_value: 50000, drawdown_pct: 0 }
+        ]
+      })}
+      onRun={vi.fn()}
+      onOpenRiskAlerts={vi.fn()}
+    />
+  );
+
+  expect(screen.getByTestId("line-chart")).toHaveAttribute("data-points", "2");
+  expect(screen.getByText("回测区间 2024-01-04 至 2024-01-05")).toBeInTheDocument();
 });

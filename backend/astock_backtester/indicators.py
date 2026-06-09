@@ -49,6 +49,19 @@ def add_capital_flow_sum(df: pd.DataFrame, windows: list[int]) -> pd.DataFrame:
     return out
 
 
+def add_capital_flow_positive_count(df: pd.DataFrame, windows: list[int]) -> pd.DataFrame:
+    out = _sorted(df).copy()
+    positive_flow = out["main_net_inflow"] > 0
+    for window in windows:
+        out[f"main_net_inflow_positive_count_{window}d"] = (
+            positive_flow.groupby(out["symbol"])
+            .rolling(window=window)
+            .sum()
+            .reset_index(level=0, drop=True)
+        )
+    return out
+
+
 def add_prior_high_low(df: pd.DataFrame, windows: list[int]) -> pd.DataFrame:
     out = _sorted(df).copy()
     prior_high = out.groupby("symbol")["high"].shift(1)

@@ -1,3 +1,4 @@
+use serde::Deserialize;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -5,6 +6,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 use std::{env, fs};
 
+use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Manager};
 
 use crate::python_runtime::{backend_dir, project_root, python_command};
@@ -22,6 +24,26 @@ struct ManagedService {
     child: Child,
     port: u16,
     cache_dir: String,
+    executable_path: Option<PathBuf>,
+    executable_sha256: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ServiceHealthPayload {
+    cache_path: String,
+    port: Option<u16>,
+    process_id: Option<u32>,
+    executable_path: Option<String>,
+    executable_sha256: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, serde::Serialize)]
+struct ServiceLockPayload {
+    port: u16,
+    cache_dir: String,
+    process_id: Option<u32>,
+    executable_path: Option<String>,
+    executable_sha256: Option<String>,
 }
 
 #[derive(Default)]
@@ -44,6 +66,202 @@ pub fn build_service_args(port: u16, cache_dir: &str) -> Vec<String> {
 
 pub fn health_request(port: u16) -> String {
     format!("GET /ping HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n")
+}
+
+pub fn service_health_request(port: u16) -> String {
+    format!("GET /identity HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n")
+}
+
+fn canonical_or_original(path: &str) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path))
+}
+
+fn paths_match(left: &str, right: &str) -> bool {
+    let left = canonical_or_original(left);
+    let right = canonical_or_original(right);
+    left.to_string_lossy().eq_ignore_ascii_case(&right.to_string_lossy())
+}
+
+fn cached_service_matches(existing_cache_dir: &str, requested_cache_dir: &str) -> bool {
+    paths_match(existing_cache_dir, requested_cache_dir)
+}
+
+fn http_json_body(raw: &str) -> Option<&str> {
+    raw.split("\r\n\r\n").nth(1)
+}
+
+fn file_sha256(path: &Path) -> Result<String, String> {
+    let mut file = fs::File::open(path).map_err(|err| format!("failed to open executable for hashing: {err}"))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 1024 * 64];
+    loop {
+        let bytes = file
+            .read(&mut buffer)
+            .map_err(|err| format!("failed to read executable for hashing: {err}"))?;
+        if bytes == 0 {
+            break;
+        }
+        hasher.update(&buffer[..bytes]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn validate_service_health(
+    raw: &str,
+    port: u16,
+    cache_dir: &str,
+    process_id: Option<u32>,
+    expected_executable_path: Option<&Path>,
+    expected_executable_sha256: Option<&str>,
+) -> Result<(), String> {
+    if !raw.contains("200 OK") {
+        return Err("localhost data service health check did not return 200 OK".to_string());
+    }
+    let body = http_json_body(raw).ok_or_else(|| "localhost data service health response was empty".to_string())?;
+    let health: ServiceHealthPayload =
+        serde_json::from_str(body).map_err(|err| format!("localhost data service health json was invalid: {err}"))?;
+    if health.port != Some(port) {
+        return Err(format!(
+            "localhost data service health port mismatch: expected {port}, got {:?}",
+            health.port
+        ));
+    }
+    if !paths_match(&health.cache_path, cache_dir) {
+        return Err(format!(
+            "localhost data service cache mismatch: expected {}, got {}",
+            cache_dir, health.cache_path
+        ));
+    }
+    let executable_identity_checked =
+        expected_executable_path.is_some() && expected_executable_sha256.is_some();
+    if let Some(expected) = process_id.filter(|_| !executable_identity_checked) {
+        let actual = health
+            .process_id
+            .ok_or_else(|| "localhost data service health did not include process_id".to_string())?;
+        if actual != expected {
+            return Err(format!("localhost data service pid mismatch: expected {expected}, got {actual}"));
+        }
+    }
+    if let Some(expected_path) = expected_executable_path {
+        let actual_path = health
+            .executable_path
+            .as_deref()
+            .ok_or_else(|| "localhost data service health did not include executable_path".to_string())?;
+        if !paths_match(actual_path, &expected_path.to_string_lossy()) {
+            return Err(format!(
+                "localhost data service executable mismatch: expected {}, got {}",
+                expected_path.display(),
+                actual_path
+            ));
+        }
+    }
+    if let Some(expected_sha256) = expected_executable_sha256 {
+        let actual_sha256 = health
+            .executable_sha256
+            .as_deref()
+            .ok_or_else(|| "localhost data service health did not include executable_sha256".to_string())?;
+        if !actual_sha256.eq_ignore_ascii_case(expected_sha256) {
+            return Err(format!(
+                "localhost data service executable hash mismatch: expected {}, got {}",
+                expected_sha256, actual_sha256
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn service_lock_path(cache_dir: &str) -> PathBuf {
+    Path::new(cache_dir).join("astock-data-service.lock.json")
+}
+
+fn try_create_service_lock(path: &Path, payload: &ServiceLockPayload) -> Result<bool, String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|err| format!("failed to create service lock dir: {err}"))?;
+    }
+    let encoded = serde_json::to_vec_pretty(payload).map_err(|err| format!("failed to encode service lock: {err}"))?;
+    match fs::OpenOptions::new().write(true).create_new(true).open(path) {
+        Ok(mut file) => {
+            file.write_all(&encoded)
+                .map_err(|err| format!("failed to write service lock: {err}"))?;
+            Ok(true)
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+        Err(err) => Err(format!("failed to create service lock: {err}")),
+    }
+}
+
+fn write_service_lock(path: &Path, payload: &ServiceLockPayload) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|err| format!("failed to create service lock dir: {err}"))?;
+    }
+    let encoded = serde_json::to_vec_pretty(payload).map_err(|err| format!("failed to encode service lock: {err}"))?;
+    fs::write(path, encoded).map_err(|err| format!("failed to write service lock: {err}"))
+}
+
+fn read_service_lock(path: &Path) -> Result<ServiceLockPayload, String> {
+    let raw = fs::read_to_string(path).map_err(|err| format!("failed to read service lock: {err}"))?;
+    serde_json::from_str(&raw).map_err(|err| format!("service lock json was invalid: {err}"))
+}
+
+fn remove_service_lock(path: &Path) {
+    let _ = fs::remove_file(path);
+}
+
+fn require_recreated_service_lock(created: bool) -> Result<(), String> {
+    if created {
+        return Ok(());
+    }
+    Err("another localhost data service is starting for this cache; retry shortly".to_string())
+}
+
+fn recreate_service_lock_after_timeout(path: &Path, payload: &ServiceLockPayload) -> Result<(), String> {
+    remove_service_lock(path);
+    require_recreated_service_lock(try_create_service_lock(path, payload)?)
+}
+
+fn locked_service_expected_identity<'a>(
+    lock: &'a ServiceLockPayload,
+    expected_executable_path: Option<&'a Path>,
+    expected_executable_sha256: Option<&'a str>,
+) -> (Option<&'a Path>, Option<&'a str>) {
+    let executable_path = expected_executable_path.or_else(|| lock.executable_path.as_deref().map(Path::new));
+    let executable_sha256 = expected_executable_sha256.or(lock.executable_sha256.as_deref());
+    (executable_path, executable_sha256)
+}
+
+fn locked_service_matches_current_expectation(
+    cache_dir: &str,
+    lock: &ServiceLockPayload,
+    expected_executable_path: Option<&Path>,
+    expected_executable_sha256: Option<&str>,
+) -> bool {
+    let (executable_path, executable_sha256) =
+        locked_service_expected_identity(lock, expected_executable_path, expected_executable_sha256);
+    is_verified_healthy(lock.port, cache_dir, lock.process_id, executable_path, executable_sha256)
+}
+
+fn wait_for_locked_service(
+    cache_dir: &str,
+    lock_path: &Path,
+    deadline: Duration,
+    expected_executable_path: Option<&Path>,
+    expected_executable_sha256: Option<&str>,
+) -> Option<ServiceLockPayload> {
+    let expires_at = Instant::now() + deadline;
+    while Instant::now() < expires_at {
+        if let Ok(lock) = read_service_lock(lock_path) {
+            if locked_service_matches_current_expectation(
+                cache_dir,
+                &lock,
+                expected_executable_path,
+                expected_executable_sha256,
+            ) {
+                return Some(lock);
+            }
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    None
 }
 
 fn dedupe_paths(candidates: Vec<PathBuf>) -> Vec<PathBuf> {
@@ -165,26 +383,54 @@ fn choose_port() -> Result<u16, String> {
     Ok(port)
 }
 
-fn wait_for_health(port: u16) -> Result<(), String> {
+fn wait_for_verified_health(
+    port: u16,
+    cache_dir: &str,
+    process_id: Option<u32>,
+    expected_executable_path: Option<&Path>,
+    expected_executable_sha256: Option<&str>,
+) -> Result<(), String> {
     let deadline = Instant::now() + Duration::from_secs(8);
+    let mut last_error = format!("localhost data service did not become healthy on port {port}");
     while Instant::now() < deadline {
         if let Ok(mut stream) = TcpStream::connect(("127.0.0.1", port)) {
             let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
             let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
-            let _ = stream.write_all(health_request(port).as_bytes());
+            let _ = stream.write_all(service_health_request(port).as_bytes());
             let mut raw = String::new();
             let _ = stream.read_to_string(&mut raw);
-            if raw.contains("200 OK") {
-                return Ok(());
+            match validate_service_health(
+                &raw,
+                port,
+                cache_dir,
+                process_id,
+                expected_executable_path,
+                expected_executable_sha256,
+            ) {
+                Ok(()) => return Ok(()),
+                Err(err) => last_error = err,
             }
         }
         std::thread::sleep(Duration::from_millis(200));
     }
-    Err(format!("localhost data service did not become healthy on port {port}"))
+    Err(last_error)
 }
 
-fn is_healthy(port: u16) -> bool {
-    wait_for_health(port).is_ok()
+fn is_verified_healthy(
+    port: u16,
+    cache_dir: &str,
+    process_id: Option<u32>,
+    expected_executable_path: Option<&Path>,
+    expected_executable_sha256: Option<&str>,
+) -> bool {
+    wait_for_verified_health(
+        port,
+        cache_dir,
+        process_id,
+        expected_executable_path,
+        expected_executable_sha256,
+    )
+    .is_ok()
 }
 
 fn packaged_service_relative_path() -> PathBuf {
@@ -215,7 +461,17 @@ impl DataServiceManager {
     pub fn ensure_running(&mut self, app: &AppHandle, cache_dir: &str) -> Result<DataServiceStatus, String> {
         let resolved_cache_dir = resolve_cache_dir(cache_dir)?;
         if let Some(existing) = self.service.as_mut() {
-            if existing.child.try_wait().map_err(|err| err.to_string())?.is_none() && is_healthy(existing.port) {
+            let existing_pid = existing.child.id();
+            if existing.child.try_wait().map_err(|err| err.to_string())?.is_none()
+                && cached_service_matches(&existing.cache_dir, &resolved_cache_dir)
+                && is_verified_healthy(
+                    existing.port,
+                    &resolved_cache_dir,
+                    Some(existing_pid),
+                    existing.executable_path.as_deref(),
+                    existing.executable_sha256.as_deref(),
+                )
+            {
                 return Ok(DataServiceStatus {
                     running: true,
                     port: existing.port,
@@ -230,6 +486,61 @@ impl DataServiceManager {
 
         let port = choose_port()?;
         let packaged_service = packaged_service_path(app)?;
+        let use_packaged_service = should_use_packaged_service(packaged_service.exists());
+        let expected_executable_path = if use_packaged_service {
+            Some(packaged_service.clone())
+        } else {
+            None
+        };
+        let expected_executable_sha256 = match expected_executable_path.as_deref() {
+            Some(path) => Some(file_sha256(path)?),
+            None => None,
+        };
+        let lock_path = service_lock_path(&resolved_cache_dir);
+        if let Ok(lock) = read_service_lock(&lock_path) {
+            if locked_service_matches_current_expectation(
+                &resolved_cache_dir,
+                &lock,
+                expected_executable_path.as_deref(),
+                expected_executable_sha256.as_deref(),
+            ) {
+                return Ok(DataServiceStatus {
+                    running: true,
+                    port: lock.port,
+                    base_url: format!("http://127.0.0.1:{}", lock.port),
+                    cache_dir: resolved_cache_dir,
+                    message: "local data service already running for this cache".to_string(),
+                });
+            }
+            remove_service_lock(&lock_path);
+        }
+        let pending_lock = ServiceLockPayload {
+            port,
+            cache_dir: resolved_cache_dir.clone(),
+            process_id: None,
+            executable_path: expected_executable_path
+                .as_ref()
+                .map(|path| path.to_string_lossy().to_string()),
+            executable_sha256: expected_executable_sha256.clone(),
+        };
+        if !try_create_service_lock(&lock_path, &pending_lock)? {
+            if let Some(lock) = wait_for_locked_service(
+                &resolved_cache_dir,
+                &lock_path,
+                Duration::from_secs(10),
+                expected_executable_path.as_deref(),
+                expected_executable_sha256.as_deref(),
+            ) {
+                return Ok(DataServiceStatus {
+                    running: true,
+                    port: lock.port,
+                    base_url: format!("http://127.0.0.1:{}", lock.port),
+                    cache_dir: resolved_cache_dir,
+                    message: "local data service already running for this cache".to_string(),
+                });
+            }
+            recreate_service_lock_after_timeout(&lock_path, &pending_lock)?;
+        }
         let mut command = if should_use_packaged_service(packaged_service.exists()) {
             let mut packaged = Command::new(packaged_service);
             packaged.args(["--host", "127.0.0.1", "--port", &port.to_string(), "--cache-dir", &resolved_cache_dir]);
@@ -249,13 +560,41 @@ impl DataServiceManager {
         let mut child = command
             .spawn()
             .map_err(|err| format!("failed to start localhost data service: {err}"))?;
-        if let Err(err) = wait_for_health(port) {
+        if let Err(err) = wait_for_verified_health(
+            port,
+            &resolved_cache_dir,
+            Some(child.id()),
+            expected_executable_path.as_deref(),
+            expected_executable_sha256.as_deref(),
+        ) {
+            remove_service_lock(&lock_path);
             return stop_child_after_start_failure(&mut child, err);
         }
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|err| format!("failed to inspect localhost data service after health check: {err}"))?
+        {
+            remove_service_lock(&lock_path);
+            return Err(format!("localhost data service exited immediately after health check: {status}"));
+        }
+        write_service_lock(
+            &lock_path,
+            &ServiceLockPayload {
+                port,
+                cache_dir: resolved_cache_dir.clone(),
+                process_id: Some(child.id()),
+                executable_path: expected_executable_path
+                    .as_ref()
+                    .map(|path| path.to_string_lossy().to_string()),
+                executable_sha256: expected_executable_sha256.clone(),
+            },
+        )?;
         self.service = Some(ManagedService {
             child,
             port,
             cache_dir: resolved_cache_dir.clone(),
+            executable_path: expected_executable_path,
+            executable_sha256: expected_executable_sha256,
         });
         Ok(DataServiceStatus {
             running: true,
@@ -270,9 +609,11 @@ impl DataServiceManager {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_service_args, choose_populated_cache_dir, health_request, packaged_service_relative_path,
-        stop_child_after_start_failure, runtime_data_candidates_from, workspace_cache_candidates_from_root,
-        should_use_packaged_service,
+        build_service_args, cached_service_matches, choose_populated_cache_dir, health_request,
+        file_sha256, packaged_service_relative_path, read_service_lock, service_health_request,
+        locked_service_expected_identity, require_recreated_service_lock, service_lock_path, should_use_packaged_service,
+        stop_child_after_start_failure, try_create_service_lock, runtime_data_candidates_from,
+        validate_service_health, workspace_cache_candidates_from_root, ServiceLockPayload,
     };
     use std::fs;
     use std::process::{Command, Stdio};
@@ -291,6 +632,211 @@ mod tests {
         let raw = health_request(9123);
         assert!(raw.contains("GET /ping HTTP/1.1"));
         assert!(raw.contains("Host: 127.0.0.1:9123"));
+    }
+
+    #[test]
+    fn service_health_request_targets_identity_endpoint() {
+        let raw = service_health_request(9123);
+        assert!(raw.contains("GET /identity HTTP/1.1"));
+        assert!(raw.contains("Host: 127.0.0.1:9123"));
+    }
+
+    #[test]
+    fn cached_service_matches_requested_cache_case_insensitively() {
+        let root = unique_temp_dir("cache-identity");
+        let cache_a = root.join("CacheA");
+        let cache_b = root.join("CacheB");
+        fs::create_dir_all(&cache_a).expect("cache A should exist");
+        fs::create_dir_all(&cache_b).expect("cache B should exist");
+        let cache_a_lower = cache_a.to_string_lossy().to_ascii_lowercase();
+
+        assert!(cached_service_matches(&cache_a.to_string_lossy(), &cache_a_lower));
+        assert!(!cached_service_matches(&cache_a.to_string_lossy(), &cache_b.to_string_lossy()));
+
+        fs::remove_dir_all(&root).expect("temp cache tree should be removed");
+    }
+
+    #[test]
+    fn validate_service_health_accepts_matching_identity() {
+        let root = unique_temp_dir("health-identity-ok");
+        let cache = root.join("CacheA");
+        fs::create_dir_all(&cache).expect("cache should exist");
+        let cache_lower = cache.to_string_lossy().to_ascii_lowercase();
+        let body = serde_json::json!({
+            "ok": true,
+            "cache_path": cache.to_string_lossy(),
+            "port": 9123,
+            "process_id": 4567,
+            "coverage": []
+        });
+        let raw = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{body}");
+
+        let result = validate_service_health(&raw, 9123, &cache_lower, Some(4567), None, None);
+
+        assert!(result.is_ok());
+
+        fs::remove_dir_all(&root).expect("temp cache tree should be removed");
+    }
+
+    #[test]
+    fn validate_service_health_rejects_mismatched_identity() {
+        let root = unique_temp_dir("health-identity-mismatch");
+        let cache_a = root.join("CacheA");
+        let cache_b = root.join("CacheB");
+        fs::create_dir_all(&cache_a).expect("cache A should exist");
+        fs::create_dir_all(&cache_b).expect("cache B should exist");
+        let body = serde_json::json!({
+            "ok": true,
+            "cache_path": cache_a.to_string_lossy(),
+            "port": 9123,
+            "process_id": 4567,
+            "coverage": []
+        });
+        let raw = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{body}");
+
+        assert!(validate_service_health(&raw, 9000, &cache_a.to_string_lossy(), Some(4567), None, None)
+            .unwrap_err()
+            .contains("port mismatch"));
+        assert!(validate_service_health(&raw, 9123, &cache_b.to_string_lossy(), Some(4567), None, None)
+            .unwrap_err()
+            .contains("cache mismatch"));
+        assert!(validate_service_health(&raw, 9123, &cache_a.to_string_lossy(), Some(9999), None, None)
+            .unwrap_err()
+            .contains("pid mismatch"));
+
+        fs::remove_dir_all(&root).expect("temp cache tree should be removed");
+    }
+
+    #[test]
+    fn validate_service_health_allows_packaged_onefile_child_pid_when_executable_identity_matches() {
+        let root = unique_temp_dir("health-onefile-child-pid");
+        let cache = root.join("CacheA");
+        let executable = root.join("astock-data-service.exe");
+        fs::create_dir_all(&cache).expect("cache should exist");
+        fs::write(&executable, b"packaged-sidecar").expect("executable should exist");
+        let expected_hash = file_sha256(&executable).expect("executable hash should be available");
+        let body = serde_json::json!({
+            "ok": true,
+            "cache_path": cache.to_string_lossy(),
+            "port": 9123,
+            "process_id": 9999,
+            "executable_path": executable.to_string_lossy(),
+            "executable_sha256": expected_hash,
+            "coverage": []
+        });
+        let raw = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{body}");
+
+        let result = validate_service_health(
+            &raw,
+            9123,
+            &cache.to_string_lossy(),
+            Some(4567),
+            Some(&executable),
+            Some(&expected_hash),
+        );
+
+        assert!(result.is_ok());
+
+        fs::remove_dir_all(&root).expect("temp cache tree should be removed");
+    }
+
+    #[test]
+    fn validate_service_health_rejects_mismatched_executable_identity() {
+        let root = unique_temp_dir("health-executable-mismatch");
+        let cache = root.join("CacheA");
+        let executable_a = root.join("astock-data-service-a.exe");
+        let executable_b = root.join("astock-data-service-b.exe");
+        fs::create_dir_all(&cache).expect("cache should exist");
+        fs::write(&executable_a, b"sidecar-a").expect("executable A should exist");
+        fs::write(&executable_b, b"sidecar-b").expect("executable B should exist");
+        let expected_hash = file_sha256(&executable_a).expect("executable A hash should be available");
+        let wrong_hash = file_sha256(&executable_b).expect("executable B hash should be available");
+        let body = serde_json::json!({
+            "ok": true,
+            "cache_path": cache.to_string_lossy(),
+            "port": 9123,
+            "process_id": 4567,
+            "executable_path": executable_a.to_string_lossy(),
+            "executable_sha256": expected_hash,
+            "coverage": []
+        });
+        let raw = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{body}");
+
+        assert!(validate_service_health(
+            &raw,
+            9123,
+            &cache.to_string_lossy(),
+            Some(4567),
+            Some(&executable_b),
+            Some(&expected_hash),
+        )
+        .unwrap_err()
+        .contains("executable mismatch"));
+        assert!(validate_service_health(
+            &raw,
+            9123,
+            &cache.to_string_lossy(),
+            Some(4567),
+            Some(&executable_a),
+            Some(&wrong_hash),
+        )
+        .unwrap_err()
+        .contains("executable hash mismatch"));
+
+        fs::remove_dir_all(&root).expect("temp cache tree should be removed");
+    }
+
+    #[test]
+    fn service_lock_file_is_created_exclusively_inside_cache_dir() {
+        let root = unique_temp_dir("service-lock");
+        let cache = root.join("CacheA");
+        fs::create_dir_all(&cache).expect("cache should exist");
+        let lock_path = service_lock_path(&cache.to_string_lossy());
+        let payload = ServiceLockPayload {
+            port: 9123,
+            cache_dir: cache.to_string_lossy().to_string(),
+            process_id: Some(4567),
+            executable_path: Some("D:\\New project 6\\src-tauri\\bin\\astock-data-service.exe".to_string()),
+            executable_sha256: Some("abc123".to_string()),
+        };
+
+        assert!(try_create_service_lock(&lock_path, &payload).expect("lock should be created"));
+        assert!(!try_create_service_lock(&lock_path, &payload).expect("second lock should not be created"));
+        let parsed = read_service_lock(&lock_path).expect("lock should be readable");
+
+        assert_eq!(lock_path.parent(), Some(cache.as_path()));
+        assert_eq!(parsed.port, 9123);
+        assert_eq!(parsed.cache_dir, cache.to_string_lossy());
+        assert_eq!(parsed.process_id, Some(4567));
+
+        fs::remove_dir_all(&root).expect("temp cache tree should be removed");
+    }
+
+    #[test]
+    fn recreated_service_lock_must_be_owned_before_spawning() {
+        let error = require_recreated_service_lock(false)
+            .expect_err("should not continue without owning the recreated lock");
+
+        assert!(error.contains("another localhost data service is starting"));
+        assert!(require_recreated_service_lock(true).is_ok());
+    }
+
+    #[test]
+    fn locked_service_expected_identity_prefers_current_packaged_identity() {
+        let root = unique_temp_dir("service-lock-identity");
+        let lock = ServiceLockPayload {
+            port: 9123,
+            cache_dir: "cache".to_string(),
+            process_id: Some(4567),
+            executable_path: Some("python.exe".to_string()),
+            executable_sha256: Some("debug-python-hash".to_string()),
+        };
+        let packaged = root.join("bin").join("astock-data-service.exe");
+
+        let (path, hash) = locked_service_expected_identity(&lock, Some(&packaged), Some("packaged-hash"));
+
+        assert_eq!(path, Some(packaged.as_path()));
+        assert_eq!(hash, Some("packaged-hash"));
     }
 
     #[test]

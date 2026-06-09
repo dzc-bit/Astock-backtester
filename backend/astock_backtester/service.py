@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
+import sys
 from collections import deque
 from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import pandas as pd
 import requests
@@ -15,6 +19,7 @@ import requests
 from astock_backtester.data.briefing import MarketBriefingProvider
 from astock_backtester.data.cache import LocalCache
 from astock_backtester.data.capital_flow_crawler import CapitalFlowCrawler
+from astock_backtester.data.cls_finance import ClsFinanceProvider
 from astock_backtester.data.importer import read_daily_bars
 from astock_backtester.data.operations import (
     build_daily_bars_coverage,
@@ -33,7 +38,7 @@ from astock_backtester.data.sync import SyncJobManager
 from astock_backtester.data.warehouse import Warehouse
 from astock_backtester.backtest_runner import run_configured_backtest
 from astock_backtester.condition_parser import validate_condition_text, validate_exit_condition_text
-from astock_backtester.models import BacktestSettings, StrategyConfig
+from astock_backtester.models import BacktestSettings, ClsFinanceResponse, StrategyConfig
 from astock_backtester.recommended_strategies import recommended_strategies
 
 
@@ -44,11 +49,17 @@ class DataServiceState:
         self.akshare_provider = AkshareProvider()
         self.provider = CompositeProvider([ADataProvider(), self.akshare_provider, HttpAStockProvider()])
         self.capital_flow_crawler = CapitalFlowCrawler()
-        self.sync_manager = SyncJobManager(warehouse=self.warehouse, provider=self.provider)
+        self.sync_manager = SyncJobManager(
+            warehouse=self.warehouse,
+            provider=self.provider,
+            cache=self.cache,
+            capital_flow_fetcher=self._fetch_capital_flow,
+        )
         self.realtime_provider = RealtimeMarketProvider(self.warehouse)
         self.news_provider = MarketNewsProvider()
         self.news_summary_provider = MarketNewsSummaryProvider(self.news_provider)
         self.briefing_provider = MarketBriefingProvider()
+        self.finance_provider = ClsFinanceProvider()
         self.commentary_provider = MarketCommentaryProvider(
             self.realtime_provider,
             self.news_provider,
@@ -56,6 +67,11 @@ class DataServiceState:
         )
         self.risk_provider = RiskAlertProvider(self.warehouse)
         self.port = port
+        self.started_at = datetime.now(timezone.utc)
+        self.instance_id = str(uuid4())
+        self.process_id = os.getpid()
+        self.executable_path = str(Path(sys.executable).resolve())
+        self.executable_sha256 = self._hash_executable(self.executable_path)
         self.logs: deque[dict[str, str]] = deque(maxlen=100)
         self.log("info", "local data service started")
 
@@ -67,6 +83,54 @@ class DataServiceState:
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }
         )
+
+    def _fetch_capital_flow(
+        self,
+        symbols: list[str],
+        start_date: str,
+        end_date: str,
+        *,
+        skip_eastmoney: bool = False,
+    ) -> dict[str, Any]:
+        try:
+            return self.capital_flow_crawler.fetch_many_fund_flows(
+                symbols,
+                start_date,
+                end_date,
+                timeout=15,
+                skip_eastmoney=skip_eastmoney,
+            )
+        except TypeError as exc:
+            if "skip_eastmoney" not in str(exc):
+                raise
+            return self.capital_flow_crawler.fetch_many_fund_flows(
+                symbols,
+                start_date,
+                end_date,
+                timeout=15,
+            )
+
+    def _hash_executable(self, path: str) -> str | None:
+        try:
+            digest = hashlib.sha256()
+            with open(path, "rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            return digest.hexdigest()
+        except OSError:
+            return None
+
+    def identity_payload(self) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "cache_path": str(self.cache.root.resolve()),
+            "port": self.port,
+            "process_id": self.process_id,
+            "executable_path": self.executable_path,
+            "executable_sha256": self.executable_sha256,
+            "started_at": self.started_at.isoformat(),
+            "instance_id": self.instance_id,
+        }
 
 
 def _retained_realtime_snapshot(provider: Any, exc: Exception):
@@ -88,6 +152,13 @@ def _retained_realtime_snapshot(provider: Any, exc: Exception):
         f"沿用最近成功行情快照：{retained.updated_at.isoformat()}。",
     ]
     return snapshot
+
+
+def _require_ohlc_rows(frame: pd.DataFrame) -> pd.DataFrame:
+    ohlc_columns = ["open", "high", "low", "close"]
+    if frame.empty or not all(column in frame for column in ohlc_columns):
+        return pd.DataFrame()
+    return frame.dropna(subset=ohlc_columns).reset_index(drop=True)
 
 
 class DataServiceServer(ThreadingHTTPServer):
@@ -120,8 +191,19 @@ class DataServiceHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def _write_ndjson(self, payload: dict[str, Any]) -> None:
-        self.wfile.write((json.dumps(payload, ensure_ascii=False, default=str) + "\n").encode("utf-8"))
+        self.wfile.write((json.dumps(self._jsonable(payload), ensure_ascii=False, default=str) + "\n").encode("utf-8"))
         self.wfile.flush()
+
+    def _jsonable(self, value: Any) -> Any:
+        if hasattr(value, "model_dump"):
+            return value.model_dump(mode="json")
+        if isinstance(value, dict):
+            return {key: self._jsonable(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [self._jsonable(item) for item in value]
+        if isinstance(value, tuple):
+            return [self._jsonable(item) for item in value]
+        return value
 
     def _read_json(self) -> dict[str, Any]:
         length = int(self.headers.get("Content-Length", "0"))
@@ -133,9 +215,10 @@ class DataServiceHandler(BaseHTTPRequestHandler):
         frame = self.server.state.warehouse.read_daily_bars(
             start_date=str(settings.start_date),
             end_date=str(settings.end_date),
+            require_ohlc=True,
         )
         if frame.empty:
-            frame = self.server.state.cache.read_daily_bars()
+            frame = _require_ohlc_rows(self.server.state.cache.read_daily_bars())
         if frame.empty:
             raise ValueError("No cached daily bars found. Import or fetch data before running a configured backtest.")
         return frame
@@ -169,6 +252,27 @@ class DataServiceHandler(BaseHTTPRequestHandler):
             self.server.state.log("error", str(exc))
             self._write_ndjson({"type": "error", "message": str(exc), "code": "request_failed"})
 
+    def _run_realtime_snapshot_stream(self) -> None:
+        self._send_ndjson_headers()
+        try:
+            event_source = getattr(self.server.state.realtime_provider, "market_snapshot_events", None)
+            if callable(event_source):
+                for event in event_source():
+                    self._write_ndjson(event)
+            else:
+                snapshot = self.server.state.realtime_provider.market_snapshot()
+                self._write_ndjson({"type": "result", "snapshot": snapshot})
+        except Exception as exc:
+            self.server.state.log("error", f"realtime market snapshot stream failed: {exc}")
+            snapshot = _retained_realtime_snapshot(self.server.state.realtime_provider, exc)
+            if snapshot is None:
+                snapshot = unavailable_market_snapshot(
+                    "实时行情接口暂不可用，已保留页面最近数据。",
+                    diagnostics=[f"实时行情接口失败：{exc}"],
+                )
+            self._write_ndjson({"type": "error", "message": str(exc), "code": "request_failed"})
+            self._write_ndjson({"type": "result", "snapshot": snapshot})
+
     def do_OPTIONS(self) -> None:
         self._send_json({"ok": True})
 
@@ -176,16 +280,27 @@ class DataServiceHandler(BaseHTTPRequestHandler):
         if self.path == "/ping":
             self._send_json({"ok": True})
             return
+        if self.path == "/identity":
+            self._send_json(self.server.state.identity_payload())
+            return
         if self.path == "/health":
             health = build_service_health(
                 self.server.state.cache,
                 self.server.state.warehouse,
                 port=self.server.state.port,
+                process_id=self.server.state.process_id,
+                executable_path=self.server.state.executable_path,
+                executable_sha256=self.server.state.executable_sha256,
+                started_at=self.server.state.started_at,
+                instance_id=self.server.state.instance_id,
             )
             self._send_json(health.model_dump(mode="json"))
             return
         if self.path == "/logs/recent":
             self._send_json({"items": list(self.server.state.logs)})
+            return
+        if self.path == "/realtime/market-snapshot/stream":
+            self._run_realtime_snapshot_stream()
             return
         if self.path == "/realtime/market-snapshot":
             try:
@@ -213,6 +328,17 @@ class DataServiceHandler(BaseHTTPRequestHandler):
                     diagnostics=[f"行情评价接口失败：{exc}"],
                 )
             self._send_json(commentary.model_dump(mode="json"))
+            return
+        if self.path == "/market/finance":
+            try:
+                finance = self.server.state.finance_provider.current_board()
+            except Exception as exc:
+                self.server.state.log("error", f"market finance failed: {exc}")
+                finance = ClsFinanceResponse(
+                    updated_at=datetime.now(timezone.utc),
+                    diagnostics=[f"财联社看盘接口失败：{exc}"],
+                )
+            self._send_json(finance.model_dump(mode="json"))
             return
         if self.path == "/market/news-summary":
             summary = self.server.state.news_summary_provider.latest_summary()
@@ -312,11 +438,57 @@ class DataServiceHandler(BaseHTTPRequestHandler):
                 self._send_json(result.model_dump(mode="json"))
                 return
             if self.path == "/fetch/capital-flow":
+                symbols = payload.get("symbols") or []
+                if not symbols:
+                    symbols = self._capital_flow_backfill_symbols()
+                    if not symbols:
+                        raise ValueError("No symbols available for capital-flow backfill.")
+                    job = self.server.state.sync_manager.start_capital_flow_backfill(
+                        symbols=symbols,
+                        start_date=payload["start_date"],
+                        end_date=payload["end_date"],
+                    )
+                    self.server.state.log(
+                        "info",
+                        f"Capital-flow backfill {job.status}: {job.completed_symbols}/{job.total_symbols} symbols",
+                    )
+                    self._send_json(
+                        {
+                            "status": "ok",
+                            "imported_rows": 0,
+                            "returned_rows": 0,
+                            "requested_symbols": symbols,
+                            "fetched_symbols": [],
+                            "missing_symbols": [],
+                            "skipped_symbols": [],
+                            "coverage": [
+                                item.model_dump(mode="json")
+                                for item in self.server.state.warehouse.coverage()
+                            ],
+                            "logs": [
+                                {
+                                    "level": "info",
+                                    "message": f"Capital-flow backfill started for {len(symbols)} symbols",
+                                }
+                            ],
+                            "diagnostics": [
+                                {
+                                    "code": "capital_flow_backfill_job_started",
+                                    "source": "capital_flow_crawler",
+                                    "job_id": job.job_id,
+                                    "requested_symbols": len(symbols),
+                                }
+                            ],
+                            "failures": [],
+                            "job": job.model_dump(mode="json"),
+                        }
+                    )
+                    return
                 result = fetch_capital_flow_into_cache(
                     cache=self.server.state.cache,
                     warehouse=self.server.state.warehouse,
                     capital_flow_fetcher=self._fetch_capital_flow_from_crawler,
-                    symbols=payload["symbols"],
+                    symbols=symbols,
                     start_date=payload["start_date"],
                     end_date=payload["end_date"],
                 )
@@ -324,12 +496,18 @@ class DataServiceHandler(BaseHTTPRequestHandler):
                     self.server.state.log(entry.level, entry.message)
                 self._send_json(result.model_dump(mode="json"))
                 return
-            if self.path == "/run/backtest":
-                strategy = StrategyConfig.model_validate(payload["strategy"])
-                settings = BacktestSettings.model_validate(payload["settings"])
-                frame = self._read_backtest_frame(settings)
-                result = run_configured_backtest(frame, strategy, settings)
-                self._send_json({"result": result.model_dump(mode="json")})
+            if self.path.startswith("/sync/jobs/") and self.path.endswith("/cancel"):
+                job_id = self.path.removesuffix("/cancel").rsplit("/", 1)[-1]
+                cancel_method = getattr(self.server.state.sync_manager, "cancel_job", None)
+                if not callable(cancel_method):
+                    self._send_json({"code": "not_found", "message": job_id}, HTTPStatus.NOT_FOUND)
+                    return
+                job = cancel_method(job_id)
+                if job is None:
+                    self._send_json({"code": "not_found", "message": job_id}, HTTPStatus.NOT_FOUND)
+                    return
+                self.server.state.log("info", f"Sync job cancellation requested: {job_id}")
+                self._send_json({"job": job.model_dump(mode="json")})
                 return
             if self.path == "/run/backtest/stream":
                 self._run_backtest_stream(payload)
@@ -361,12 +539,18 @@ class DataServiceHandler(BaseHTTPRequestHandler):
         return pd.concat(frames, ignore_index=True)
 
     def _fetch_capital_flow_from_crawler(self, symbols: list[str], start_date: str, end_date: str) -> dict[str, Any]:
-        return self.server.state.capital_flow_crawler.fetch_many_fund_flows(
-            symbols,
-            start_date,
-            end_date,
-            timeout=15,
-        )
+        return self.server.state._fetch_capital_flow(symbols, start_date, end_date)
+
+    def _capital_flow_backfill_symbols(self) -> list[str]:
+        symbols: set[str] = set()
+        try:
+            symbols.update(str(symbol) for symbol in self.server.state.provider.list_symbols())
+        except Exception:
+            pass
+        frame = self.server.state.warehouse.read_daily_bars()
+        if not frame.empty and "symbol" in frame:
+            symbols.update(str(symbol) for symbol in frame["symbol"].dropna().astype(str).unique())
+        return sorted(symbol for symbol in symbols if symbol)
 
 
 def create_server(host: str, port: int, cache_dir: str | Path) -> DataServiceServer:

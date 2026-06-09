@@ -43,6 +43,18 @@ def registered_conditions() -> list[ConditionDefinition]:
             ("main_net_inflow",),
         ),
         ConditionDefinition(
+            "capital_flow_today_at_least",
+            "Signal-day main net inflow",
+            "capital_flow",
+            ("main_net_inflow",),
+        ),
+        ConditionDefinition(
+            "capital_flow_n_day_positive_count_at_least",
+            "N-day positive main net inflow count",
+            "capital_flow",
+            ("main_net_inflow",),
+        ),
+        ConditionDefinition(
             "market_rising_ratio_at_least",
             "Market rising ratio",
             "market_heat",
@@ -99,6 +111,59 @@ def _capital_flow_n_day_sum_at_least(
     value = float(symbol_frame.tail(window)["main_net_inflow"].sum())
     passed = value >= minimum
     return ConditionResult(passed, f"{window}d main net inflow {value:.0f} >= {minimum:.0f}", value)
+
+
+def _capital_flow_today_at_least(
+    node: ConditionNode,
+    row: pd.Series,
+    frame: pd.DataFrame,
+) -> ConditionResult:
+    minimum = float(node.params["min"])
+    value = pd.to_numeric(row["main_net_inflow"], errors="coerce")
+    if pd.isna(value):
+        return ConditionResult(False, "signal-day main net inflow unavailable", None)
+    value = float(value)
+    return ConditionResult(value >= minimum, f"signal-day main net inflow {value:.0f} >= {minimum:.0f}", value)
+
+
+def _capital_flow_n_day_positive_count_at_least(
+    node: ConditionNode,
+    row: pd.Series,
+    frame: pd.DataFrame,
+) -> ConditionResult:
+    window = int(node.params["window"])
+    minimum = int(node.params["min_count"])
+    precomputed_column = f"main_net_inflow_positive_count_{window}d"
+    if precomputed_column in row.index:
+        value = pd.to_numeric(row[precomputed_column], errors="coerce")
+        if pd.isna(value):
+            return ConditionResult(
+                False,
+                f"{window}d positive main net inflow days unavailable before enough history",
+                None,
+            )
+        value = int(value)
+        return ConditionResult(
+            value >= minimum,
+            f"{window}d positive main net inflow days {value} >= {minimum}",
+            float(value),
+        )
+
+    symbol_frame = frame[
+        (frame["symbol"] == row["symbol"]) & (frame["trade_date"] <= row["trade_date"])
+    ].sort_values("trade_date")
+    if len(symbol_frame) < window:
+        return ConditionResult(
+            False,
+            f"{window}d positive main net inflow days unavailable before enough history",
+            None,
+        )
+    value = int((symbol_frame.tail(window)["main_net_inflow"] > 0).sum())
+    return ConditionResult(
+        value >= minimum,
+        f"{window}d positive main net inflow days {value} >= {minimum}",
+        float(value),
+    )
 
 
 def _market_rising_ratio_at_least(node: ConditionNode, row: pd.Series, frame: pd.DataFrame) -> ConditionResult:
@@ -212,6 +277,8 @@ def _breakdown_below_n_day_low(node: ConditionNode, row: pd.Series, frame: pd.Da
 EVALUATORS: dict[str, Evaluator] = {
     "market_cap_between": _market_cap_between,
     "capital_flow_n_day_sum_at_least": _capital_flow_n_day_sum_at_least,
+    "capital_flow_today_at_least": _capital_flow_today_at_least,
+    "capital_flow_n_day_positive_count_at_least": _capital_flow_n_day_positive_count_at_least,
     "market_rising_ratio_at_least": _market_rising_ratio_at_least,
     "close_above_ma": _close_above_ma,
     "close_below_ma": _close_below_ma,

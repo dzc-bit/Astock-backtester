@@ -11,16 +11,15 @@ const apiMocks = vi.hoisted(() => ({
   loadDataServiceLogs: vi.fn(),
   loadDailyBarsCoverage: vi.fn(),
   loadMarketBriefing: vi.fn(),
-  loadMarketCommentary: vi.fn(),
+  loadClsFinance: vi.fn(),
   loadMarketNews: vi.fn(),
   loadNewsSummary: vi.fn(),
   loadRealtimeMarketSnapshot: vi.fn(),
+  loadRealtimeMarketSnapshotStream: vi.fn(),
   loadRecommendedStrategies: vi.fn(),
   loadRiskAlerts: vi.fn(),
   loadSyncJob: vi.fn(),
-  loadCoverage: vi.fn(),
   runBacktestStreamWithDataService: vi.fn(),
-  runBacktestWithDataService: vi.fn(),
   runConfiguredBacktest: vi.fn(),
   validateConditionExpression: vi.fn()
 }));
@@ -132,6 +131,11 @@ describe("A 股回测工作台界面", () => {
       ],
       message: "实时行情已更新"
     });
+    apiMocks.loadRealtimeMarketSnapshotStream.mockImplementation(async (_baseUrl, handlers = {}) => {
+      const snapshot = await apiMocks.loadRealtimeMarketSnapshot();
+      handlers.onSnapshot?.(snapshot);
+      return snapshot;
+    });
     apiMocks.loadMarketNews.mockResolvedValue({
       updated_at: "2026-05-27T10:30:00Z",
       source: "eastmoney",
@@ -159,15 +163,40 @@ describe("A 股回测工作台界面", () => {
         diagnostics: []
       })
     );
-    apiMocks.loadMarketCommentary.mockResolvedValue({
-      updated_at: "2026-05-27T10:30:00Z",
-      trade_date: "2026-05-27",
-      source: "test-commentary",
-      stance: "neutral",
-      summary: "指数震荡偏强，但赚钱效应集中在少数主线。",
-      drivers: [{ title: "强势题材", detail: "半导体+3.60%，电力设备+2.40%。", weight: "high" }],
-      risks: ["量能不足时避免追高。"],
-      next_watch: ["明日先看半导体能否继续放量。"],
+    apiMocks.loadClsFinance.mockResolvedValue({
+      updated_at: "2026-06-09T07:05:00Z",
+      source: "cls-finance",
+      source_url: "https://www.cls.cn/finance",
+      preclose_px: 3959.337,
+      tline: [
+        { date: 20260609, minute: 930, last_px: 3977.539, change: 0.0047 },
+        { date: 20260609, minute: 1500, last_px: 4015.5, change: 0.0142 }
+      ],
+      anchors: [
+        { code: "cls80025", name: "PCB", article_id: 2394344, c_time: "2026-06-09 09:31:30", direction: "up", url: "https://www.cls.cn/plate?code=cls80025" },
+        { code: "cls80081", name: "油气设服", article_id: 2394352, c_time: "2026-06-09 09:39:24", direction: "down", url: "https://www.cls.cn/plate?code=cls80081" }
+      ],
+      emotion: {
+        market_degree: 56,
+        shsz_balance: "2.64万亿",
+        shsz_balance_change: "-1524亿",
+        up_limit: 130,
+        open_limit: 25,
+        performance: "1.74%",
+        breadth: { up: 3322, down: 2049, flat: 156, total: 5527, source: "cls-finance-emotion", distribution: { suspend: 12 } }
+      },
+      up_pool: [
+        {
+          symbol: "601869",
+          name: "长飞光纤",
+          change_pct: 0.1,
+          last: 484.33,
+          time: "2026-06-09 13:34:47",
+          reason: "光纤|全球光纤光缆行业领先企业。",
+          limit_up_days: 1,
+          plates: [{ code: "cls81670", name: "光纤光缆", change_pct: 0.0393 }]
+        }
+      ],
       diagnostics: []
     });
     apiMocks.loadNewsSummary.mockResolvedValue({
@@ -340,10 +369,6 @@ describe("A 股回测工作台界面", () => {
       coverage: [],
       logs: []
     });
-    apiMocks.loadCoverage.mockResolvedValue([
-      { dataset: "daily_bars", symbols: 2, start_date: "2024-01-02", end_date: "2024-01-08", missing_rows: 0 }
-    ]);
-    apiMocks.runBacktestWithDataService.mockResolvedValue(demoResult);
     apiMocks.runBacktestStreamWithDataService.mockImplementation(async (_baseUrl, _strategy, _settings, handlers) => {
       handlers.onPhase("校验参数");
       handlers.onPhase("读取本地数据");
@@ -372,7 +397,7 @@ describe("A 股回测工作台界面", () => {
     expect(await screen.findByText("上证指数")).toBeInTheDocument();
     expect(screen.getByText("红 3200")).toBeInTheDocument();
     expect(screen.getByText("绿 1700")).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "行情评价" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "财联社看盘" })).toBeInTheDocument();
     expect(screen.getAllByText("半导体").length).toBeGreaterThan(0);
     expect(await screen.findByRole("heading", { name: "资讯与事件" })).toBeInTheDocument();
     expect(screen.getAllByText("政策利好推动科技板块走强").length).toBeGreaterThan(0);
@@ -444,7 +469,6 @@ describe("A 股回测工作台界面", () => {
         onResult: expect.any(Function)
       })
     );
-    expect(apiMocks.runBacktestWithDataService).not.toHaveBeenCalled();
     expect(apiMocks.runConfiguredBacktest).not.toHaveBeenCalled();
     expect(await screen.findByText("交易次数 1")).toBeInTheDocument();
     expect(screen.getAllByText(/流通市值/).length).toBeGreaterThan(0);
@@ -870,22 +894,22 @@ describe("A 股回测工作台界面", () => {
 
     render(<App />);
 
-    expect(await screen.findByText("行情评价")).toBeInTheDocument();
-    expect(await screen.findByText("指数震荡偏强，但赚钱效应集中在少数主线。")).toBeInTheDocument();
-    expect(screen.getAllByText(/半导体\+3\.60%/).length).toBeGreaterThan(0);
+    expect(await screen.findByText("财联社看盘")).toBeInTheDocument();
+    expect((await screen.findAllByText("市场热度")).length).toBeGreaterThan(0);
+    expect(await screen.findByText("涨停 130")).toBeInTheDocument();
+    expect(screen.getByText("PCB")).toBeInTheDocument();
     expect(screen.queryByText(/收盘后板块解读/)).not.toBeInTheDocument();
   });
 
-  it("shows defensive market commentary when the commentary API fails", async () => {
-    apiMocks.loadMarketCommentary.mockRejectedValue(new Error("commentary upstream timeout"));
+  it("shows an empty CLS finance state when the finance API fails", async () => {
+    apiMocks.loadClsFinance.mockRejectedValue(new Error("finance upstream timeout"));
 
     render(<App />);
 
-    const panel = await screen.findByRole("region", { name: "行情评价" });
-    await waitFor(() => expect(panel).toHaveTextContent("防守"));
-    expect(panel).toHaveTextContent("实时盘面暂不可用");
-    expect(panel).toHaveTextContent("依据不完整");
-    expect(panel).toHaveTextContent("行情评价接口失败：commentary upstream timeout");
+    const panel = await screen.findByRole("region", { name: "财联社看盘" });
+    await waitFor(() => expect(panel).toHaveTextContent("暂无财联社看盘"));
+    expect(panel).not.toHaveTextContent("行情评价");
+    expect(panel).not.toHaveTextContent("明日观察");
   });
 
   it("tracks yesterday's strong sectors in the market panel and commentary", async () => {
@@ -916,23 +940,12 @@ describe("A 股回测工作台界面", () => {
       ],
       message: "实时行情已更新；昨日强势板块追踪来自本地历史。"
     });
-    apiMocks.loadMarketCommentary.mockResolvedValue({
-      updated_at: "2026-05-27T10:30:00Z",
-      trade_date: "2026-05-27",
-      source: "test-commentary",
-      stance: "neutral",
-      summary: "昨日强势延续：机器人仍在榜，说明资金没有完全散场。",
-      drivers: [{ title: "昨日强势延续", detail: "机器人、半导体继续在观察名单。", weight: "medium" }],
-      risks: ["旧热点承接不足时不要追高。"],
-      next_watch: ["明日先看机器人能否继续放量。"],
-      diagnostics: []
-    });
 
     render(<App />);
 
     expect(await screen.findByText("昨日强势追踪")).toBeInTheDocument();
     expect((await screen.findAllByText(/机器人/)).length).toBeGreaterThan(0);
-    expect((await screen.findAllByText(/昨日强势延续/)).length).toBeGreaterThan(0);
+    expect(await screen.findByText("财联社看盘")).toBeInTheDocument();
     expect(screen.getAllByText(/半导体/).length).toBeGreaterThan(0);
   });
 

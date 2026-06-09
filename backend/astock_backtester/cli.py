@@ -19,6 +19,13 @@ from astock_backtester.models import (
 from astock_backtester.sample_data import sample_daily_bars
 
 
+def _require_ohlc_rows(frame: Any) -> Any:
+    ohlc_columns = ["open", "high", "low", "close"]
+    if frame.empty or not all(column in frame for column in ohlc_columns):
+        return frame.iloc[0:0] if hasattr(frame, "iloc") else frame
+    return frame.dropna(subset=ohlc_columns).reset_index(drop=True)
+
+
 def _default_strategy() -> StrategyConfig:
     return StrategyConfig(
         name="demo",
@@ -115,7 +122,7 @@ def handle_command(payload: dict[str, Any]) -> dict[str, Any]:
             strategy = StrategyConfig.model_validate(payload["strategy"])
             settings = BacktestSettings.model_validate(payload["settings"])
             cache_dir = payload.get("cache_dir")
-            frame = LocalCache(cache_dir).read_daily_bars() if cache_dir else sample_daily_bars()
+            frame = _require_ohlc_rows(LocalCache(cache_dir).read_daily_bars()) if cache_dir else sample_daily_bars()
             if frame.empty:
                 raise ValueError("No cached daily bars found. Import or fetch data before running a configured backtest.")
             result = run_configured_backtest(frame, strategy, settings)

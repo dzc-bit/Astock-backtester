@@ -11,6 +11,7 @@ from astock_backtester.models import (
     MarketNewsResponse,
     RealtimeMarketSnapshot,
 )
+from astock_backtester.data.briefing import _is_noisy_content_line
 from astock_backtester.data.realtime import is_valid_full_market_breadth
 
 
@@ -127,7 +128,7 @@ class MarketCommentaryProvider:
     realtime_provider: object
     news_provider: object | None = None
     briefing_provider: object | None = None
-    snapshot_timeout: float | None = 10.0
+    snapshot_timeout: float | None = 30.0
 
     def current_commentary(self) -> MarketCommentaryResponse:
         now = datetime.now(timezone.utc)
@@ -350,9 +351,9 @@ class MarketCommentaryProvider:
         if briefing is None:
             return None
 
-        basis_parts = [briefing.summary.strip()] if briefing.summary.strip() else []
+        basis_parts = [briefing.summary.strip()] if briefing.summary.strip() and not _is_noisy_content_line(briefing.summary) else []
         for section in briefing.sections[:2]:
-            if section.content:
+            if section.content and not _is_noisy_content_line(section.content):
                 basis_parts.append(section.content.strip())
         basis = " ".join(part for part in basis_parts if part)
         if not basis:

@@ -4,7 +4,7 @@ from datetime import date, datetime
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator, model_serializer, model_validator
 
 
 class ConditionOperator(str, Enum):
@@ -144,9 +144,11 @@ class DailyBarsCoverageResponse(BaseModel):
 class DataOperationResult(BaseModel):
     status: Literal["ok", "partial"]
     imported_rows: int
+    returned_rows: int = 0
     requested_symbols: list[str] = Field(default_factory=list)
     fetched_symbols: list[str] = Field(default_factory=list)
     missing_symbols: list[str] = Field(default_factory=list)
+    skipped_symbols: list[str] = Field(default_factory=list)
     coverage: list[DatasetCoverage]
     logs: list[ServiceLogEntry] = Field(default_factory=list)
     diagnostics: list[dict[str, Any]] = Field(default_factory=list)
@@ -157,21 +159,31 @@ class ServiceHealth(BaseModel):
     ok: bool
     cache_path: str
     port: int | None = None
+    process_id: int | None = None
+    executable_path: str | None = None
+    executable_sha256: str | None = None
+    started_at: datetime | None = None
+    instance_id: str | None = None
     coverage: list[DatasetCoverage]
 
 
 class SyncJobStatus(BaseModel):
     job_id: str
-    mode: Literal["full_market_bootstrap", "incremental_update", "retry_failed"]
-    status: Literal["running", "completed", "completed_with_errors", "failed"]
+    mode: Literal["full_market_bootstrap", "capital_flow_backfill", "incremental_update", "retry_failed"]
+    status: Literal["running", "cancelling", "cancelled", "completed", "completed_with_errors", "failed"]
     total_symbols: int
     completed_symbols: int = 0
     failed_symbols: int = 0
+    processed_symbols: int = 0
+    skipped_symbols: int = 0
     imported_rows: int = 0
+    returned_rows: int = 0
     current_symbol: str | None = None
     start_date: date
     end_date: date
     errors: list[str] = Field(default_factory=list)
+    last_error: str | None = None
+    recent_failures: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class MarketIndexQuote(BaseModel):
@@ -191,6 +203,14 @@ class MarketBreadth(BaseModel):
     flat: int
     total: int
     source: str
+    distribution: dict[str, int] = Field(default_factory=dict)
+
+    @model_serializer(mode="wrap")
+    def serialize_model(self, handler):
+        data = handler(self)
+        if not self.distribution:
+            data.pop("distribution", None)
+        return data
 
 
 class SectorMover(BaseModel):
@@ -252,6 +272,61 @@ class MarketCommentaryResponse(BaseModel):
     drivers: list[MarketCommentaryPoint] = Field(default_factory=list)
     risks: list[str] = Field(default_factory=list)
     next_watch: list[str] = Field(default_factory=list)
+    diagnostics: list[str] = Field(default_factory=list)
+
+
+class ClsFinanceTlinePoint(BaseModel):
+    date: int | None = None
+    minute: int
+    last_px: float
+    change: float | None = None
+
+
+class ClsFinanceAnchor(BaseModel):
+    code: str
+    name: str
+    article_id: int | None = None
+    c_time: str | None = None
+    direction: Literal["up", "down", "flat"] = "flat"
+    url: str | None = None
+
+
+class ClsFinancePlate(BaseModel):
+    code: str
+    name: str
+    change_pct: float | None = None
+
+
+class ClsFinancePoolItem(BaseModel):
+    symbol: str
+    name: str
+    change_pct: float | None = None
+    last: float | None = None
+    time: str | None = None
+    reason: str | None = None
+    limit_up_days: int | None = None
+    plates: list[ClsFinancePlate] = Field(default_factory=list)
+
+
+class ClsFinanceEmotion(BaseModel):
+    market_degree: float | None = None
+    shsz_balance: str | None = None
+    shsz_balance_change: str | None = None
+    breadth: MarketBreadth | None = None
+    up_limit: int | None = None
+    open_limit: int | None = None
+    performance: str | None = None
+
+
+class ClsFinanceResponse(BaseModel):
+    updated_at: datetime
+    source: str = "cls-finance"
+    source_url: str = "https://www.cls.cn/finance"
+    preclose_px: float | None = None
+    tline: list[ClsFinanceTlinePoint] = Field(default_factory=list)
+    anchors: list[ClsFinanceAnchor] = Field(default_factory=list)
+    emotion: ClsFinanceEmotion | None = None
+    up_pool: list[ClsFinancePoolItem] = Field(default_factory=list)
     diagnostics: list[str] = Field(default_factory=list)
 
 

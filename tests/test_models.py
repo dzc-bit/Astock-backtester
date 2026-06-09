@@ -5,11 +5,18 @@ from pydantic import ValidationError
 
 from astock_backtester.models import (
     BacktestSettings,
+    ClsFinanceAnchor,
+    ClsFinanceEmotion,
+    ClsFinancePoolItem,
+    ClsFinanceResponse,
+    ClsFinanceTlinePoint,
     ConditionGroup,
     ConditionNode,
     ConditionOperator,
     DatasetCoverage,
+    MarketBreadth,
     StrategyConfig,
+    SyncJobStatus,
 )
 
 
@@ -111,6 +118,90 @@ def test_dataset_coverage_tracks_market_cap_and_capital_flow():
 
     assert coverage.dataset == "capital_flow"
     assert coverage.missing_rows == 3
+
+
+def test_market_breadth_keeps_optional_cls_distribution():
+    breadth = MarketBreadth(
+        up=3322,
+        down=2049,
+        flat=156,
+        total=5527,
+        source="cls-quote-breadth",
+        distribution={"up_10": 291, "flat": 156, "down_10": 34, "suspend": 12},
+    )
+
+    assert breadth.distribution["up_10"] == 291
+    assert breadth.distribution["suspend"] == 12
+
+
+def test_cls_finance_response_serializes_market_board_data():
+    response = ClsFinanceResponse(
+        updated_at="2026-06-09T09:31:00+08:00",
+        source="cls-finance",
+        source_url="https://www.cls.cn/finance",
+        preclose_px=3959.337,
+        tline=[ClsFinanceTlinePoint(date=20260609, minute=930, last_px=3977.539, change=0.0047)],
+        anchors=[
+            ClsFinanceAnchor(
+                code="cls80025",
+                name="PCB",
+                article_id=2394344,
+                c_time="2026-06-09 09:31:30",
+                direction="up",
+                url="https://www.cls.cn/plate?code=cls80025",
+            )
+        ],
+        emotion=ClsFinanceEmotion(
+            market_degree=56.0,
+            breadth=MarketBreadth(up=3322, down=2049, flat=156, total=5527, source="cls-finance-emotion"),
+            up_limit=130,
+            open_limit=25,
+            performance="1.74%",
+        ),
+        up_pool=[
+            ClsFinancePoolItem(
+                symbol="601869",
+                name="长飞光纤",
+                change_pct=0.1,
+                last=484.33,
+                time="2026-06-09 13:34:47",
+                reason="光纤",
+                limit_up_days=1,
+            )
+        ],
+    )
+
+    payload = response.model_dump(mode="json")
+
+    assert payload["source"] == "cls-finance"
+    assert payload["anchors"][0]["name"] == "PCB"
+    assert payload["emotion"]["market_degree"] == 56.0
+    assert payload["up_pool"][0]["symbol"] == "601869"
+
+
+def test_sync_job_status_tracks_batch_progress_and_cancellation():
+    status = SyncJobStatus(
+        job_id="job-flow",
+        mode="capital_flow_backfill",
+        status="cancelled",
+        total_symbols=5,
+        completed_symbols=2,
+        failed_symbols=1,
+        processed_symbols=3,
+        imported_rows=12,
+        returned_rows=18,
+        skipped_symbols=1,
+        start_date=date(2026, 6, 1),
+        end_date=date(2026, 6, 5),
+        last_error="000003: remote disconnected",
+        recent_failures=[{"symbol": "000003", "reason": "remote disconnected"}],
+    )
+
+    assert status.status == "cancelled"
+    assert status.processed_symbols == 3
+    assert status.returned_rows == 18
+    assert status.skipped_symbols == 1
+    assert status.last_error == "000003: remote disconnected"
 
 
 def test_condition_operator_accepts_and_or_score():

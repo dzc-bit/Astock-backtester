@@ -3,15 +3,16 @@ from __future__ import annotations
 import json
 import re
 import time as monotonic_time
-from concurrent.futures import ThreadPoolExecutor, TimeoutError
+from concurrent.futures import ThreadPoolExecutor, TimeoutError, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta, timezone
-from typing import Callable, Iterable
+from typing import Any, Callable, Iterable
 
 import pandas as pd
 import requests
 from bs4 import BeautifulSoup
 
+from astock_backtester.data.cls import CLS_QUOTE_BASE_URL, cls_request_json
 from astock_backtester.data.providers import normalize_symbol
 from astock_backtester.data.warehouse import Warehouse
 from astock_backtester.models import (
@@ -51,6 +52,8 @@ THS_INDUSTRY_HTML_URL = "https://q.10jqka.com.cn/thshy/index/field/199112/order/
 THS_INDUSTRY_DETAIL_URL = "https://q.10jqka.com.cn/thshy/detail/code/{board_code}/"
 THS_HOT_TOPIC_URL = "http://zx.10jqka.com.cn/event/api/getharden/date/{date}/orderby/date/orderway/desc/charset/GBK/"
 TENCENT_QUOTE_URL = "https://qt.gtimg.cn/q={symbols}"
+CLS_QUOTE_HOME_URL = f"{CLS_QUOTE_BASE_URL}/quote/index/home"
+CLS_HOT_PLATE_URL = f"{CLS_QUOTE_BASE_URL}/web_quote/plate/hot_plate"
 EASTMONEY_A_SPOT_URL = "https://82.push2.eastmoney.com/api/qt/clist/get"
 EASTMONEY_SECTOR_URLS = [
     "https://push2.eastmoney.com/api/qt/clist/get",
@@ -238,6 +241,88 @@ def _quote_from_sina(symbol: str, name: str, values: list[str]) -> MarketIndexQu
     )
 
 
+def _quote_from_cls_home(row: dict) -> MarketIndexQuote | None:
+    symbol = str(row.get("secu_code") or "").strip()
+    name = str(row.get("secu_name") or symbol).strip()
+    if not symbol:
+        return None
+    last = _parse_float(row.get("last_px"))
+    if last is None:
+        return None
+    previous_close = _parse_float(row.get("preclose_px"))
+    change = _parse_float(row.get("change_px"))
+    change_pct = _normalize_change_pct(row.get("change"))
+    return MarketIndexQuote(
+        symbol=symbol,
+        name=name,
+        last=last,
+        previous_close=previous_close,
+        change=change,
+        change_pct=change_pct,
+        source="cls-quote-index",
+    )
+
+
+def _breadth_from_cls_distribution(data: dict) -> MarketBreadth | None:
+    if not isinstance(data, dict):
+        return None
+    up = _parse_int(data.get("rise_num", data.get("up_num")))
+    down = _parse_int(data.get("fall_num", data.get("down_num")))
+    flat = _parse_int(data.get("flat_num")) or 0
+    if up is None or down is None:
+        return None
+    distribution = {
+        "up_limit": _parse_int(data.get("up_num")) or 0,
+        "up_10": _parse_int(data.get("up_10")) or 0,
+        "up_8": _parse_int(data.get("up_8")) or 0,
+        "up_6": _parse_int(data.get("up_6")) or 0,
+        "up_4": _parse_int(data.get("up_4")) or 0,
+        "up_2": _parse_int(data.get("up_2")) or 0,
+        "flat": flat,
+        "down_2": _parse_int(data.get("down_2")) or 0,
+        "down_4": _parse_int(data.get("down_4")) or 0,
+        "down_6": _parse_int(data.get("down_6")) or 0,
+        "down_8": _parse_int(data.get("down_8")) or 0,
+        "down_10": _parse_int(data.get("down_10")) or 0,
+        "down_limit": _parse_int(data.get("down_num")) or 0,
+        "suspend": _parse_int(data.get("suspend_num")) or 0,
+    }
+    return MarketBreadth(
+        up=up,
+        down=down,
+        flat=flat,
+        total=up + down + flat,
+        source="cls-quote-breadth",
+        distribution=distribution,
+    )
+
+
+def _sector_rows_from_cls_hot_plate(payload: dict) -> list[dict]:
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(data, dict):
+        return []
+    rows: list[dict] = []
+    for group in ("industry", "concept", "area"):
+        items = data.get(group)
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            leader = None
+            up_stock = item.get("up_stock")
+            if isinstance(up_stock, list) and up_stock and isinstance(up_stock[0], dict):
+                leader = up_stock[0].get("secu_code")
+            rows.append(
+                {
+                    "name": item.get("secu_name"),
+                    "change_pct": item.get("change"),
+                    "leading_symbol": leader,
+                }
+            )
+    return rows
+
+
 def _dedupe_sectors(groups: Iterable[SectorMover], limit: int = 10) -> list[SectorMover]:
     sectors: list[SectorMover] = []
     seen: set[str] = set()
@@ -388,9 +473,19 @@ class RealtimeMarketProvider:
     _heavy_market_provider: HeavyMarketCrawlerProvider | None = field(default=None, init=False, repr=False)
 
     def market_snapshot(self) -> RealtimeMarketSnapshot:
+        for event in self.market_snapshot_events():
+            if event.get("type") == "result":
+                snapshot = event.get("snapshot")
+                if isinstance(snapshot, RealtimeMarketSnapshot):
+                    return snapshot
+        raise RuntimeError("Realtime market snapshot stream ended without a result.")
+
+    def market_snapshot_events(self) -> Iterable[dict[str, Any]]:
         now = datetime.now(timezone.utc)
         phase = _market_phase(now)
         diagnostics: list[str] = []
+        breadth_diagnostics: list[str] = []
+        sector_diagnostics: list[str] = []
         phase_note = _phase_diagnostic(phase)
         if phase_note:
             diagnostics.append(phase_note)
@@ -398,16 +493,82 @@ class RealtimeMarketProvider:
         self._ths_industry_rows_cache = None
         self._last_live_sector_rows = []
         self._skip_local_topic_fetch_once = False
-        indexes = self._fetch_indexes()
-        try:
-            live_breadth = self._fetch_live_breadth(diagnostics)
-        except TypeError:
-            live_breadth = self._fetch_live_breadth()
-        live_sectors = self._fetch_live_sectors_with_budget(diagnostics)
+
+        indexes: list[MarketIndexQuote] = []
+        live_breadth: MarketBreadth | None = None
+        live_sectors: list[SectorMover] = []
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            futures = {
+                executor.submit(self._fetch_indexes): "indexes",
+                executor.submit(self._call_live_breadth, breadth_diagnostics): "breadth",
+                executor.submit(self._fetch_live_sectors_with_budget, sector_diagnostics): "sectors",
+            }
+            for future in as_completed(futures):
+                event_type = futures[future]
+                try:
+                    value = future.result()
+                except Exception as exc:
+                    diagnostics.append(f"实时行情{event_type}分块读取失败：{exc}")
+                    value = [] if event_type != "breadth" else None
+                if event_type == "indexes":
+                    indexes = value
+                    yield {
+                        "type": "indexes",
+                        "indexes": indexes,
+                        "updated_at": now,
+                        "market_phase": phase,
+                        "diagnostics": list(diagnostics),
+                    }
+                elif event_type == "breadth":
+                    live_breadth = value
+                    yield {
+                        "type": "breadth",
+                        "breadth": live_breadth,
+                        "updated_at": now,
+                        "market_phase": phase,
+                        "diagnostics": [*diagnostics, *breadth_diagnostics],
+                    }
+                else:
+                    live_sectors = value
+                    yield {
+                        "type": "sectors",
+                        "strong_sectors": live_sectors,
+                        "updated_at": now,
+                        "market_phase": phase,
+                        "diagnostics": [*diagnostics, *sector_diagnostics],
+                    }
+        diagnostics.extend(breadth_diagnostics)
+        diagnostics.extend(sector_diagnostics)
         local_snapshot = self._snapshot_from_local(now)
         strong_sectors = live_sectors or local_snapshot.strong_sectors
         yesterday_sectors = local_snapshot.yesterday_strong_sectors
         breadth = live_breadth or local_snapshot.breadth
+        if not live_breadth and breadth:
+            yield {
+                "type": "breadth",
+                "breadth": breadth,
+                "updated_at": now,
+                "market_phase": phase,
+                "diagnostics": list(diagnostics),
+            }
+        if not live_sectors and strong_sectors:
+            yield {
+                "type": "sectors",
+                "strong_sectors": strong_sectors,
+                "yesterday_strong_sectors": yesterday_sectors,
+                "updated_at": now,
+                "market_phase": phase,
+                "diagnostics": list(diagnostics),
+            }
+        elif live_sectors:
+            yield {
+                "type": "sectors",
+                "strong_sectors": strong_sectors,
+                "yesterday_strong_sectors": yesterday_sectors,
+                "updated_at": now,
+                "market_phase": phase,
+                "diagnostics": list(diagnostics),
+            }
         has_live_context = bool(indexes and live_breadth and live_sectors)
         has_partial_realtime_context = bool(indexes or live_breadth or live_sectors)
         status = "live" if has_live_context else ("stale" if has_partial_realtime_context else local_snapshot.status)
@@ -454,7 +615,8 @@ class RealtimeMarketProvider:
         )
         if snapshot.status == "live" and _is_renderable_snapshot(snapshot):
             self._last_successful_snapshot = snapshot.model_copy(deep=True)
-            return snapshot
+            yield {"type": "result", "snapshot": snapshot}
+            return
         if self._last_successful_snapshot is not None and not indexes:
             retained = self._last_successful_snapshot.model_copy(deep=True)
             retained.status = "stale"
@@ -472,8 +634,15 @@ class RealtimeMarketProvider:
                 *diagnostics,
                 f"沿用最近成功行情快照：{self._last_successful_snapshot.updated_at.isoformat()}。",
             ]
-            return retained
-        return snapshot
+            yield {"type": "result", "snapshot": retained}
+            return
+        yield {"type": "result", "snapshot": snapshot}
+
+    def _call_live_breadth(self, diagnostics: list[str]) -> MarketBreadth | None:
+        try:
+            return self._fetch_live_breadth(diagnostics)
+        except TypeError:
+            return self._fetch_live_breadth()
 
     def _fetch_live_sectors_with_budget(self, diagnostics: list[str]) -> list[SectorMover]:
         if self.sector_time_budget is None:
@@ -501,6 +670,9 @@ class RealtimeMarketProvider:
             return self._fetch_live_sectors()
 
     def _fetch_indexes(self) -> list[MarketIndexQuote]:
+        cls_quotes = self._fetch_cls_indexes()
+        if cls_quotes:
+            return cls_quotes
         symbols = ",".join(symbol for symbol, _ in INDEXES)
         url = f"https://hq.sinajs.cn/list={symbols}"
         try:
@@ -521,6 +693,26 @@ class RealtimeMarketProvider:
                 quotes.append(quote)
         return quotes
 
+    def _fetch_cls_home_payload(self) -> dict[str, Any]:
+        return cls_request_json(
+            self.requester,
+            CLS_QUOTE_HOME_URL,
+            timeout=min(self.timeout, 2.5),
+        )
+
+    def _fetch_cls_indexes(self) -> list[MarketIndexQuote]:
+        try:
+            payload = self._fetch_cls_home_payload()
+        except Exception:
+            return []
+        rows = payload.get("data", {}).get("index_quote", []) if isinstance(payload, dict) else []
+        if not isinstance(rows, list):
+            return []
+        quotes = [quote for row in rows if isinstance(row, dict) and (quote := _quote_from_cls_home(row))]
+        preferred = {symbol for symbol, _ in INDEXES}
+        ordered = [quote for quote in quotes if quote.symbol in preferred]
+        return ordered or quotes[: len(INDEXES)]
+
     def _sector_request_timeout(self, max_seconds: float | None = None) -> float:
         timeout = self.sector_source_timeout
         if self.sector_time_budget is not None:
@@ -531,6 +723,10 @@ class RealtimeMarketProvider:
 
     def _fetch_live_sectors(self, diagnostics: list[str] | None = None) -> list[SectorMover]:
         diagnostics = diagnostics if diagnostics is not None else []
+        cls_sectors = self._fetch_cls_hot_plate_sectors(diagnostics)
+        if cls_sectors:
+            return _dedupe_sectors(cls_sectors, 10)
+        diagnostics.append("cls-hot-plate strong-sector source returned no valid rows.")
         ths_concept_rows = self._fetch_ths_concept_section_rows()
         ths_concept_sectors = self._parse_sector_rows(ths_concept_rows, "ths-concept-section")
         if ths_concept_sectors:
@@ -589,6 +785,23 @@ class RealtimeMarketProvider:
             diagnostics.append("ths-hot-reason strong-topic source returned no valid rows.")
         return []
 
+    def _fetch_cls_hot_plate_sectors(self, diagnostics: list[str]) -> list[SectorMover]:
+        try:
+            payload = cls_request_json(
+                self.requester,
+                CLS_HOT_PLATE_URL,
+                params={"type": "industry,concept,area", "way": "change", "rever": 1},
+                timeout=self._sector_request_timeout(max_seconds=2.0),
+            )
+        except Exception as exc:
+            diagnostics.append(f"cls-hot-plate strong-sector source failed: {exc}")
+            return []
+        rows = _sector_rows_from_cls_hot_plate(payload)
+        sectors = self._parse_sector_rows(rows, "cls-hot-plate")
+        if sectors:
+            self._last_live_sector_rows = rows
+        return sectors
+
     def _parse_sector_rows(self, rows: list[dict], source: str) -> list[SectorMover]:
         sectors: list[SectorMover] = []
         for row in rows:
@@ -612,6 +825,7 @@ class RealtimeMarketProvider:
     def _fetch_live_breadth(self, diagnostics: list[str]) -> MarketBreadth | None:
         local_symbol_count = max(self._latest_local_symbol_count(), self._coverage_symbol_count())
         fetchers: list[tuple[str, Callable[[], MarketBreadth | None]]] = [
+            ("财联社涨跌分布", self._fetch_cls_breadth),
             ("同花顺市场总览", self._fetch_ths_market_summary_breadth),
             ("Sina 批量实时个股", self._fetch_sina_breadth),
             ("Tencent 批量实时个股", lambda: self._fetch_tencent_breadth(diagnostics)),
@@ -631,6 +845,11 @@ class RealtimeMarketProvider:
             if self._breadth_is_complete(breadth, local_symbol_count, diagnostics):
                 return breadth
         return None
+
+    def _fetch_cls_breadth(self) -> MarketBreadth | None:
+        payload = self._fetch_cls_home_payload()
+        distribution = payload.get("data", {}).get("up_down_dis", {}) if isinstance(payload, dict) else {}
+        return _breadth_from_cls_distribution(distribution)
 
     def _breadth_is_complete(
         self,

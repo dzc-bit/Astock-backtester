@@ -428,19 +428,22 @@ def test_fetch_capital_flow_into_cache_backfills_existing_daily_rows_only(tmp_pa
     assert any("Capital-flow crawler merged 2 rows" in entry.message for entry in result.logs)
 
 
-def test_fetch_capital_flow_into_cache_reports_requested_symbols_without_daily_rows(tmp_path):
+def test_fetch_capital_flow_into_cache_writes_standalone_rows_without_daily_rows(tmp_path):
     cache = LocalCache(tmp_path)
     warehouse = Warehouse(tmp_path)
-    warehouse.write_daily_bars(
-        _bars(
-            [
-                ("AAA", "2024-01-02", 10.0, 11.0, 9.0, 10.5, 1000, 0.1, 9_000_000_000.0, 1_500_000.0, False, False, 90),
-            ]
-        )
-    )
 
     def fake_capital_flow_fetcher(symbols: list[str], start_date: str, end_date: str) -> dict:
-        raise AssertionError(f"crawler should not run without missing local inflow rows: {symbols}")
+        assert symbols == ["AAA", "BBB"]
+        assert start_date == "2024-01-02"
+        assert end_date == "2024-01-03"
+        return {
+            "rows": [
+                {"symbol": "AAA", "trade_date": "2024-01-02", "main_net_inflow": 1_500_000.0},
+                {"symbol": "AAA", "trade_date": "2024-01-03", "main_net_inflow": -2_000_000.0},
+            ],
+            "failures": [],
+            "diagnostics": [],
+        }
 
     result = fetch_capital_flow_into_cache(
         cache=cache,
@@ -451,11 +454,215 @@ def test_fetch_capital_flow_into_cache_reports_requested_symbols_without_daily_r
         end_date="2024-01-03",
     )
 
+    stored = warehouse.read_daily_bars(symbols=["AAA"])
+    datasets = {item.dataset: item for item in result.coverage}
+
     assert result.status == "partial"
-    assert result.imported_rows == 0
-    assert result.fetched_symbols == []
+    assert result.imported_rows == 2
+    assert result.fetched_symbols == ["AAA"]
     assert result.missing_symbols == ["BBB"]
-    assert any(item["code"] == "capital_flow_backfill_no_daily_rows_for_symbol" and item["symbol"] == "BBB" for item in result.diagnostics)
+    assert stored["main_net_inflow"].tolist() == [1_500_000.0, -2_000_000.0]
+    assert stored[["open", "high", "low", "close"]].isna().all().all()
+    assert datasets["capital_flow"].symbols == 1
+    assert datasets["daily_bars"].symbols == 0
+    assert datasets["daily_bars"].missing_rows == 0
+    assert any(item["code"] == "capital_flow_crawler_standalone_rows" for item in result.diagnostics)
+
+
+def test_fetch_capital_flow_into_cache_marks_shortfall_diagnostics_as_partial(tmp_path):
+    cache = LocalCache(tmp_path)
+    warehouse = Warehouse(tmp_path)
+
+    def fake_capital_flow_fetcher(symbols: list[str], start_date: str, end_date: str) -> dict:
+        return {
+            "rows": [{"symbol": "AAA", "trade_date": "2024-01-02", "main_net_inflow": 1_500_000.0}],
+            "failures": [],
+            "diagnostics": [
+                {
+                    "symbol": "AAA",
+                    "code": "date_coverage_shortfall",
+                    "message": "returned 2024-01-02 to 2024-01-02 for requested 2024-01-02 to 2024-01-03",
+                }
+            ],
+        }
+
+    result = fetch_capital_flow_into_cache(
+        cache=cache,
+        warehouse=warehouse,
+        capital_flow_fetcher=fake_capital_flow_fetcher,
+        symbols=["AAA"],
+        start_date="2024-01-02",
+        end_date="2024-01-03",
+    )
+
+    assert result.status == "partial"
+    assert result.imported_rows == 1
+    assert result.returned_rows == 1
+    assert result.missing_symbols == ["AAA"]
+    assert result.failures == [
+        {
+            "symbol": "AAA",
+            "code": "date_coverage_shortfall",
+            "error": "date_coverage_shortfall: returned 2024-01-02 to 2024-01-02 for requested 2024-01-02 to 2024-01-03",
+        }
+    ]
+
+
+def test_fetch_capital_flow_into_cache_allows_standalone_shortfall_without_daily_gap(tmp_path):
+    cache = LocalCache(tmp_path)
+    warehouse = Warehouse(tmp_path)
+
+    def fake_capital_flow_fetcher(symbols: list[str], start_date: str, end_date: str) -> dict:
+        return {
+            "rows": [
+                {"symbol": "AAA", "trade_date": "2024-01-02", "main_net_inflow": 1_500_000.0},
+                {"symbol": "AAA", "trade_date": "2024-01-03", "main_net_inflow": -2_000_000.0},
+            ],
+            "failures": [],
+            "diagnostics": [
+                {
+                    "symbol": "AAA",
+                    "code": "date_coverage_shortfall",
+                    "provider": "sina",
+                    "message": "returned 2024-01-02 to 2024-01-03 for requested 2015-01-01 to 2024-01-03",
+                }
+            ],
+        }
+
+    result = fetch_capital_flow_into_cache(
+        cache=cache,
+        warehouse=warehouse,
+        capital_flow_fetcher=fake_capital_flow_fetcher,
+        symbols=["AAA"],
+        start_date="2015-01-01",
+        end_date="2024-01-03",
+    )
+
+    assert result.status == "ok"
+    assert result.imported_rows == 2
+    assert result.fetched_symbols == ["AAA"]
+    assert result.missing_symbols == []
+    assert result.failures == []
+    assert any(item["code"] == "date_coverage_shortfall" for item in result.diagnostics)
+
+
+def test_fetch_capital_flow_into_cache_allows_sina_common_gaps_after_large_import(tmp_path):
+    cache = LocalCache(tmp_path)
+    warehouse = Warehouse(tmp_path)
+    warehouse.write_daily_bars(
+        _bars(
+            [
+                ("AAA", "2024-01-02", 10.0, 11.0, 9.0, 10.5, 1000, 0.1, 9_000_000_000.0, float("nan"), False, False, 90),
+                ("AAA", "2024-01-03", 10.2, 11.1, 9.8, 10.7, 1000, 0.1, 9_000_000_000.0, float("nan"), False, False, 91),
+            ]
+        )
+    )
+
+    def fake_capital_flow_fetcher(symbols: list[str], start_date: str, end_date: str) -> dict:
+        return {
+            "rows": [{"symbol": "AAA", "trade_date": "2024-01-02", "main_net_inflow": 1_500_000.0}],
+            "failures": [],
+            "diagnostics": [
+                {
+                    "symbol": "AAA",
+                    "code": "provider_fallback_used",
+                    "provider": "sina",
+                    "rows": 1,
+                },
+                {
+                    "symbol": "AAA",
+                    "code": "date_coverage_shortfall",
+                    "provider": "sina",
+                    "message": "provider has a known common missing date",
+                },
+            ],
+        }
+
+    result = fetch_capital_flow_into_cache(
+        cache=cache,
+        warehouse=warehouse,
+        capital_flow_fetcher=fake_capital_flow_fetcher,
+        symbols=["AAA"],
+        start_date="2024-01-02",
+        end_date="2024-01-03",
+    )
+
+    assert result.status == "ok"
+    assert result.imported_rows == 1
+    assert result.fetched_symbols == ["AAA"]
+    assert result.missing_symbols == []
+    assert result.failures == []
+    assert any(item["code"] == "date_coverage_shortfall" for item in result.diagnostics)
+
+
+def test_fetch_capital_flow_into_cache_marks_known_source_gap_remaining(tmp_path):
+    cache = LocalCache(tmp_path)
+    warehouse = Warehouse(tmp_path)
+    warehouse.write_daily_bars(
+        _bars(
+            [
+                ("AAA", "2019-04-04", 10.0, 11.0, 9.0, 10.5, 1000, 0.1, 9_000_000_000.0, float("nan"), False, False, 90),
+                ("AAA", "2019-04-08", 10.5, 11.5, 10.0, 11.0, 1200, 0.1, 9_100_000_000.0, float("nan"), False, False, 91),
+            ]
+        )
+    )
+
+    def fake_capital_flow_fetcher(symbols: list[str], start_date: str, end_date: str) -> dict:
+        return {
+            "rows": [{"symbol": "AAA", "trade_date": "2019-04-08", "main_net_inflow": 1_500_000.0}],
+            "failures": [],
+            "diagnostics": [],
+        }
+
+    result = fetch_capital_flow_into_cache(
+        cache=cache,
+        warehouse=warehouse,
+        capital_flow_fetcher=fake_capital_flow_fetcher,
+        symbols=["AAA"],
+        start_date="2019-04-04",
+        end_date="2019-04-08",
+    )
+
+    assert result.status == "ok"
+    assert result.missing_symbols == []
+    assert result.failures == []
+    assert any(
+        item["code"] == "capital_flow_known_source_gap_remaining" and item["symbol"] == "AAA"
+        for item in result.diagnostics
+    )
+
+
+def test_fetch_capital_flow_into_cache_skips_listing_lag_source_start_gap(tmp_path):
+    cache = LocalCache(tmp_path)
+    warehouse = Warehouse(tmp_path)
+    warehouse.write_daily_bars(
+        _bars(
+            [
+                ("603027", "2016-03-07", 10.0, 11.0, 9.0, 10.5, 1000, 0.1, 9_000_000_000.0, float("nan"), False, False, 1),
+                ("603027", "2016-03-08", 10.5, 11.5, 10.0, 11.0, 1200, 0.1, 9_100_000_000.0, 1_500_000.0, False, False, 2),
+            ]
+        )
+    )
+
+    calls: list[list[str]] = []
+
+    def fake_capital_flow_fetcher(symbols: list[str], start_date: str, end_date: str) -> dict:
+        calls.append(symbols)
+        return {"rows": [], "failures": [], "diagnostics": []}
+
+    result = fetch_capital_flow_into_cache(
+        cache=cache,
+        warehouse=warehouse,
+        capital_flow_fetcher=fake_capital_flow_fetcher,
+        symbols=["603027"],
+        start_date="2016-03-07",
+        end_date="2016-03-08",
+    )
+
+    assert result.status == "ok"
+    assert calls == []
+    assert result.skipped_symbols == ["603027"]
+    assert any(item["code"] == "capital_flow_backfill_not_needed" for item in result.diagnostics)
 
 
 def test_fetch_capital_flow_into_cache_keeps_missing_daily_symbols_when_other_symbols_backfill(tmp_path):
@@ -470,7 +677,7 @@ def test_fetch_capital_flow_into_cache_keeps_missing_daily_symbols_when_other_sy
     )
 
     def fake_capital_flow_fetcher(symbols: list[str], start_date: str, end_date: str) -> dict:
-        assert symbols == ["AAA"]
+        assert symbols == ["AAA", "BBB"]
         return {
             "rows": [{"symbol": "AAA", "trade_date": "2024-01-02", "main_net_inflow": 1_500_000.0}],
             "failures": [],
@@ -483,14 +690,138 @@ def test_fetch_capital_flow_into_cache_keeps_missing_daily_symbols_when_other_sy
         capital_flow_fetcher=fake_capital_flow_fetcher,
         symbols=["AAA", "BBB"],
         start_date="2024-01-02",
-        end_date="2024-01-03",
+        end_date="2024-01-02",
     )
 
     assert result.status == "partial"
     assert result.imported_rows == 1
     assert result.fetched_symbols == ["AAA"]
     assert result.missing_symbols == ["BBB"]
-    assert any(item["code"] == "capital_flow_backfill_no_daily_rows_for_symbol" and item["symbol"] == "BBB" for item in result.diagnostics)
+    assert any(
+        item["code"] == "capital_flow_crawler_merge" and item["requested_symbols"] == 2
+        for item in result.diagnostics
+    )
+
+
+def test_fetch_capital_flow_into_cache_reports_returned_rows_and_skipped_complete_symbols(tmp_path):
+    cache = LocalCache(tmp_path)
+    warehouse = Warehouse(tmp_path)
+    initial = _bars(
+        [
+            ("AAA", "2024-01-02", 10.0, 11.0, 9.0, 10.5, 1000, 0.1, 9_000_000_000.0, 1_000_000.0, False, False, 90),
+            ("BBB", "2024-01-02", 20.0, 21.0, 19.0, 20.5, 900, 0.2, 20_000_000_000.0, float("nan"), False, False, 120),
+        ]
+    )
+    warehouse.write_daily_bars(initial)
+
+    def fake_capital_flow_fetcher(symbols: list[str], start_date: str, end_date: str) -> dict:
+        assert symbols == ["BBB"]
+        return {
+            "rows": [
+                {"symbol": "BBB", "trade_date": "2024-01-02", "main_net_inflow": 2_500_000.0},
+                {"symbol": "BBB", "trade_date": "2024-01-03", "main_net_inflow": 2_600_000.0},
+            ],
+            "failures": [],
+            "diagnostics": [],
+        }
+
+    result = fetch_capital_flow_into_cache(
+        cache=cache,
+        warehouse=warehouse,
+        capital_flow_fetcher=fake_capital_flow_fetcher,
+        symbols=["AAA", "BBB"],
+        start_date="2024-01-02",
+        end_date="2024-01-02",
+    )
+
+    assert result.imported_rows == 1
+    assert any(
+        item["code"] == "capital_flow_crawler_fetch_summary"
+        and item["requested_symbols"] == 1
+        and item["returned_rows"] == 2
+        and item["skipped_symbols"] == ["AAA"]
+        for item in result.diagnostics
+    )
+    assert any(
+        item["code"] == "capital_flow_symbol_summary"
+        and item["symbol"] == "BBB"
+        and item["returned_rows"] == 2
+        and item["imported_rows"] == 1
+        for item in result.diagnostics
+    )
+
+
+def test_fetch_capital_flow_into_cache_marks_returned_existing_rows_as_processed(tmp_path):
+    cache = LocalCache(tmp_path)
+    warehouse = Warehouse(tmp_path)
+    initial = _bars(
+        [
+            ("AAA", "2024-01-02", 10.0, 11.0, 9.0, 10.5, 1000, 0.1, 9_000_000_000.0, 1_000_000.0, False, False, 90),
+            ("AAA", "2024-01-03", 10.0, 11.0, 9.0, 10.5, 1000, 0.1, 9_000_000_000.0, float("nan"), False, False, 91),
+        ]
+    )
+    warehouse.write_daily_bars(initial)
+
+    def fake_capital_flow_fetcher(symbols: list[str], start_date: str, end_date: str) -> dict:
+        return {
+            "rows": [{"symbol": "AAA", "trade_date": "2024-01-02", "main_net_inflow": 1_000_000.0}],
+            "failures": [],
+            "diagnostics": [
+                {
+                    "symbol": "AAA",
+                    "code": "provider_fallback_used",
+                    "provider": "sina",
+                    "rows": 1,
+                }
+            ],
+        }
+
+    result = fetch_capital_flow_into_cache(
+        cache=cache,
+        warehouse=warehouse,
+        capital_flow_fetcher=fake_capital_flow_fetcher,
+        symbols=["AAA"],
+        start_date="2024-01-02",
+        end_date="2024-01-03",
+    )
+
+    assert result.status == "ok"
+    assert result.imported_rows == 0
+    assert result.returned_rows == 1
+    assert result.fetched_symbols == ["AAA"]
+    assert result.missing_symbols == []
+
+
+def test_fetch_capital_flow_into_cache_can_defer_expensive_coverage_refresh(tmp_path):
+    cache = LocalCache(tmp_path)
+    warehouse = Warehouse(tmp_path)
+
+    def fake_capital_flow_fetcher(symbols: list[str], start_date: str, end_date: str) -> dict:
+        return {
+            "rows": [{"symbol": "AAA", "trade_date": "2024-01-02", "main_net_inflow": 1_000_000.0}],
+            "failures": [],
+            "diagnostics": [],
+        }
+
+    def fail_if_called():
+        raise AssertionError("coverage should be deferred during batch backfill")
+
+    warehouse.coverage = fail_if_called  # type: ignore[method-assign]
+    cache.coverage = fail_if_called  # type: ignore[method-assign]
+
+    result = fetch_capital_flow_into_cache(
+        cache=cache,
+        warehouse=warehouse,
+        capital_flow_fetcher=fake_capital_flow_fetcher,
+        symbols=["AAA"],
+        start_date="2024-01-02",
+        end_date="2024-01-02",
+        refresh_coverage=False,
+    )
+
+    assert result.status == "ok"
+    assert result.imported_rows == 1
+    assert result.coverage == []
 
 
 def test_health_payload_includes_cache_path_and_port(tmp_path):
@@ -506,11 +837,25 @@ def test_health_payload_includes_cache_path_and_port(tmp_path):
         source="unit-test",
     )
 
-    health = build_service_health(cache=cache, warehouse=warehouse, port=8765)
+    health = build_service_health(
+        cache=cache,
+        warehouse=warehouse,
+        port=8765,
+        process_id=1234,
+        executable_path="D:\\New project 6\\src-tauri\\bin\\astock-data-service.exe",
+        executable_sha256="abc123",
+        started_at="2026-06-08T01:02:03+00:00",
+        instance_id="instance-1",
+    )
 
     assert result.imported_rows == 1
     assert health.port == 8765
     assert health.cache_path == str(cache.root.resolve())
+    assert health.process_id == 1234
+    assert health.executable_path.endswith("astock-data-service.exe")
+    assert health.executable_sha256 == "abc123"
+    assert health.started_at is not None
+    assert health.instance_id == "instance-1"
     assert [item.dataset for item in health.coverage] == ["daily_bars", "capital_flow", "market_cap"]
 
 

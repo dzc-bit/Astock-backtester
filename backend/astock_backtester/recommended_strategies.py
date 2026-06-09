@@ -101,7 +101,7 @@ def _all_recommendations() -> list[RecommendedStrategy]:
             description="把主力净流入与均线趋势结合，优先选择资金确认的趋势股。",
             suitable_market="主线明确、成交活跃时使用。",
             risk_note="需要本地资金流数据完整，否则应先补齐资金流覆盖。",
-            example_conditions=["近3日主力净流入大于300万", "收盘价站上20日均线", "MACD柱线大于0"],
+            example_conditions=["近3日主力净流入大于300万", "近3日主力净流入为正至少2天", "收盘价站上20日均线"],
             scenario="主线加速",
             featured=True,
             required_datasets=["daily_bars", "market_cap", "capital_flow"],
@@ -117,6 +117,12 @@ def _all_recommendations() -> list[RecommendedStrategy]:
                         operator=ConditionOperator.AND,
                         conditions=[
                             _node("flow", "capital_flow_n_day_sum_at_least", {"window": 3, "min": 3_000_000}, "近3日主力净流入大于300万"),
+                            _node(
+                                "flow-days",
+                                "capital_flow_n_day_positive_count_at_least",
+                                {"window": 3, "min_count": 2},
+                                "近3日主力净流入为正至少2天",
+                            ),
                             _node("ma", "close_above_ma", {"window": 20}, "收盘价站上20日均线"),
                             _node("macd", "macd_histogram_at_least", {"min": 0}, "MACD柱线大于0"),
                         ],

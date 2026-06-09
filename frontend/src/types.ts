@@ -18,6 +18,11 @@ export type DataServiceHealth = {
   ok: boolean;
   cache_path: string;
   port: number | null;
+  process_id?: number | null;
+  executable_path?: string | null;
+  executable_sha256?: string | null;
+  started_at?: string | null;
+  instance_id?: string | null;
   coverage: DatasetCoverage[];
 };
 
@@ -44,13 +49,16 @@ export type ServiceLogEntry = {
 export type FetchResult = {
   status: "ok" | "partial";
   imported_rows: number;
+  returned_rows?: number;
   requested_symbols: string[];
   fetched_symbols: string[];
   missing_symbols: string[];
+  skipped_symbols?: string[];
   coverage: DatasetCoverage[];
   logs: ServiceLogEntry[];
   diagnostics?: Array<Record<string, unknown>>;
   failures?: Array<Record<string, unknown>>;
+  job?: SyncJobStatus;
 };
 
 export type ImportResult = {
@@ -62,16 +70,21 @@ export type ImportResult = {
 
 export type SyncJobStatus = {
   job_id: string;
-  mode: "full_market_bootstrap" | "incremental_update" | "retry_failed";
-  status: "running" | "completed" | "completed_with_errors" | "failed";
+  mode: "full_market_bootstrap" | "capital_flow_backfill" | "incremental_update" | "retry_failed";
+  status: "running" | "cancelling" | "cancelled" | "completed" | "completed_with_errors" | "failed";
   total_symbols: number;
   completed_symbols: number;
   failed_symbols: number;
+  processed_symbols?: number;
+  skipped_symbols?: number;
   imported_rows: number;
+  returned_rows?: number;
   current_symbol?: string | null;
   start_date: string;
   end_date: string;
   errors: string[];
+  last_error?: string | null;
+  recent_failures?: Array<Record<string, unknown>>;
 };
 
 export type MarketIndexQuote = {
@@ -91,6 +104,7 @@ export type MarketBreadth = {
   flat: number;
   total: number;
   source: string;
+  distribution?: Record<string, number>;
 };
 
 export type SectorMover = {
@@ -171,22 +185,58 @@ export type MarketBriefingResponse = {
   diagnostics: string[];
 };
 
-export type MarketCommentaryPoint = {
-  title: string;
-  detail: string;
-  weight: "high" | "medium" | "low";
+export type ClsFinanceTlinePoint = {
+  date?: number | null;
+  minute: number;
+  last_px: number;
+  change?: number | null;
 };
 
-export type MarketCommentaryResponse = {
+export type ClsFinanceAnchor = {
+  code: string;
+  name: string;
+  article_id?: number | null;
+  c_time?: string | null;
+  direction: "up" | "down" | "flat";
+  url?: string | null;
+};
+
+export type ClsFinancePlate = {
+  code: string;
+  name: string;
+  change_pct?: number | null;
+};
+
+export type ClsFinancePoolItem = {
+  symbol: string;
+  name: string;
+  change_pct?: number | null;
+  last?: number | null;
+  time?: string | null;
+  reason?: string | null;
+  limit_up_days?: number | null;
+  plates: ClsFinancePlate[];
+};
+
+export type ClsFinanceEmotion = {
+  market_degree?: number | null;
+  shsz_balance?: string | null;
+  shsz_balance_change?: string | null;
+  breadth?: MarketBreadth | null;
+  up_limit?: number | null;
+  open_limit?: number | null;
+  performance?: string | null;
+};
+
+export type ClsFinanceResponse = {
   updated_at: string;
-  trade_date: string;
   source: string;
-  mode?: "intraday" | "lunch_break_review" | "post_close" | "non_trading_review" | "news_fallback" | "local_brief_review";
-  stance: "positive" | "neutral" | "defensive";
-  summary: string;
-  drivers: MarketCommentaryPoint[];
-  risks: string[];
-  next_watch: string[];
+  source_url: string;
+  preclose_px?: number | null;
+  tline: ClsFinanceTlinePoint[];
+  anchors: ClsFinanceAnchor[];
+  emotion?: ClsFinanceEmotion | null;
+  up_pool: ClsFinancePoolItem[];
   diagnostics: string[];
 };
 
