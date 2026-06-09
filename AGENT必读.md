@@ -29,7 +29,7 @@ git branch --show-current
 https://github.com/dzc-bit/Astock-backtester.git
 ```
 
-保护已有未提交修改。不要覆盖无关文件，不要清理、删除、迁移 `D:\New project 6\运行产物`。版本号统一保持 `1.2.1`，除非用户明确要求改版本。
+保护已有未提交修改。不要覆盖无关文件，不要清理、删除、迁移 `D:\New project 6\运行产物`。版本号统一保持 `1.2.2`，除非用户明确要求改版本。
 
 ## 2. 绝对不要碰错边界
 
@@ -135,7 +135,7 @@ source 语义：
 
 ## 8. 资金流 crawler
 
-资金流 crawler 已纳入 `1.2.1`，并且是主要资金流补齐手段：
+资金流 crawler 已纳入当前版本，并且是主要资金流补齐手段：
 
 ```text
 backend/astock_backtester/data/capital_flow_crawler.py

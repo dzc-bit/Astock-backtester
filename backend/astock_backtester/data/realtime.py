@@ -342,6 +342,14 @@ def _append_yesterday_sector_note(message: str, yesterday_sectors: list[SectorMo
     return f"{message} {YESTERDAY_SECTOR_TRACKING_NOTE}"
 
 
+def _unique_sources(values: Iterable[str | None]) -> list[str]:
+    sources: list[str] = []
+    for value in values:
+        if value and value not in sources:
+            sources.append(value)
+    return sources
+
+
 def _market_phase(now: datetime) -> str:
     local = now.astimezone(timezone(timedelta(hours=8)))
     if local.weekday() >= 5:
@@ -584,7 +592,7 @@ class RealtimeMarketProvider:
             diagnostics.append("实时强势题材接口暂不可用，已回退到本地最近交易日题材聚合。")
         source_parts: list[str] = []
         if indexes:
-            source_parts.append("ashare-sina")
+            source_parts.extend(_unique_sources(quote.source for quote in indexes))
         if live_breadth:
             source_parts.append(live_breadth.source)
         elif local_snapshot.breadth:
@@ -599,7 +607,11 @@ class RealtimeMarketProvider:
         if not indexes:
             message = local_snapshot.message
         else:
-            message = self._build_live_message(live_breadth, live_sectors)
+            message = self._build_live_message(
+                live_breadth,
+                live_sectors,
+                index_source=indexes[0].source if indexes else None,
+            )
         message = _append_yesterday_sector_note(message, yesterday_sectors)
         snapshot = RealtimeMarketSnapshot(
             status=status,
@@ -1514,8 +1526,14 @@ class RealtimeMarketProvider:
         self,
         live_breadth: MarketBreadth | None,
         live_sectors: list[SectorMover],
+        index_source: str | None = "ashare-sina",
     ) -> str:
+        index_label = {
+            "cls-quote-index": "财联社指数",
+            "ashare-sina": "Ashare/Sina",
+        }.get(index_source, "实时接口")
         breadth_label = {
+            "cls-quote-breadth": "财联社涨跌分布",
             "ths-market-summary": "同花顺市场总览",
             "sina-a-share-live": "新浪实时个股",
             "tencent-a-share-live": "腾讯实时个股",
@@ -1525,6 +1543,7 @@ class RealtimeMarketProvider:
             "eastmoney-a-share-spot": "东方财富轻量 spot 备选",
         }.get(live_breadth.source if live_breadth else None)
         sector_label = {
+            "cls-hot-plate": "财联社热门板块",
             "ths-hot-reason": "同花顺热点归因",
             "ths-concept-section": "同花顺概念题材板块",
             "ths-industry-html": "同花顺行业板块总览",
@@ -1536,12 +1555,12 @@ class RealtimeMarketProvider:
         }.get(live_sectors[0].source if live_sectors else None)
 
         if sector_label and breadth_label:
-            return f"实时指数来自 Ashare/Sina，强势题材来自{sector_label}，红绿家数来自{breadth_label}。"
+            return f"实时指数来自{index_label}，强势题材来自{sector_label}，红绿家数来自{breadth_label}。"
         if sector_label:
-            return f"实时指数来自 Ashare/Sina，强势题材来自{sector_label}，红绿家数暂不可用，未展示全市场宽度。"
+            return f"实时指数来自{index_label}，强势题材来自{sector_label}，红绿家数暂不可用，未展示全市场宽度。"
         if breadth_label:
-            return f"实时指数来自 Ashare/Sina，红绿家数来自{breadth_label}，强势题材暂不可用。"
-        return "实时指数来自 Ashare/Sina，红绿家数与强势题材暂不可用，已保留可用的最近数据。"
+            return f"实时指数来自{index_label}，红绿家数来自{breadth_label}，强势题材暂不可用。"
+        return f"实时指数来自{index_label}，红绿家数与强势题材暂不可用，已保留可用的最近数据。"
 
     def _snapshot_from_local(self, now: datetime) -> RealtimeMarketSnapshot:
         try:

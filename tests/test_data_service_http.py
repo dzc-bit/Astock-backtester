@@ -1026,6 +1026,11 @@ def test_service_realtime_market_snapshot_prefers_cls_breadth_and_hot_plate(tmp_
         assert response["strong_sectors"][0]["source"] == "cls-hot-plate"
         assert abs(response["strong_sectors"][0]["change_pct"] - 0.0706) < 0.000001
         assert response["strong_sectors"][0]["leading_symbol"] == "300576"
+        assert response["source"] == "cls-quote-index+cls-quote-breadth+cls-hot-plate"
+        assert "实时指数来自财联社指数" in response["message"]
+        assert "红绿家数来自财联社涨跌分布" in response["message"]
+        assert "强势题材来自财联社热门板块" in response["message"]
+        assert "暂不可用" not in response["message"]
         assert any("quote/index/home" in url for url in requested_urls)
         assert any("web_quote/plate/hot_plate" in url for url in requested_urls)
     finally:
