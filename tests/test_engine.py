@@ -235,6 +235,46 @@ def test_backtest_reports_metrics_and_equity_curve(basic_strategy, basic_setting
     assert result.metrics.max_position_pct >= result.metrics.average_position_pct
 
 
+def test_equity_curve_does_not_deduct_next_day_buy_cash_on_signal_date():
+    frame = pd.DataFrame(
+        [
+            backtest_row("2024-01-02", close=10.0),
+            backtest_row("2024-01-03", open_price=10.0, high=10.1, low=9.9, close=10.0, pre_close=10.0),
+            backtest_row("2024-01-04", open_price=10.0, high=10.1, low=9.9, close=10.0, pre_close=10.0),
+        ]
+    )
+    settings = BacktestSettings(
+        start_date=pd.Timestamp("2024-01-02").date(),
+        end_date=pd.Timestamp("2024-01-04").date(),
+        initial_cash=100_000,
+        fixed_holding_days=20,
+        max_positions=1,
+        max_daily_buys=1,
+        min_listing_days=0,
+        position_sizing_mode="fixed_ratio",
+        position_size_pct=0.5,
+        slippage_rate=0,
+        fee_rate=0,
+        stamp_tax_rate=0,
+        take_profit_pct=None,
+        stop_loss_pct=None,
+    )
+
+    events = []
+
+    result = run_backtest(frame, simple_market_cap_strategy(), settings, on_event=lambda event: events.append(event))
+
+    opened_trade = next(event["trade"] for event in events if event["type"] == "trade_opened")
+    assert opened_trade.buy_signal_date.isoformat() == "2024-01-02"
+    assert opened_trade.buy_date.isoformat() == "2024-01-03"
+    assert result.equity_curve[0].trade_date.isoformat() == "2024-01-02"
+    assert result.equity_curve[0].equity == pytest.approx(100_000)
+    assert result.equity_curve[0].cash == pytest.approx(100_000)
+    assert result.equity_curve[0].market_value == pytest.approx(0)
+    assert result.equity_curve[1].cash < result.equity_curve[0].cash
+    assert result.equity_curve[1].market_value > 0
+
+
 def test_preflight_reports_missing_capital_flow_when_required(basic_strategy, basic_settings):
     data = enriched_data().drop(columns=["main_net_inflow"])
 
@@ -252,6 +292,101 @@ def test_preflight_reports_empty_capital_flow_values_when_required(basic_strateg
 
     assert any(issue.code == "empty_capital_flow" and issue.severity == "error" for issue in result.preflight_issues)
     assert result.trades == []
+
+
+def test_preflight_reports_empty_capital_flow_for_positive_count_strategy(basic_settings):
+    data = enriched_data()
+    data["main_net_inflow"] = float("nan")
+    strategy = StrategyConfig(
+        name="flow-positive-days",
+        market_filters=[],
+        entry_groups=[
+            ConditionGroup(
+                id="entry",
+                operator=ConditionOperator.AND,
+                conditions=[
+                    ConditionNode(
+                        id="flow-days",
+                        condition_id="capital_flow_n_day_positive_count_at_least",
+                        params={"window": 3, "min_count": 2},
+                    )
+                ],
+            )
+        ],
+        exit_rules=[],
+    )
+
+    result = run_backtest(data, strategy, basic_settings)
+
+    assert any(issue.code == "empty_capital_flow" and issue.severity == "error" for issue in result.preflight_issues)
+    assert result.trades == []
+
+
+def test_backtest_filters_by_today_and_positive_count_capital_flow_conditions():
+    dates = pd.to_datetime(["2024-01-02", "2024-01-03", "2024-01-04", "2024-01-05"])
+    rows = []
+    for symbol, flows in {
+        "AAA": [1_000_000, -1_000_000, 2_000_000, 3_000_000],
+        "BBB": [1_000_000, -1_000_000, -2_000_000, 4_000_000],
+    }.items():
+        for trade_date, flow in zip(dates, flows, strict=True):
+            rows.append(
+                {
+                    "symbol": symbol,
+                    "trade_date": trade_date,
+                    "open": 10.0,
+                    "high": 10.3,
+                    "low": 9.8,
+                    "close": 10.0,
+                    "volume": 1000,
+                    "is_suspended": False,
+                    "listing_days": 500,
+                    "float_market_cap": 2_000_000_000,
+                    "main_net_inflow": flow,
+                    "market_rising_ratio": 1.0,
+                    "main_net_inflow_positive_count_3d": (
+                        float("nan") if trade_date < pd.Timestamp("2024-01-04") else sum(item > 0 for item in flows[: dates.get_loc(trade_date) + 1][-3:])
+                    ),
+                }
+            )
+    frame = pd.DataFrame(rows)
+    strategy = StrategyConfig(
+        name="flow-prefilter",
+        market_filters=[],
+        entry_groups=[
+            ConditionGroup(
+                id="entry",
+                operator=ConditionOperator.AND,
+                conditions=[
+                    ConditionNode(id="flow-today", condition_id="capital_flow_today_at_least", params={"min": 2_500_000}),
+                    ConditionNode(
+                        id="flow-days",
+                        condition_id="capital_flow_n_day_positive_count_at_least",
+                        params={"window": 3, "min_count": 2},
+                    ),
+                ],
+            )
+        ],
+        exit_rules=[],
+    )
+    settings = BacktestSettings(
+        start_date=dates[0].date(),
+        end_date=dates[-1].date(),
+        initial_cash=100_000,
+        fixed_holding_days=3,
+        max_positions=2,
+        max_daily_buys=2,
+        min_listing_days=0,
+        slippage_rate=0,
+        fee_rate=0,
+        stamp_tax_rate=0,
+    )
+
+    result = run_backtest(frame, strategy, settings)
+
+    assert result.latest_strategy_matches is not None
+    assert [match.symbol for match in result.latest_strategy_matches.matches] == ["AAA"]
+    assert any("positive main net inflow days" in reason for reason in result.latest_strategy_matches.matches[0].reasons)
 
 
 def test_market_cap_strategy_requires_non_empty_market_cap(basic_strategy, basic_settings):
@@ -851,7 +986,7 @@ def test_conservative_execution_records_actual_buy_and_sell_prices_and_amounts()
     assert trade.pnl_pct == pytest.approx(trade.sell_amount / trade.buy_amount - 1)
 
 
-def test_take_profit_uses_trigger_price_instead_of_open_when_not_conservative():
+def test_take_profit_triggers_exit_but_uses_next_open_execution_price():
     frame = pd.DataFrame(
         [
             backtest_row("2024-01-02", close=10.0),
@@ -877,11 +1012,46 @@ def test_take_profit_uses_trigger_price_instead_of_open_when_not_conservative():
     result = run_backtest(frame, simple_market_cap_strategy(), settings)
 
     trade = result.trades[0]
-    assert trade.sell_price == pytest.approx(10.8)
+    assert trade.sell_price == pytest.approx(10.1)
     assert any("止盈触发" in reason for reason in trade.sell_reason)
 
 
-def test_stop_loss_uses_trigger_price_instead_of_open_when_not_conservative():
+def test_take_profit_uses_next_open_execution_price_so_returns_are_not_artificially_identical():
+    rows = [
+        backtest_row("2024-01-02", symbol="AAA", close=10.0),
+        backtest_row("2024-01-02", symbol="BBB", close=20.0),
+        backtest_row("2024-01-03", symbol="AAA", open_price=10.0, high=10.2, low=9.9, close=10.0, pre_close=10.0),
+        backtest_row("2024-01-03", symbol="BBB", open_price=20.0, high=20.3, low=19.8, close=20.0, pre_close=20.0),
+        backtest_row("2024-01-04", symbol="AAA", open_price=10.4, high=10.9, low=10.3, close=10.6, pre_close=10.0),
+        backtest_row("2024-01-04", symbol="BBB", open_price=23.0, high=24.0, low=22.8, close=23.5, pre_close=20.0),
+    ]
+    frame = pd.DataFrame(rows)
+    settings = BacktestSettings(
+        start_date=pd.Timestamp("2024-01-02").date(),
+        end_date=pd.Timestamp("2024-01-04").date(),
+        initial_cash=100_000,
+        fixed_holding_days=20,
+        take_profit_pct=0.08,
+        max_positions=2,
+        max_daily_buys=2,
+        min_listing_days=0,
+        slippage_rate=0,
+        fee_rate=0,
+        stamp_tax_rate=0,
+        conservative_execution=False,
+    )
+
+    result = run_backtest(frame, simple_market_cap_strategy(), settings)
+
+    trades_by_symbol = {trade.symbol: trade for trade in result.trades}
+    assert trades_by_symbol["AAA"].sell_price == pytest.approx(10.4)
+    assert trades_by_symbol["BBB"].sell_price == pytest.approx(23.0)
+    assert trades_by_symbol["AAA"].pnl_pct == pytest.approx(0.04)
+    assert trades_by_symbol["BBB"].pnl_pct == pytest.approx(0.15)
+    assert len({round(trade.pnl_pct or 0, 4) for trade in result.trades}) == 2
+
+
+def test_stop_loss_triggers_exit_but_uses_next_open_execution_price():
     frame = pd.DataFrame(
         [
             backtest_row("2024-01-02", close=10.0),
@@ -907,7 +1077,7 @@ def test_stop_loss_uses_trigger_price_instead_of_open_when_not_conservative():
     result = run_backtest(frame, simple_market_cap_strategy(), settings)
 
     trade = result.trades[0]
-    assert trade.sell_price == pytest.approx(9.4)
+    assert trade.sell_price == pytest.approx(9.9)
     assert any("止损触发" in reason for reason in trade.sell_reason)
 
 

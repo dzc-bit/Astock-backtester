@@ -1,10 +1,12 @@
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DataCenter } from "./DataCenter";
 
 const apiMocks = vi.hoisted(() => ({
+  cancelSyncJob: vi.fn(),
   ensureDataService: vi.fn(),
+  fetchCapitalFlow: vi.fn(),
   fetchDailyBars: vi.fn(),
   importDailyBars: vi.fn(),
   loadDataServiceHealth: vi.fn(),
@@ -31,6 +33,7 @@ describe("DataCenter", () => {
 
   beforeEach(() => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.clearAllMocks();
     vi.setSystemTime(new Date("2026-06-07T10:00:00+08:00"));
     apiMocks.ensureDataService.mockResolvedValue({
       running: true,
@@ -69,6 +72,17 @@ describe("DataCenter", () => {
       coverage,
       logs: [{ level: "info", message: "Fetched 3 daily bar rows" }]
     });
+    apiMocks.fetchCapitalFlow.mockResolvedValue({
+      status: "ok",
+      imported_rows: 1,
+      requested_symbols: ["600519"],
+      fetched_symbols: ["600519"],
+      missing_symbols: [],
+      coverage,
+      logs: [{ level: "info", message: "Capital-flow crawler merged 1 rows as primary main_net_inflow source" }],
+      diagnostics: [{ code: "capital_flow_crawler_merge", merged_rows: 1, source: "capital_flow_crawler" }],
+      failures: []
+    });
     apiMocks.importDailyBars.mockResolvedValue({
       status: "ok",
       imported_rows: 2,
@@ -100,14 +114,7 @@ describe("DataCenter", () => {
     expect(apiMocks.ensureDataService).toHaveBeenCalledWith(".astock-cache");
     expect(apiMocks.loadDataServiceHealth).toHaveBeenCalledWith("http://127.0.0.1:9011");
     expect(onCoverageChange).toHaveBeenCalledWith(coverage);
-    expect(apiMocks.loadDailyBarsCoverage).toHaveBeenCalledWith(
-      "http://127.0.0.1:9011",
-      ["600519"],
-      "2026-06-01",
-      "2026-06-05"
-    );
-    expect(screen.getByText("600519")).toBeInTheDocument();
-    expect(screen.getByText(/2024-01-04/)).toBeInTheDocument();
+    expect(apiMocks.loadDailyBarsCoverage).not.toHaveBeenCalled();
   });
 
   it("shows recent service logs when a fetch fails", async () => {
@@ -185,6 +192,351 @@ describe("DataCenter", () => {
     expect(screen.getAllByText("建议补齐").length).toBeGreaterThan(0);
   });
 
+  it("defaults missing-data backfill to full-market sync when no symbols are entered", async () => {
+    const user = setupUser();
+
+    render(<DataCenter cacheDir=".astock-cache" coverage={coverage} onCoverageChange={vi.fn()} />);
+
+    await screen.findByText(/http:\/\/127\.0\.0\.1:9011/);
+    expect(screen.getByLabelText("股票代码")).toHaveValue("");
+    await user.click(screen.getByRole("button", { name: "补全缺失数据" }));
+
+    await waitFor(() => expect(apiMocks.startFullMarketSync).toHaveBeenCalledWith(
+      "http://127.0.0.1:9011",
+      "2026-06-01",
+      "2026-06-05"
+    ));
+    expect(apiMocks.fetchDailyBars).not.toHaveBeenCalled();
+  });
+
+  it("maps full-market imported rows to an estimated missing-row decrease while syncing", async () => {
+    const user = setupUser();
+    const missingCoverage = [
+      { dataset: "daily_bars", symbols: 5000, start_date: "2015-01-05", end_date: "2026-06-01", missing_rows: 100 },
+      { dataset: "capital_flow", symbols: 5000, start_date: "2015-01-05", end_date: "2026-06-01", missing_rows: 60 }
+    ];
+    apiMocks.loadDataServiceHealth.mockResolvedValue({
+      ok: true,
+      cache_path: "C:\\cache",
+      port: 9011,
+      coverage: missingCoverage
+    });
+    apiMocks.startFullMarketSync.mockResolvedValue({
+      job: {
+        job_id: "job-rows",
+        mode: "full_market_bootstrap",
+        status: "running",
+        total_symbols: 10,
+        completed_symbols: 2,
+        failed_symbols: 0,
+        imported_rows: 25,
+        current_symbol: "000002",
+        start_date: "2026-06-01",
+        end_date: "2026-06-05",
+        errors: []
+      }
+    });
+
+    render(<DataCenter cacheDir=".astock-cache" coverage={missingCoverage} onCoverageChange={vi.fn()} />);
+
+    await screen.findByText(/http:\/\/127\.0\.0\.1:9011/);
+    await user.click(screen.getByRole("button", { name: "补全缺失数据" }));
+
+    expect(await screen.findByText("75")).toBeInTheDocument();
+    expect(screen.getByText("本次已补 25 行")).toBeInTheDocument();
+  });
+
+  it("maps capital-flow imported rows only to the capital-flow missing-row estimate", async () => {
+    const user = setupUser();
+    const missingCoverage = [
+      { dataset: "daily_bars", symbols: 5000, start_date: "2015-01-05", end_date: "2026-06-01", missing_rows: 100 },
+      { dataset: "capital_flow", symbols: 5000, start_date: "2015-01-05", end_date: "2026-06-01", missing_rows: 60 }
+    ];
+    apiMocks.loadDataServiceHealth.mockResolvedValue({
+      ok: true,
+      cache_path: "C:\\cache",
+      port: 9011,
+      coverage: missingCoverage
+    });
+    apiMocks.fetchCapitalFlow.mockResolvedValue({
+      status: "ok",
+      imported_rows: 0,
+      returned_rows: 0,
+      requested_symbols: [],
+      fetched_symbols: [],
+      missing_symbols: [],
+      skipped_symbols: [],
+      coverage: missingCoverage,
+      logs: [{ level: "info", message: "Capital-flow backfill started for all symbols" }],
+      diagnostics: [{ code: "capital_flow_backfill_job_started", source: "capital_flow_crawler" }],
+      failures: [],
+      job: {
+        job_id: "flow-job-progress",
+        mode: "capital_flow_backfill",
+        status: "running",
+        total_symbols: 10,
+        completed_symbols: 2,
+        failed_symbols: 0,
+        processed_symbols: 2,
+        skipped_symbols: 0,
+        imported_rows: 25,
+        returned_rows: 30,
+        current_symbol: "000003",
+        start_date: "2026-06-01",
+        end_date: "2026-06-05",
+        errors: []
+      }
+    });
+
+    render(<DataCenter cacheDir=".astock-cache" coverage={missingCoverage} onCoverageChange={vi.fn()} />);
+
+    await screen.findByText(/http:\/\/127\.0\.0\.1:9011/);
+    const capitalFlowButton = screen.getAllByRole("button")[3];
+    await user.click(capitalFlowButton);
+
+    await waitFor(() => expect(apiMocks.fetchCapitalFlow).toHaveBeenCalled());
+    const rows = screen.getAllByRole("row");
+    expect(within(rows[1]).getByText("100")).toBeInTheDocument();
+    expect(within(rows[2]).getByText("35")).toBeInTheDocument();
+  });
+
+  it("backfills capital flow through the service crawler boundary", async () => {
+    const user = setupUser();
+    const onCoverageChange = vi.fn();
+
+    render(<DataCenter cacheDir=".astock-cache" coverage={coverage} onCoverageChange={onCoverageChange} />);
+
+    await screen.findByText(/http:\/\/127\.0\.0\.1:9011/);
+    await user.clear(screen.getByLabelText("\u80a1\u7968\u4ee3\u7801"));
+    await user.type(screen.getByLabelText("\u80a1\u7968\u4ee3\u7801"), "600519 000001");
+    await user.click(screen.getByRole("button", { name: "补齐资金流" }));
+
+    await waitFor(() => expect(apiMocks.fetchCapitalFlow).toHaveBeenCalledWith(
+      "http://127.0.0.1:9011",
+      ["600519", "000001"],
+      "2026-06-01",
+      "2026-06-05"
+    ));
+    expect(onCoverageChange).toHaveBeenCalledWith(coverage);
+    expect(await screen.findByText(/Capital-flow crawler merged 1 rows/)).toBeInTheDocument();
+  });
+
+  it("starts capital-flow backfill without typed symbols and refreshes coverage after the operation", async () => {
+    const user = setupUser();
+    const onCoverageChange = vi.fn();
+    const refreshedCoverage = [
+      { dataset: "daily_bars", symbols: 1, start_date: "2024-01-02", end_date: "2024-01-03", missing_rows: 2 },
+      { dataset: "capital_flow", symbols: 2, start_date: "2024-01-02", end_date: "2024-01-03", missing_rows: 0 }
+    ];
+    apiMocks.loadDataServiceHealth
+      .mockResolvedValueOnce({
+        ok: true,
+        cache_path: "C:\\cache",
+        port: 9011,
+        coverage
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        cache_path: "C:\\cache",
+        port: 9011,
+        coverage: refreshedCoverage
+      });
+
+    render(<DataCenter cacheDir=".astock-cache" coverage={coverage} onCoverageChange={onCoverageChange} />);
+
+    await screen.findByText(/http:\/\/127\.0\.0\.1:9011/);
+    expect(screen.getByLabelText("股票代码")).toHaveValue("");
+    await user.click(screen.getByRole("button", { name: "补齐资金流" }));
+
+    await waitFor(() => expect(apiMocks.fetchCapitalFlow).toHaveBeenCalledWith(
+      "http://127.0.0.1:9011",
+      [],
+      "2026-06-01",
+      "2026-06-05"
+    ));
+    await waitFor(() => expect(apiMocks.loadDataServiceHealth).toHaveBeenLastCalledWith("http://127.0.0.1:9011"));
+    expect(onCoverageChange).toHaveBeenLastCalledWith(refreshedCoverage);
+    expect(await screen.findByText(/Capital-flow crawler merged 1 rows/)).toBeInTheDocument();
+  });
+
+  it("surfaces capital-flow crawler failures in the operation status", async () => {
+    const user = setupUser();
+    apiMocks.fetchCapitalFlow.mockResolvedValue({
+      status: "partial",
+      imported_rows: 1,
+      requested_symbols: ["600519", "000001"],
+      fetched_symbols: ["600519"],
+      missing_symbols: ["000001"],
+      coverage,
+      logs: [{ level: "warning", message: "Capital-flow crawler failed for symbols: 000001" }],
+      diagnostics: [{ symbol: "000001", code: "network_error", message: "remote disconnected" }],
+      failures: [{ symbol: "000001", code: "network_error", error: "remote disconnected" }]
+    });
+
+    render(<DataCenter cacheDir=".astock-cache" coverage={coverage} onCoverageChange={vi.fn()} />);
+
+    await screen.findByText(/http:\/\/127\.0\.0\.1:9011/);
+    await user.clear(screen.getByLabelText("股票代码"));
+    await user.type(screen.getByLabelText("股票代码"), "600519 000001");
+    await user.click(screen.getByRole("button", { name: "补齐资金流" }));
+
+    expect(await screen.findByRole("status", { name: "数据中心状态" })).toHaveTextContent(
+      "部分失败: 000001"
+    );
+    expect(screen.getByRole("status", { name: "数据中心状态" })).toHaveTextContent("network_error");
+  });
+
+  it("cancels a running capital-flow backfill job and refreshes coverage", async () => {
+    const user = setupUser();
+    const onCoverageChange = vi.fn();
+    const refreshedCoverage = [
+      { dataset: "daily_bars", symbols: 1, start_date: "2024-01-02", end_date: "2024-01-03", missing_rows: 2 },
+      { dataset: "capital_flow", symbols: 2, start_date: "2024-01-02", end_date: "2024-01-03", missing_rows: 0 }
+    ];
+    apiMocks.fetchCapitalFlow.mockResolvedValue({
+      status: "ok",
+      imported_rows: 0,
+      returned_rows: 0,
+      requested_symbols: [],
+      fetched_symbols: [],
+      missing_symbols: [],
+      skipped_symbols: [],
+      coverage,
+      logs: [{ level: "info", message: "Capital-flow backfill started for all symbols" }],
+      diagnostics: [{ code: "capital_flow_backfill_job_started", source: "capital_flow_crawler" }],
+      failures: [],
+      job: {
+        job_id: "flow-job",
+        mode: "capital_flow_backfill",
+        status: "running",
+        total_symbols: 3,
+        completed_symbols: 1,
+        failed_symbols: 0,
+        processed_symbols: 1,
+        skipped_symbols: 0,
+        imported_rows: 5,
+        returned_rows: 8,
+        current_symbol: "000002",
+        start_date: "2026-06-01",
+        end_date: "2026-06-05",
+        errors: []
+      }
+    });
+    apiMocks.cancelSyncJob.mockResolvedValue({
+      job: {
+        job_id: "flow-job",
+        mode: "capital_flow_backfill",
+        status: "cancelling",
+        total_symbols: 3,
+        completed_symbols: 1,
+        failed_symbols: 0,
+        processed_symbols: 1,
+        skipped_symbols: 0,
+        imported_rows: 5,
+        returned_rows: 8,
+        current_symbol: "000002",
+        start_date: "2026-06-01",
+        end_date: "2026-06-05",
+        errors: []
+      }
+    });
+    apiMocks.loadSyncJob.mockResolvedValueOnce({
+      job: {
+        job_id: "flow-job",
+        mode: "capital_flow_backfill",
+        status: "cancelled",
+        total_symbols: 3,
+        completed_symbols: 1,
+        failed_symbols: 0,
+        processed_symbols: 1,
+        skipped_symbols: 0,
+        imported_rows: 5,
+        returned_rows: 8,
+        current_symbol: null,
+        start_date: "2026-06-01",
+        end_date: "2026-06-05",
+        errors: []
+      }
+    });
+    apiMocks.loadDataServiceHealth
+      .mockResolvedValueOnce({ ok: true, cache_path: "C:\\cache", port: 9011, coverage })
+      .mockResolvedValueOnce({ ok: true, cache_path: "C:\\cache", port: 9011, coverage })
+      .mockResolvedValueOnce({ ok: true, cache_path: "C:\\cache", port: 9011, coverage: refreshedCoverage });
+
+    render(<DataCenter cacheDir=".astock-cache" coverage={coverage} onCoverageChange={onCoverageChange} />);
+
+    await screen.findByText(/http:\/\/127\.0\.0\.1:9011/);
+    await user.click(screen.getByRole("button", { name: "补齐资金流" }));
+
+    expect(await screen.findByRole("button", { name: "停止任务" })).toBeInTheDocument();
+    expect(screen.getByText(/接口返回 8 行，新增 5 行/)).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "停止任务" }));
+
+    await waitFor(() => expect(apiMocks.cancelSyncJob).toHaveBeenCalledWith("http://127.0.0.1:9011", "flow-job"));
+    expect(screen.getByRole("status", { name: "数据中心状态" })).toHaveTextContent("正在停止任务");
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1100);
+    });
+
+    await waitFor(() => expect(onCoverageChange).toHaveBeenLastCalledWith(refreshedCoverage));
+    expect(screen.getByRole("status", { name: "数据中心状态" })).toHaveTextContent("资金流补齐已停止");
+  });
+
+  it("shows recent per-symbol failures for a running capital-flow backfill job", async () => {
+    const user = setupUser();
+    const runningJob = {
+      job_id: "flow-job-failures",
+      mode: "capital_flow_backfill",
+      status: "running",
+      total_symbols: 5,
+      completed_symbols: 2,
+      failed_symbols: 2,
+      processed_symbols: 4,
+      skipped_symbols: 0,
+      imported_rows: 12,
+      returned_rows: 20,
+      current_symbol: "000005",
+      start_date: "2026-06-01",
+      end_date: "2026-06-05",
+      errors: [],
+      last_error: "000004 date coverage shortfall",
+      recent_failures: [
+        { symbol: "000003", code: "network_error", error: "remote disconnected" },
+        { symbol: "000004", code: "date_coverage_shortfall", message: "only returned 2026-06-05" }
+      ]
+    };
+    apiMocks.fetchCapitalFlow.mockResolvedValue({
+      status: "ok",
+      imported_rows: 0,
+      returned_rows: 0,
+      requested_symbols: [],
+      fetched_symbols: [],
+      missing_symbols: [],
+      skipped_symbols: [],
+      coverage,
+      logs: [{ level: "info", message: "Capital-flow backfill started for all symbols" }],
+      diagnostics: [{ code: "capital_flow_backfill_job_started", source: "capital_flow_crawler" }],
+      failures: [],
+      job: runningJob
+    });
+    apiMocks.loadSyncJob.mockResolvedValue({
+      job: runningJob
+    });
+
+    render(<DataCenter cacheDir=".astock-cache" coverage={coverage} onCoverageChange={vi.fn()} />);
+
+    await screen.findByText(/http:\/\/127\.0\.0\.1:9011/);
+    await user.click(screen.getByRole("button", { name: "补齐资金流" }));
+
+    const failures = await screen.findByLabelText("最近失败原因");
+    expect(within(failures).getByText(/000003/)).toHaveTextContent("network_error");
+    expect(within(failures).getByText(/000003/)).toHaveTextContent("remote disconnected");
+    expect(within(failures).getByText(/000004/)).toHaveTextContent("date_coverage_shortfall");
+    expect(within(failures).getByText(/000004/)).toHaveTextContent("only returned 2026-06-05");
+  });
+
   afterEach(() => {
     vi.useRealTimers();
   });
@@ -201,6 +553,7 @@ describe("DataCenter", () => {
     render(<DataCenter cacheDir=".astock-cache" coverage={coverage} onCoverageChange={vi.fn()} />);
 
     await screen.findByText(/http:\/\/127\.0\.0\.1:9011/);
+    await user.type(screen.getByLabelText("股票代码"), "600519");
     await user.click(screen.getByRole("button", { name: "补全缺失数据" }));
 
     expect(screen.getByRole("button", { name: "正在补全缺失数据" })).toBeDisabled();
@@ -247,7 +600,7 @@ describe("DataCenter", () => {
       await vi.advanceTimersByTimeAsync(1100);
     });
     await waitFor(() => expect(apiMocks.loadSyncJob).toHaveBeenCalledWith("http://127.0.0.1:9011", "job-1"));
-    expect(await screen.findByText(/已完成 2\/2/)).toBeInTheDocument();
+    expect(await screen.findByText(/已处理 2\/2/)).toBeInTheDocument();
     expect(screen.getAllByText(/导入 20 行/).length).toBeGreaterThan(0);
   });
 
@@ -271,6 +624,7 @@ describe("DataCenter", () => {
 
     expect(await screen.findByLabelText("开始日期")).toHaveValue("2026-06-01");
     expect(screen.getByLabelText("结束日期")).toHaveValue("2026-06-05");
+    await user.type(screen.getByLabelText("股票代码"), "600519");
     await user.click(screen.getByRole("button", { name: "补全缺失数据" }));
 
     await waitFor(() => expect(apiMocks.fetchDailyBars).toHaveBeenCalledWith(
@@ -301,9 +655,48 @@ describe("DataCenter", () => {
 
     expect(await screen.findByLabelText("开始日期")).toHaveValue("2026-05-26");
     expect(screen.getByLabelText("结束日期")).toHaveValue("2026-06-05");
+    await user.type(screen.getByLabelText("股票代码"), "600519");
     await user.click(screen.getByRole("button", { name: "补全缺失数据" }));
 
     await waitFor(() => expect(apiMocks.fetchDailyBars).toHaveBeenCalledWith(
+      "http://127.0.0.1:9011",
+      ["600519"],
+      "2026-05-26",
+      "2026-06-05"
+    ));
+  });
+
+  it("keeps manually edited dates aligned with coverage details after a successful fetch", async () => {
+    const user = setupUser();
+    const updatedCoverage = [
+      { dataset: "daily_bars", symbols: 5000, start_date: "2015-01-05", end_date: "2026-06-05", missing_rows: 0 }
+    ];
+    apiMocks.fetchDailyBars.mockResolvedValue({
+      status: "ok",
+      imported_rows: 12,
+      requested_symbols: ["600519"],
+      fetched_symbols: ["600519"],
+      missing_symbols: [],
+      coverage: updatedCoverage,
+      logs: [{ level: "info", message: "Fetched manual date range rows" }]
+    });
+
+    render(<DataCenter cacheDir=".astock-cache" coverage={coverage} onCoverageChange={vi.fn()} />);
+
+    await screen.findByText(/http:\/\/127\.0\.0\.1:9011/);
+    await user.type(screen.getByLabelText("股票代码"), "600519");
+    await user.clear(screen.getByLabelText("开始日期"));
+    await user.type(screen.getByLabelText("开始日期"), "2026-05-26");
+    await user.click(screen.getByRole("button", { name: "补全缺失数据" }));
+
+    await waitFor(() => expect(apiMocks.fetchDailyBars).toHaveBeenCalledWith(
+      "http://127.0.0.1:9011",
+      ["600519"],
+      "2026-05-26",
+      "2026-06-05"
+    ));
+    expect(screen.getByLabelText("开始日期")).toHaveValue("2026-05-26");
+    await waitFor(() => expect(apiMocks.loadDailyBarsCoverage).toHaveBeenLastCalledWith(
       "http://127.0.0.1:9011",
       ["600519"],
       "2026-05-26",

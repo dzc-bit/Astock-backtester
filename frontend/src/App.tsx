@@ -1,20 +1,21 @@
 import { useEffect, useState } from "react";
 import { Activity, Database, Flame, ShieldAlert, TrendingUp } from "lucide-react";
 import {
+  loadClsFinance,
   loadMarketBriefing,
-  loadMarketCommentary,
   loadMarketNews,
   loadNewsSummary,
   loadRealtimeMarketSnapshot,
+  loadRealtimeMarketSnapshotStream,
   loadRecommendedStrategies,
   loadRiskAlerts,
   runBacktestStreamWithDataService,
   runConfiguredBacktest,
   validateConditionExpression
 } from "./api";
+import { ClsFinancePanel } from "./components/ClsFinancePanel";
 import { DataCenter } from "./components/DataCenter";
 import { MarketDashboard } from "./components/MarketDashboard";
-import { MarketCommentaryPanel } from "./components/MarketCommentaryPanel";
 import { NewsPanel } from "./components/NewsPanel";
 import { NewsSummaryPanel } from "./components/NewsSummaryPanel";
 import { ResultsOverview } from "./components/ResultsOverview";
@@ -41,8 +42,8 @@ import type {
   DataServiceStatus,
   DatasetCoverage,
   ConditionValidationResult,
+  ClsFinanceResponse,
   MarketBriefingResponse,
-  MarketCommentaryResponse,
   MarketRefreshMeta,
   MarketNewsResponse,
   NewsSummaryResponse,
@@ -142,21 +143,6 @@ function validateBacktestSettings(settings: BacktestSettingsConfig, draftErrors:
 
 type BacktestTrade = BacktestResult["trades"][number];
 
-function fallbackMarketCommentary(reason: string): MarketCommentaryResponse {
-  return {
-    updated_at: new Date().toISOString(),
-    trade_date: new Date().toISOString().slice(0, 10),
-    source: "frontend-fallback",
-    mode: "news_fallback",
-    stance: "defensive",
-    summary: "实时盘面暂不可用，以下仅为防守口径。行情评价接口暂时没有返回可用内容，先不要把新闻或局部数据包装成确定结论。",
-    drivers: [],
-    risks: ["行情评价接口不可用，缺少实时红绿家数、指数和题材榜联动验证。"],
-    next_watch: ["优先恢复行情评价接口，再结合红绿家数、强势题材和昨日强势追踪复核盘面。"],
-    diagnostics: [`行情评价接口失败：${reason}`]
-  };
-}
-
 function tradeIdentity(trade: BacktestTrade): string {
   return `${trade.symbol}-${trade.buy_signal_date}-${trade.buy_date}`;
 }
@@ -184,7 +170,7 @@ export function App() {
   const [marketRefreshMeta, setMarketRefreshMeta] = useState<MarketRefreshMeta>(() => initialMarketRefreshMeta());
   const [isLoadingMarket, setIsLoadingMarket] = useState(false);
   const [marketNews, setMarketNews] = useState<MarketNewsResponse | null>(null);
-  const [marketCommentary, setMarketCommentary] = useState<MarketCommentaryResponse | null>(null);
+  const [clsFinance, setClsFinance] = useState<ClsFinanceResponse | null>(null);
   const [newsSummary, setNewsSummary] = useState<NewsSummaryResponse | null>(null);
   const [fupanBriefing, setFupanBriefing] = useState<MarketBriefingResponse | null>(null);
   const [zaopanBriefing, setZaopanBriefing] = useState<MarketBriefingResponse | null>(null);
@@ -326,8 +312,10 @@ export function App() {
         next_refresh_ms: refreshIntervalForPhase(phase)
       }));
       try {
-        const snapshot = await loadRealtimeMarketSnapshot(dataService.base_url);
-        if (!cancelled) {
+        const applySnapshot = (snapshot: RealtimeMarketSnapshot, isPartial = false) => {
+          if (cancelled) {
+            return;
+          }
           setMarketSnapshot((current) => (snapshot.status === "unavailable" && current ? current : snapshot));
           const nextPhase = snapshot.market_phase ?? phase;
           setMarketRefreshMeta((current) => {
@@ -335,33 +323,74 @@ export function App() {
             nextRefreshMs = refreshIntervalForPhase(nextPhase, snapshot.status === "unavailable");
             return {
               phase: nextPhase,
-              status: usingLastSuccess ? "using_last_success" : snapshot.status === "unavailable" ? "unavailable" : "idle",
+              status: isPartial ? "refreshing" : usingLastSuccess ? "using_last_success" : snapshot.status === "unavailable" ? "unavailable" : "idle",
               message:
-                usingLastSuccess
+                isPartial
+                  ? snapshot.message
+                  : usingLastSuccess
                   ? "实时接口暂不可用，使用最近数据"
                   : snapshot.status === "unavailable"
                     ? "实时接口暂不可用"
                     : nextPhase === "trading"
                       ? "实时行情已更新"
                       : "非交易时段，使用最近数据",
-              last_success_at: snapshot.status === "unavailable" ? current.last_success_at ?? null : snapshot.updated_at,
+              last_success_at: isPartial
+                ? current.last_success_at ?? null
+                : snapshot.status === "unavailable"
+                  ? current.last_success_at ?? null
+                  : snapshot.updated_at,
               last_error: snapshot.status === "unavailable" ? snapshot.message : undefined,
               next_refresh_ms: nextRefreshMs
             };
           });
-        }
+        };
+        const snapshot = await loadRealtimeMarketSnapshotStream(dataService.base_url, {
+          onSnapshot: (partial) => applySnapshot(partial, true)
+        });
+        applySnapshot(snapshot);
       } catch (caught) {
-        if (!cancelled) {
-          const reason = caught instanceof Error ? caught.message : "请求失败";
-          setMarketRefreshMeta((current) => ({
-            phase,
-            status: current.last_success_at ? "using_last_success" : "unavailable",
-            message: current.last_success_at ? "实时接口暂不可用，使用最近数据" : "实时接口暂不可用",
-            last_success_at: current.last_success_at ?? null,
-            last_error: reason,
-            next_refresh_ms: refreshIntervalForPhase(phase, true)
-          }));
-          nextRefreshMs = refreshIntervalForPhase(phase, true);
+        try {
+          const snapshot = await loadRealtimeMarketSnapshot(dataService.base_url);
+          if (!cancelled) {
+            setMarketSnapshot((current) => (snapshot.status === "unavailable" && current ? current : snapshot));
+            const nextPhase = snapshot.market_phase ?? phase;
+            setMarketRefreshMeta((current) => {
+              const usingLastSuccess = snapshot.status === "unavailable" && Boolean(current.last_success_at);
+              nextRefreshMs = refreshIntervalForPhase(nextPhase, snapshot.status === "unavailable");
+              return {
+                phase: nextPhase,
+                status: usingLastSuccess ? "using_last_success" : snapshot.status === "unavailable" ? "unavailable" : "idle",
+                message:
+                  usingLastSuccess
+                    ? "实时接口暂不可用，使用最近数据"
+                    : snapshot.status === "unavailable"
+                      ? "实时接口暂不可用"
+                      : nextPhase === "trading"
+                        ? "实时行情已更新"
+                        : "非交易时段，使用最近数据",
+                last_success_at: snapshot.status === "unavailable" ? current.last_success_at ?? null : snapshot.updated_at,
+                last_error: snapshot.status === "unavailable" ? snapshot.message : undefined,
+                next_refresh_ms: nextRefreshMs
+              };
+            });
+          }
+        } catch (fallbackCaught) {
+          if (!cancelled) {
+            const reason = fallbackCaught instanceof Error
+              ? fallbackCaught.message
+              : caught instanceof Error
+                ? caught.message
+                : "请求失败";
+            setMarketRefreshMeta((current) => ({
+              phase,
+              status: current.last_success_at ? "using_last_success" : "unavailable",
+              message: current.last_success_at ? "实时接口暂不可用，使用最近数据" : "实时接口暂不可用",
+              last_success_at: current.last_success_at ?? null,
+              last_error: reason,
+              next_refresh_ms: refreshIntervalForPhase(phase, true)
+            }));
+            nextRefreshMs = refreshIntervalForPhase(phase, true);
+          }
         }
       } finally {
         if (!cancelled) {
@@ -385,11 +414,11 @@ export function App() {
     }
     setIsLoadingNews(true);
     try {
-      const [newsResult, fupanResult, zaopanResult, commentaryResult, summaryResult] = await Promise.allSettled([
+      const [newsResult, fupanResult, zaopanResult, financeResult, summaryResult] = await Promise.allSettled([
         loadMarketNews(dataService.base_url),
         loadMarketBriefing(dataService.base_url, "fupan"),
         loadMarketBriefing(dataService.base_url, "zaopan"),
-        loadMarketCommentary(dataService.base_url),
+        loadClsFinance(dataService.base_url),
         loadNewsSummary(dataService.base_url)
       ]);
       if (newsResult.status === "fulfilled") {
@@ -401,10 +430,8 @@ export function App() {
       if (zaopanResult.status === "fulfilled") {
         setZaopanBriefing(zaopanResult.value);
       }
-      if (commentaryResult.status === "fulfilled") {
-        setMarketCommentary(commentaryResult.value);
-      } else {
-        setMarketCommentary(fallbackMarketCommentary(commentaryResult.reason instanceof Error ? commentaryResult.reason.message : "请求失败"));
+      if (financeResult.status === "fulfilled") {
+        setClsFinance(financeResult.value);
       }
       if (summaryResult.status === "fulfilled") {
         setNewsSummary(summaryResult.value);
@@ -462,11 +489,11 @@ export function App() {
     }
     let cancelled = false;
     const loadAuxiliaryData = async () => {
-      const [newsResult, fupanResult, zaopanResult, commentaryResult, summaryResult, riskResult, recommendedResult] = await Promise.allSettled([
+      const [newsResult, fupanResult, zaopanResult, financeResult, summaryResult, riskResult, recommendedResult] = await Promise.allSettled([
         loadMarketNews(dataService.base_url),
         loadMarketBriefing(dataService.base_url, "fupan"),
         loadMarketBriefing(dataService.base_url, "zaopan"),
-        loadMarketCommentary(dataService.base_url),
+        loadClsFinance(dataService.base_url),
         loadNewsSummary(dataService.base_url),
         loadRiskAlerts(dataService.base_url),
         loadRecommendedStrategies(dataService.base_url)
@@ -483,10 +510,8 @@ export function App() {
       if (zaopanResult.status === "fulfilled") {
         setZaopanBriefing(zaopanResult.value);
       }
-      if (commentaryResult.status === "fulfilled") {
-        setMarketCommentary(commentaryResult.value);
-      } else {
-        setMarketCommentary(fallbackMarketCommentary(commentaryResult.reason instanceof Error ? commentaryResult.reason.message : "请求失败"));
+      if (financeResult.status === "fulfilled") {
+        setClsFinance(financeResult.value);
       }
       if (summaryResult.status === "fulfilled") {
         setNewsSummary(summaryResult.value);
@@ -526,6 +551,11 @@ export function App() {
     beijing: "北交所",
     custom: settings.custom_symbols.length > 0 ? `自选 ${settings.custom_symbols.length} 只` : "自选代码"
   }[settings.stock_pool];
+  const marketBreadthLabel = marketSnapshot?.breadth
+    ? marketSnapshot.status === "live" && !marketSnapshot.breadth.source.startsWith("local")
+      ? `今日实时红盘 ${marketSnapshot.breadth.up} / 全市场 ${marketSnapshot.breadth.total}`
+      : `本地最近交易日/非实时 红盘 ${marketSnapshot.breadth.up} / 样本 ${marketSnapshot.breadth.total}`
+    : `${poolLabel} / 等待实时行情`;
 
   const applySavedStrategy = (preset: SavedStrategyPreset) => {
     setStrategy(cloneStrategyConfig(preset.strategy));
@@ -567,7 +597,7 @@ export function App() {
         <NewsPanel news={marketNews} isLoading={isLoadingNews} onRefresh={refreshNews} />
       </div>
       <div className="market-insight-layout">
-        <MarketCommentaryPanel commentary={marketCommentary} isLoading={isLoadingNews} />
+        <ClsFinancePanel finance={clsFinance} isLoading={isLoadingNews} />
         <NewsSummaryPanel summary={newsSummary} isLoading={isLoadingNews} />
       </div>
       <TonghuashunBriefingPanel fupan={fupanBriefing} zaopan={zaopanBriefing} />
@@ -578,11 +608,7 @@ export function App() {
             <strong>{formatPercent(liveHeatRatio)}</strong>
           </div>
           <Flame size={24} aria-hidden="true" />
-          <small>
-            {marketSnapshot?.breadth
-              ? `今日实时红盘 ${marketSnapshot.breadth.up} / 全市场 ${marketSnapshot.breadth.total}`
-              : `${poolLabel} / 等待实时行情`}
-          </small>
+          <small>{marketBreadthLabel}</small>
         </article>
         <article className="summary-card">
           <div>

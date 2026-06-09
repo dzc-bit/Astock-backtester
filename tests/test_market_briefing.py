@@ -1,8 +1,14 @@
 from __future__ import annotations
 
-import pandas as pd
+from bs4 import BeautifulSoup
 
-from astock_backtester.data.briefing import MarketBriefingProvider, THS_FUPAN_URL, THS_REFERER
+from astock_backtester.data.briefing import (
+    MarketBriefingProvider,
+    THS_FUPAN_URL,
+    THS_REFERER,
+    _is_noisy_content_line,
+    _table_from_node,
+)
 
 
 class FakeHtmlResponse:
@@ -14,6 +20,46 @@ class FakeHtmlResponse:
 
     def raise_for_status(self) -> None:
         return
+
+
+def test_is_noisy_content_line_filters_ambiguous_profit_and_cn_label_numeric_soup():
+    assert _is_noisy_content_line("同比指数盈利")
+    assert _is_noisy_content_line(
+        "板块名称 最新涨幅 涨跌幅% 股票数（只） 1293.69 +14.46 +1.13% 363.54亿 2026-06-05 15:00:00"
+    )
+    assert not _is_noisy_content_line("机器人板块午后持续走强，资金围绕题材龙头博弈。")
+
+
+def test_table_from_node_rejects_headerless_mystery_market_number_rows():
+    soup = BeautifulSoup(
+        """
+        <table>
+          <tr><td>半导体</td><td>1293.69</td><td>+14.46</td><td>+1.13%</td><td>363.54亿</td></tr>
+          <tr><td>机器人</td><td>1102.18</td><td>+22.40</td><td>+2.07%</td><td>251.11亿</td></tr>
+        </table>
+        """,
+        "html.parser",
+    )
+
+    assert _table_from_node(soup.table, title="指数表现") is None
+
+
+def test_table_from_node_keeps_readable_table_with_explicit_headers():
+    soup = BeautifulSoup(
+        """
+        <table>
+          <tr><th>板块名称</th><th>涨跌幅</th><th>解读</th></tr>
+          <tr><td>机器人</td><td>+2.07%</td><td>午后持续走强</td></tr>
+        </table>
+        """,
+        "html.parser",
+    )
+
+    table = _table_from_node(soup.table, title="板块表现")
+
+    assert table is not None
+    assert table.columns == ["板块名称", "涨跌幅", "解读"]
+    assert table.rows == [{"板块名称": "机器人", "涨跌幅": "+2.07%", "解读": "午后持续走强"}]
 
 
 def test_market_briefing_provider_keeps_full_ths_fupan_summary_and_section_body():
@@ -470,6 +516,122 @@ def test_market_briefing_provider_filters_cn_label_numeric_soup_and_percent_symb
     assert "% %" not in (response.sections[0].content or "")
 
 
+def test_market_briefing_provider_drops_ambiguous_profit_section_title_entirely():
+    html = """
+    <html><body>
+      <div id="fpzj">复盘摘要：指数小幅反弹。</div>
+      <div class="fp_item_hd"><h2>同比指数盈利</h2></div>
+      <div class="fp_item_cnt">
+        <p>2700 0 股票数（只） 同比指数盈利% 计算方式: (个股收盘价-开盘价)/开盘价*100%-对应指数涨幅; (比率+数量)</p>
+      </div>
+      <div class="fp_item_hd"><h2>同花顺解盘</h2></div>
+      <div class="fp_item_cnt">
+        <p>机器人板块午后持续走强，资金围绕题材龙头博弈。</p>
+      </div>
+    </body></html>
+    """
+
+    response = MarketBriefingProvider(requester=lambda *args, **kwargs: FakeHtmlResponse(html)).latest_fupan()
+
+    dumped = str(response.model_dump(mode="json"))
+    assert [section.title for section in response.sections] == ["同花顺解盘"]
+    assert "同比指数盈利" not in dumped
+    assert "计算方式" not in dumped
+
+
+def test_market_briefing_provider_drops_ambiguous_profit_summary_text():
+    html = """
+    <html><body>
+      <div id="fpzj">同比指数盈利</div>
+      <div class="fp_item_hd"><h2>同花顺解盘</h2></div>
+      <div class="fp_item_cnt">
+        <p>机器人板块午后持续走强，资金围绕题材龙头博弈。</p>
+      </div>
+    </body></html>
+    """
+
+    response = MarketBriefingProvider(requester=lambda *args, **kwargs: FakeHtmlResponse(html)).latest_fupan()
+
+    assert response.summary == "机器人板块午后持续走强，资金围绕题材龙头博弈。"
+    assert "同比指数盈利" not in str(response.model_dump(mode="json"))
+
+
+def test_market_briefing_provider_removes_ths_board_codes_from_key_sector_text():
+    html = """
+    <html><body>
+      <div id="fpzj">复盘摘要：权重方向轮动。</div>
+      <div class="fp_item_hd"><h2>重点板块</h2></div>
+      <div class="fp_item_cnt">
+        <p>银行 881155 保险 881156 钢铁 881112 房地产 881153 活跃。</p>
+        <table>
+          <tr><th>板块</th><th>解读</th></tr>
+          <tr><td>银行 881155</td><td>低估值方向修复</td></tr>
+          <tr><td>保险 881156</td><td>权重承接改善</td></tr>
+        </table>
+      </div>
+    </body></html>
+    """
+
+    response = MarketBriefingProvider(requester=lambda *args, **kwargs: FakeHtmlResponse(html)).latest_fupan()
+
+    dumped = str(response.model_dump(mode="json"))
+    assert "881155" not in dumped
+    assert "881156" not in dumped
+    assert "银行  保险" not in dumped
+    assert response.sections[0].content == "银行 保险 钢铁 房地产 活跃。"
+    assert response.sections[0].tables[0].rows[0]["板块"] == "银行"
+
+
+def test_market_briefing_provider_removes_separate_ths_board_code_column():
+    html = """
+    <html><body>
+      <div id="fpzj">复盘摘要：权重方向轮动。</div>
+      <div class="fp_item_hd"><h2>重点板块</h2></div>
+      <div class="fp_item_cnt">
+        <table>
+          <tr><th>板块</th><th>代码</th><th>解读</th></tr>
+          <tr><td>银行</td><td>881155</td><td>低估值方向修复</td></tr>
+          <tr><td>保险</td><td>881156</td><td>权重承接改善</td></tr>
+        </table>
+      </div>
+    </body></html>
+    """
+
+    response = MarketBriefingProvider(requester=lambda *args, **kwargs: FakeHtmlResponse(html)).latest_fupan()
+
+    table = response.sections[0].tables[0]
+    assert table.columns == ["板块", "解读"]
+    assert table.rows == [{"板块": "银行", "解读": "低估值方向修复"}, {"板块": "保险", "解读": "权重承接改善"}]
+    assert "881155" not in str(response.model_dump(mode="json"))
+
+
+def test_market_briefing_provider_filters_div_numeric_soup_and_keeps_readable_sentences():
+    html = """
+    <html><body>
+      <div id="fpzj">复盘摘要：指数小幅反弹。</div>
+      <div class="fp_item_hd"><h2>行业表现</h2></div>
+      <div class="fp_item_cnt">
+        <div>
+          半导体 1293.69 +14.46 +1.13% 363.54亿 2026-06-05 15:00:00
+          机器人 1102.18 +22.40 +2.07% 251.11亿 2026-06-05 15:00:00
+          % %
+        </div>
+        <div>机器人板块午后持续走强，资金围绕题材龙头博弈。</div>
+        <span>算力方向尾盘承接改善，仍需观察成交额能否延续。</span>
+      </div>
+    </body></html>
+    """
+
+    response = MarketBriefingProvider(requester=lambda *args, **kwargs: FakeHtmlResponse(html)).latest_fupan()
+
+    content = response.sections[0].content or ""
+    assert "1293.69" not in content
+    assert "2026-06-05" not in content
+    assert "% %" not in content
+    assert "机器人板块午后持续走强，资金围绕题材龙头博弈。" in content
+    assert "算力方向尾盘承接改善，仍需观察成交额能否延续。" in content
+
+
 def test_market_briefing_provider_uses_market_fallback_when_ths_page_has_no_sections():
     html = "<html><body><div id='fpzj'></div></body></html>"
 
@@ -495,93 +657,83 @@ def test_market_briefing_provider_uses_market_fallback_when_ths_page_has_no_sect
     ).latest_fupan()
 
     assert response.source == "ths-fupan+market-fallback"
+    assert response.source_url == "https://quote.eastmoney.com/center/gridlist.html"
     assert response.summary == "上证指数小幅回升，机器人与算力方向保持活跃。"
     assert response.sections[0].title == "公开行情回顾"
     assert response.sections[0].tables[0].columns == ["名称", "最新值", "涨跌额", "涨跌幅"]
     assert any("同花顺复盘页未解析到有效章节" in item for item in response.diagnostics)
 
 
-def test_market_briefing_provider_adds_user_mode_candidates_from_latest_bars():
-    html = """
-    <html><body>
-      <div id="fpzj">复盘摘要：机器人和算力活跃。</div>
-      <div class="fp_item_hd"><h2>同花顺解盘</h2></div>
-      <div class="fp_item_cnt"><p>机器人板块午后持续走强，算力方向有承接。</p></div>
-    </body></html>
-    """
-    bars = pd.DataFrame(
-        [
+def test_market_briefing_provider_uses_market_fallback_when_ths_request_fails():
+    def requester(*args, **kwargs):
+        raise RuntimeError("ths blocked")
+
+    def fallback_provider():
+        return [
             {
-                "symbol": "300001",
-                "name": "机器人A",
-                "trade_date": "2026-06-04",
-                "open": 9.8,
-                "close": 10.0,
-                "high": 10.1,
-                "low": 9.6,
-                "volume": 1000,
-                "amount": 10000,
-                "turnover": 0.03,
-                "float_market_cap": 8_000_000_000,
-            },
-            {
-                "symbol": "300001",
-                "name": "机器人A",
-                "trade_date": "2026-06-05",
-                "open": 10.1,
-                "close": 10.8,
-                "high": 10.9,
-                "low": 10.0,
-                "volume": 1800,
-                "amount": 19000,
-                "turnover": 0.04,
-                "float_market_cap": 8_500_000_000,
-            },
-            {
-                "symbol": "600002",
-                "name": "低量B",
-                "trade_date": "2026-06-04",
-                "open": 20.0,
-                "close": 20.0,
-                "high": 20.2,
-                "low": 19.8,
-                "volume": 1000,
-                "amount": 20000,
-                "turnover": 0.01,
-                "float_market_cap": 12_000_000_000,
-            },
-            {
-                "symbol": "600002",
-                "name": "低量B",
-                "trade_date": "2026-06-05",
-                "open": 20.0,
-                "close": 20.1,
-                "high": 20.2,
-                "low": 19.9,
-                "volume": 900,
-                "amount": 18000,
-                "turnover": 0.012,
-                "float_market_cap": 12_100_000_000,
-            },
+                "title": "公开行情回顾",
+                "content": "同花顺复盘页暂不可用，公开行情显示指数震荡，强势方向仅作为线索。",
+                "links": [{"title": "东方财富行情", "url": "https://quote.eastmoney.com/center/gridlist.html"}],
+                "tables": [
+                    {
+                        "title": "参考指数",
+                        "columns": ["名称", "最新值", "涨跌额", "涨跌幅"],
+                        "rows": [{"名称": "上证指数", "最新值": "3120.00", "涨跌额": "12.50", "涨跌幅": "0.40%"}],
+                    }
+                ],
+            }
         ]
-    )
 
     response = MarketBriefingProvider(
-        requester=lambda *args, **kwargs: FakeHtmlResponse(html),
-        latest_bars_provider=lambda: bars,
+        requester=requester,
+        fallback_provider=fallback_provider,
     ).latest_fupan()
 
-    candidate_section = response.sections[-1]
-    assert candidate_section.title == "当日 user 模式匹配个股"
-    table = candidate_section.tables[0]
-    assert table.columns == ["代码", "名称", "收盘价", "涨跌幅", "匹配理由", "rank_score"]
-    assert table.rows[0]["代码"] == "300001"
-    assert table.rows[0]["名称"] == "机器人A"
-    assert "量比" in table.rows[0]["匹配理由"]
-    assert "600002" not in str(table.rows)
+    assert response.source == "ths-fupan+market-fallback"
+    assert response.source_url == "https://quote.eastmoney.com/center/gridlist.html"
+    assert response.summary == "同花顺复盘页暂不可用，公开行情显示指数震荡，强势方向仅作为线索。"
+    assert response.sections[0].title == "公开行情回顾"
+    assert response.sections[0].links[0].url == "https://quote.eastmoney.com/center/gridlist.html"
+    assert response.sections[0].tables[0].columns == ["名称", "最新值", "涨跌额", "涨跌幅"]
+    assert response.diagnostics[0] == "同花顺复盘读取失败：ths blocked"
+    assert any("已使用注入的公开行情兜底源生成复盘回顾" in item for item in response.diagnostics)
 
 
-def test_market_briefing_provider_adds_user_mode_candidates_from_realtime_quotes():
+def test_market_briefing_provider_returns_local_brief_section_when_fupan_and_market_fallback_fail():
+    def requester(*args, **kwargs):
+        raise RuntimeError("all sources blocked")
+
+    response = MarketBriefingProvider(requester=requester).latest_fupan()
+
+    assert response.source == "ths-fupan+local-brief"
+    assert response.source_url is None
+    assert response.sections
+    assert response.sections[0].title == "本地简短复盘"
+    assert "只给防守口径" in (response.sections[0].content or "")
+    assert "同花顺复盘读取失败：all sources blocked" in response.diagnostics[0]
+    assert any("Sina 指数兜底失败" in item for item in response.diagnostics)
+    assert any("东方财富 A 股行情兜底失败" in item for item in response.diagnostics)
+
+
+def test_market_briefing_provider_does_not_mix_user_mode_candidates_from_legacy_latest_bars_hook():
+    html = """
+    <html><body>
+      <div id="fpzj">复盘摘要：机器人和算力活跃。</div>
+      <div class="fp_item_hd"><h2>同花顺解盘</h2></div>
+      <div class="fp_item_cnt"><p>机器人板块午后持续走强，算力方向有承接。</p></div>
+    </body></html>
+    """
+    provider = MarketBriefingProvider(requester=lambda *args, **kwargs: FakeHtmlResponse(html))
+    provider.latest_bars_provider = lambda: [{"symbol": "300001", "name": "机器人A", "close": 10.8}]
+
+    response = provider.latest_fupan()
+
+    assert [section.title for section in response.sections] == ["同花顺解盘"]
+    assert response.sections[0].content == "机器人板块午后持续走强，算力方向有承接。"
+    assert "当日 user 模式匹配个股" not in str(response.model_dump(mode="json"))
+
+
+def test_market_briefing_provider_does_not_mix_user_mode_candidates_from_legacy_realtime_hook():
     html = """
     <html><body>
       <div id="fpzj">复盘摘要：机器人和算力活跃。</div>
@@ -590,22 +742,37 @@ def test_market_briefing_provider_adds_user_mode_candidates_from_realtime_quotes
     </body></html>
     """
 
-    response = MarketBriefingProvider(
-        requester=lambda *args, **kwargs: FakeHtmlResponse(html),
-        realtime_spot_provider=lambda: [
-            {"代码": "300001", "名称": "机器人A", "现价": "10.88", "涨跌额": "0.88", "涨跌幅": "8.80%"},
-            {"代码": "600002", "名称": "低量B", "现价": "20.10", "涨跌额": "0.10", "涨跌幅": "0.50%"},
-        ],
-    ).latest_fupan()
+    provider = MarketBriefingProvider(requester=lambda *args, **kwargs: FakeHtmlResponse(html))
+    provider.realtime_spot_provider = lambda: [
+        {"代码": "300001", "名称": "机器人A", "现价": "10.88", "涨跌额": "0.88", "涨跌幅": "8.80%"},
+        {"代码": "600002", "名称": "低量B", "现价": "20.10", "涨跌额": "0.10", "涨跌幅": "0.50%"},
+    ]
 
-    candidate_section = response.sections[-1]
-    assert candidate_section.title == "当日 user 模式匹配个股"
-    table = candidate_section.tables[0]
-    assert table.columns == ["代码", "名称", "现价", "涨跌幅", "匹配理由", "rank_score"]
-    assert table.rows[0]["代码"] == "300001"
-    assert table.rows[0]["现价"] == "10.88"
-    assert "实时行情" in table.rows[0]["匹配理由"]
-    assert "600002" not in str(table.rows)
+    response = provider.latest_fupan()
+
+    assert [section.title for section in response.sections] == ["同花顺解盘"]
+    assert "当日 user 模式匹配个股" not in str(response.model_dump(mode="json"))
+
+
+def test_market_briefing_provider_does_not_mix_akshare_realtime_spot_candidates_from_legacy_hook():
+    html = """
+    <html><body>
+      <div id="fpzj">复盘摘要：机器人和算力活跃。</div>
+      <div class="fp_item_hd"><h2>同花顺解盘</h2></div>
+      <div class="fp_item_cnt"><p>机器人板块午后持续走强，算力方向有承接。</p></div>
+    </body></html>
+    """
+
+    provider = MarketBriefingProvider(requester=lambda *args, **kwargs: FakeHtmlResponse(html))
+    provider.realtime_spot_provider = lambda: [
+        {"代码": "300001", "名称": "机器人A", "最新价": 10.88, "涨跌幅": 8.8, "换手率": 4.2, "量比": 1.8, "流通市值": 85.0},
+        {"代码": "600002", "名称": "低涨幅B", "最新价": 20.10, "涨跌幅": 0.5, "换手率": 2.0, "量比": 1.4, "流通市值": 120.0},
+    ]
+
+    response = provider.latest_fupan()
+
+    assert [section.title for section in response.sections] == ["同花顺解盘"]
+    assert "当日 user 模式匹配个股" not in str(response.model_dump(mode="json"))
 
 
 def test_market_briefing_provider_returns_diagnostics_when_ths_unavailable():
@@ -615,7 +782,22 @@ def test_market_briefing_provider_returns_diagnostics_when_ths_unavailable():
     response = MarketBriefingProvider(requester=requester).latest_fupan()
 
     assert response.kind == "fupan"
-    assert response.source == "fallback"
-    assert response.summary == "同花顺复盘暂不可用，已保留复盘评价入口。"
-    assert response.sections == []
-    assert response.diagnostics == ["同花顺复盘读取失败：network closed"]
+    assert response.source == "ths-fupan+local-brief"
+    assert "只给防守口径" in response.summary
+    assert response.sections[0].title == "本地简短复盘"
+    assert response.diagnostics[0] == "同花顺复盘读取失败：network closed"
+    assert any("本地简短防守复盘" in item for item in response.diagnostics)
+
+
+def test_market_briefing_provider_labels_zaopan_fallback_source_when_ths_unavailable():
+    def requester(*args, **kwargs):
+        raise RuntimeError("zaopan blocked")
+
+    response = MarketBriefingProvider(requester=requester).latest_zaopan()
+
+    assert response.kind == "zaopan"
+    assert response.source == "ths-zaopan+local-brief"
+    assert response.source_url is None
+    assert response.sections
+    assert response.diagnostics[0] == "同花顺早盘读取失败：zaopan blocked"
+    assert any("本地简短防守早盘" in item for item in response.diagnostics)

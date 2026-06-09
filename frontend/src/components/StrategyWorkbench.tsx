@@ -56,6 +56,8 @@ const conditionExamplesById: Record<string, string> = {
   market_rising_ratio_at_least: "市场上涨家数占比大于55%",
   market_cap_between: "流通市值10亿到300亿",
   capital_flow_n_day_sum_at_least: "近3日主力净流入大于300万",
+  capital_flow_today_at_least: "当日主力净流入大于300万",
+  capital_flow_n_day_positive_count_at_least: "近3日主力净流入为正至少2天",
   macd_histogram_at_least: "MACD柱线大于0",
   close_above_ma: "收盘价站上20日均线",
   close_below_ma: "收盘价跌破3日均线",

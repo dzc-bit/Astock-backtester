@@ -1,29 +1,41 @@
 from __future__ import annotations
 
 import json
+import os
+import time
 import threading
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 import pandas as pd
 
 from astock_backtester.sample_data import sample_daily_bars
-from astock_backtester.data.realtime import RealtimeMarketProvider
+from astock_backtester.data.realtime import HeavyMarketCrawlerProvider, RealtimeMarketProvider
 from astock_backtester.data.warehouse import Warehouse
 from astock_backtester.data.news import _parse_time
-from astock_backtester.models import MarketBreadth, MarketIndexQuote, RealtimeMarketSnapshot, SectorMover
+from astock_backtester.models import DatasetCoverage, MarketBreadth, MarketIndexQuote, RealtimeMarketSnapshot, SectorMover
 from astock_backtester.service import create_server
 
 
 def _request_json(method: str, url: str, payload: dict | None = None) -> dict:
     data = None if payload is None else json.dumps(payload).encode("utf-8")
     request = Request(url, data=data, method=method, headers={"Content-Type": "application/json"})
-    with urlopen(request, timeout=5) as response:
-        return json.loads(response.read().decode("utf-8"))
+    try:
+        with urlopen(request, timeout=5) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        return json.loads(exc.read().decode("utf-8"))
 
 
 def _request_ndjson(url: str, payload: dict) -> list[dict]:
     data = json.dumps(payload).encode("utf-8")
     request = Request(url, data=data, method="POST", headers={"Content-Type": "application/json"})
+    with urlopen(request, timeout=5) as response:
+        return [json.loads(line) for line in response.read().decode("utf-8").splitlines() if line.strip()]
+
+
+def _request_get_ndjson(url: str) -> list[dict]:
+    request = Request(url, method="GET", headers={"Accept": "application/x-ndjson"})
     with urlopen(request, timeout=5) as response:
         return [json.loads(line) for line in response.read().decode("utf-8").splitlines() if line.strip()]
 
@@ -70,6 +82,12 @@ def test_service_health_and_logs(tmp_path):
         assert health["ok"] is True
         assert health["port"] == port
         assert health["cache_path"] == str(tmp_path.resolve())
+        assert health["process_id"] == os.getpid()
+        assert isinstance(health["executable_path"], str)
+        assert isinstance(health["executable_sha256"], str)
+        assert len(health["executable_sha256"]) == 64
+        assert isinstance(health["started_at"], str)
+        assert isinstance(health["instance_id"], str)
         assert isinstance(logs["items"], list)
     finally:
         server.shutdown()
@@ -111,6 +129,36 @@ def test_service_ping_is_lightweight(tmp_path):
         thread.join(timeout=5)
 
 
+def test_service_identity_is_lightweight_and_reports_process_identity(tmp_path):
+    class SlowWarehouse:
+        def coverage(self):
+            time.sleep(0.2)
+            return []
+
+    server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
+    server.state.warehouse = SlowWarehouse()
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        started = time.perf_counter()
+        response = _request_json("GET", f"http://127.0.0.1:{port}/identity")
+        elapsed = time.perf_counter() - started
+
+        assert elapsed < 0.2
+        assert response["ok"] is True
+        assert response["port"] == port
+        assert response["cache_path"] == str(tmp_path.resolve())
+        assert response["process_id"] == os.getpid()
+        assert isinstance(response["executable_path"], str)
+        assert isinstance(response["executable_sha256"], str)
+        assert len(response["executable_sha256"]) == 64
+        assert "coverage" not in response
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
 def test_service_coverage_endpoint_returns_symbol_items(tmp_path):
     server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -145,7 +193,7 @@ def test_service_coverage_endpoint_filters_requested_symbols_and_dates(tmp_path)
         thread.join(timeout=5)
 
 
-def test_service_run_backtest_uses_sidecar_cache(tmp_path, basic_strategy, basic_settings):
+def test_service_rejects_legacy_non_stream_backtest_endpoint(tmp_path, basic_strategy, basic_settings):
     server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
     server.state.cache.write_daily_bars(sample_daily_bars())
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -161,12 +209,8 @@ def test_service_run_backtest_uses_sidecar_cache(tmp_path, basic_strategy, basic
             },
         )
 
-        assert response["result"]["metrics"]["trade_count"] >= 1
-        assert response["result"]["trades"]
-        latest_matches = response["result"]["latest_strategy_matches"]
-        assert latest_matches["signal_date"] == "2024-01-08"
-        assert latest_matches["trade_date"] == "2024-01-08"
-        assert isinstance(latest_matches["matches"], list)
+        assert response["code"] == "not_found"
+        assert response["message"] == "/run/backtest"
     finally:
         server.shutdown()
         thread.join(timeout=5)
@@ -270,6 +314,249 @@ def test_service_coverage_endpoint_reads_warehouse_when_cache_is_empty(tmp_path)
 
         assert [item["symbol"] for item in response["items"]] == ["AAA"]
         assert response["items"][0]["rows"] >= 1
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_service_fetch_daily_bars_uses_configured_provider(tmp_path):
+    class FakeProvider:
+        def __init__(self):
+            self.calls = []
+
+        def fetch_daily_bars(self, symbol, start_date, end_date):
+            self.calls.append((symbol, start_date, end_date))
+            if symbol == "000002":
+                return pd.DataFrame()
+            return pd.DataFrame(
+                {
+                    "symbol": [symbol],
+                    "trade_date": ["2026-05-26"],
+                    "open": [10.0],
+                    "high": [10.5],
+                    "low": [9.8],
+                    "close": [10.2],
+                    "volume": [1000],
+                    "amount": [10200.0],
+                    "float_market_cap": [1000000000.0],
+                    "total_market_cap": [1200000000.0],
+                }
+            )
+
+    server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
+    provider = FakeProvider()
+    server.state.provider = provider
+
+    class FakeCapitalFlowCrawler:
+        def fetch_many_fund_flows(self, symbols, start_date, end_date, timeout=15):
+            return {
+                "rows": [
+                    {
+                        "symbol": "000001",
+                        "trade_date": "2026-05-26",
+                        "main_net_inflow": 1_500_000.0,
+                    }
+                ],
+                "failures": [],
+                "diagnostics": [],
+            }
+
+    server.state.capital_flow_crawler = FakeCapitalFlowCrawler()
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        response = _request_json(
+            "POST",
+            f"http://127.0.0.1:{port}/fetch/daily-bars",
+            {"symbols": ["000001", "000002"], "start_date": "2026-05-26", "end_date": "2026-05-29"},
+        )
+
+        assert provider.calls == [
+            ("000001", "2026-05-26", "2026-05-29"),
+            ("000002", "2026-05-26", "2026-05-29"),
+        ]
+        assert response["status"] == "partial"
+        assert response["requested_symbols"] == ["000001", "000002"]
+        assert response["fetched_symbols"] == ["000001"]
+        assert response["missing_symbols"] == ["000002"]
+        assert response["coverage"][0]["end_date"] == "2026-05-26"
+        stored = server.state.warehouse.read_daily_bars(symbols=["000001"])
+        assert stored["trade_date"].dt.strftime("%Y-%m-%d").tolist() == ["2026-05-26"]
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_service_fetch_daily_bars_merges_capital_flow_from_configured_crawler(tmp_path):
+    class FakeProvider:
+        def fetch_daily_bars(self, symbol, start_date, end_date):
+            return pd.DataFrame(
+                {
+                    "symbol": [symbol],
+                    "trade_date": ["2026-05-26"],
+                    "open": [10.0],
+                    "high": [10.5],
+                    "low": [9.8],
+                    "close": [10.2],
+                    "volume": [1000],
+                    "amount": [10200.0],
+                    "float_market_cap": [1000000000.0],
+                    "total_market_cap": [1200000000.0],
+                    "main_net_inflow": [float("nan")],
+                }
+            )
+
+    class FakeCapitalFlowCrawler:
+        def __init__(self):
+            self.calls = []
+
+        def fetch_many_fund_flows(self, symbols, start_date, end_date, timeout=15):
+            self.calls.append((symbols, start_date, end_date, timeout))
+            return {
+                "rows": [{"symbol": "000001", "trade_date": "2026-05-26", "main_net_inflow": 8800000.0}],
+                "failures": [],
+                "diagnostics": [],
+            }
+
+    server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
+    crawler = FakeCapitalFlowCrawler()
+    server.state.provider = FakeProvider()
+    server.state.capital_flow_crawler = crawler
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        response = _request_json(
+            "POST",
+            f"http://127.0.0.1:{port}/fetch/daily-bars",
+            {"symbols": ["000001"], "start_date": "2026-05-26", "end_date": "2026-05-29"},
+        )
+
+        assert crawler.calls == [(["000001"], "2026-05-26", "2026-05-29", 15)]
+        assert response["status"] == "ok"
+        assert response["diagnostics"][0]["code"] == "capital_flow_crawler_merge"
+        stored = server.state.warehouse.read_daily_bars(symbols=["000001"])
+        assert stored["main_net_inflow"].tolist() == [8800000.0]
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_service_fetch_capital_flow_backfills_existing_rows_and_reports_failures(tmp_path):
+    class FakeCapitalFlowCrawler:
+        def fetch_many_fund_flows(self, symbols, start_date, end_date, timeout=15):
+            assert symbols == ["000001", "000002"]
+            assert start_date == "2026-05-26"
+            assert end_date == "2026-05-29"
+            return {
+                "rows": [{"symbol": "000001", "trade_date": "2026-05-26", "main_net_inflow": 8800000.0}],
+                "failures": [{"symbol": "000002", "code": "network_error", "error": "remote disconnected"}],
+                "diagnostics": [{"symbol": "000002", "code": "network_error", "message": "remote disconnected"}],
+            }
+
+    server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
+    server.state.capital_flow_crawler = FakeCapitalFlowCrawler()
+    server.state.warehouse.write_daily_bars(
+        pd.DataFrame(
+            {
+                "symbol": ["000001", "000002"],
+                "trade_date": pd.to_datetime(["2026-05-26", "2026-05-26"]),
+                "open": [10.0, 20.0],
+                "high": [10.5, 20.5],
+                "low": [9.8, 19.8],
+                "close": [10.2, 20.2],
+                "volume": [1000, 2000],
+                "main_net_inflow": [float("nan"), float("nan")],
+            }
+        )
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        response = _request_json(
+            "POST",
+            f"http://127.0.0.1:{port}/fetch/capital-flow",
+            {"symbols": ["000001", "000002"], "start_date": "2026-05-26", "end_date": "2026-05-29"},
+        )
+
+        assert response["status"] == "partial"
+        assert response["imported_rows"] == 1
+        assert response["fetched_symbols"] == ["000001"]
+        assert response["missing_symbols"] == ["000002"]
+        assert response["failures"] == [{"symbol": "000002", "code": "network_error", "error": "remote disconnected"}]
+        assert response["diagnostics"][0]["code"] == "network_error"
+        stored = server.state.warehouse.read_daily_bars(symbols=["000001", "000002"])
+        assert stored.loc[stored["symbol"] == "000001", "main_net_inflow"].tolist() == [8800000.0]
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_service_fetch_capital_flow_empty_symbols_starts_backfill_job(tmp_path):
+    class FakeProvider:
+        def list_symbols(self):
+            return ["000002", "000003"]
+
+    class FakeSyncManager:
+        def __init__(self):
+            self.calls = []
+
+        def start_capital_flow_backfill(self, symbols, start_date, end_date):
+            from datetime import date
+
+            from astock_backtester.models import SyncJobStatus
+
+            self.calls.append((symbols, start_date, end_date))
+            return SyncJobStatus(
+                job_id="flow-job",
+                mode="capital_flow_backfill",
+                status="running",
+                total_symbols=len(symbols),
+                completed_symbols=0,
+                failed_symbols=0,
+                imported_rows=0,
+                current_symbol=symbols[0],
+                start_date=date.fromisoformat(start_date),
+                end_date=date.fromisoformat(end_date),
+            )
+
+        def get_job(self, job_id):
+            return None
+
+    server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
+    server.state.provider = FakeProvider()
+    server.state.warehouse.write_daily_bars(
+        pd.DataFrame(
+            {
+                "symbol": ["000001", "000002"],
+                "trade_date": pd.to_datetime(["2026-05-26", "2026-05-26"]),
+                "open": [10.0, 20.0],
+                "high": [10.5, 20.5],
+                "low": [9.8, 19.8],
+                "close": [10.2, 20.2],
+                "volume": [1000, 2000],
+                "main_net_inflow": [float("nan"), float("nan")],
+            }
+        )
+    )
+    manager = FakeSyncManager()
+    server.state.sync_manager = manager
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        response = _request_json(
+            "POST",
+            f"http://127.0.0.1:{port}/fetch/capital-flow",
+            {"symbols": [], "start_date": "2026-05-26", "end_date": "2026-05-29"},
+        )
+
+        assert manager.calls == [(["000001", "000002", "000003"], "2026-05-26", "2026-05-29")]
+        assert response["job"]["mode"] == "capital_flow_backfill"
+        assert response["job"]["status"] == "running"
+        assert response["diagnostics"][0]["code"] == "capital_flow_backfill_job_started"
     finally:
         server.shutdown()
         thread.join(timeout=5)
@@ -461,6 +748,39 @@ def test_service_realtime_market_snapshot_uses_configured_provider(tmp_path):
         thread.join(timeout=5)
 
 
+def test_service_realtime_market_snapshot_streams_partial_events_before_result(tmp_path):
+    class FakeRealtimeProvider:
+        def market_snapshot_events(self):
+            snapshot = _fake_realtime_snapshot()
+            yield {"type": "indexes", "indexes": snapshot.indexes, "updated_at": snapshot.updated_at, "market_phase": snapshot.market_phase}
+            yield {"type": "breadth", "breadth": snapshot.breadth, "updated_at": snapshot.updated_at, "market_phase": snapshot.market_phase}
+            yield {
+                "type": "sectors",
+                "strong_sectors": snapshot.strong_sectors,
+                "yesterday_strong_sectors": snapshot.yesterday_strong_sectors,
+                "updated_at": snapshot.updated_at,
+                "market_phase": snapshot.market_phase,
+            }
+            yield {"type": "result", "snapshot": snapshot}
+
+    server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
+    server.state.realtime_provider = FakeRealtimeProvider()
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        events = _request_get_ndjson(f"http://127.0.0.1:{port}/realtime/market-snapshot/stream")
+
+        assert [event["type"] for event in events] == ["indexes", "breadth", "sectors", "result"]
+        assert events[0]["indexes"][0]["name"] == "上证指数"
+        assert events[1]["breadth"]["total"] == 5120
+        assert events[2]["strong_sectors"][0]["name"] == "半导体"
+        assert events[-1]["snapshot"]["status"] == "live"
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
 def test_service_realtime_market_snapshot_returns_json_when_provider_raises(tmp_path):
     class BrokenRealtimeProvider:
         def market_snapshot(self):
@@ -566,10 +886,10 @@ def test_service_realtime_market_snapshot_prefers_ths_concept_page_and_skips_eas
         def json(self):
             return self._payload
 
-    requested_urls = []
+    requested_requests = []
 
     def requester(url, **kwargs):
-        requested_urls.append(url)
+        requested_requests.append((url, kwargs.get("params", {})))
         if "hq.sinajs.cn" in url:
             return FakeResponse(
                 text='var hq_str_sh000001="上证指数,0,100,101,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2026-05-27,10:30:00";'
@@ -598,7 +918,116 @@ def test_service_realtime_market_snapshot_prefers_ths_concept_page_and_skips_eas
         assert response["strong_sectors"][0]["name"] == "电力设备"
         assert response["strong_sectors"][0]["source"] == "ths-concept-section"
         assert "沪市主板" not in [item["name"] for item in response["strong_sectors"]]
-        assert not any("eastmoney.com" in url for url in requested_urls)
+        assert not any("eastmoney.com" in url for url, _ in requested_requests)
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_service_realtime_market_snapshot_prefers_cls_breadth_and_hot_plate(tmp_path):
+    class FakeResponse:
+        text = ""
+        encoding = "utf-8"
+
+        def __init__(self, payload=None, text=""):
+            self._payload = payload or {}
+            self.text = text
+
+        def raise_for_status(self):
+            return
+
+        def json(self):
+            return self._payload
+
+    requested_urls: list[str] = []
+
+    def requester(url, **kwargs):
+        requested_urls.append(url)
+        if "quote/index/home" in url:
+            return FakeResponse(
+                {
+                    "code": 200,
+                    "data": {
+                        "index_quote": [
+                            {
+                                "secu_code": "sh000001",
+                                "secu_name": "上证指数",
+                                "last_px": 4010.03,
+                                "preclose_px": 3959.337,
+                                "change_px": 50.69,
+                                "change": 0.0128,
+                            }
+                        ],
+                        "up_down_dis": {
+                            "rise_num": 3322,
+                            "fall_num": 2049,
+                            "flat_num": 156,
+                            "suspend_num": 12,
+                            "up_10": 291,
+                            "up_8": 175,
+                            "up_6": 353,
+                            "up_4": 757,
+                            "up_2": 1746,
+                            "down_2": 1482,
+                            "down_4": 399,
+                            "down_6": 112,
+                            "down_8": 22,
+                            "down_10": 34,
+                        },
+                    },
+                }
+            )
+        if "web_quote/plate/hot_plate" in url:
+            return FakeResponse(
+                {
+                    "code": 200,
+                    "data": {
+                        "industry": [
+                            {
+                                "secu_code": "cls82247",
+                                "secu_name": "电子化学品",
+                                "change": 0.0706,
+                                "up_stock": [{"secu_code": "sz300576", "secu_name": "容大感光", "change": 0.1594}],
+                            }
+                        ],
+                        "concept": [
+                            {
+                                "secu_code": "cls80537",
+                                "secu_name": "功率半导体",
+                                "change": 0.0501,
+                                "up_stock": [{"secu_code": "sh603290", "secu_name": "斯达半导", "change": 0.1}],
+                            }
+                        ],
+                        "area": [],
+                    },
+                }
+            )
+        if "hq.sinajs.cn" in url:
+            raise AssertionError("CLS index quote should make Sina index request unnecessary")
+        return FakeResponse({"data": {"diff": []}})
+
+    server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
+    server.state.warehouse.write_daily_bars(sample_daily_bars())
+    server.state.realtime_provider.requester = requester
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        response = _request_json("GET", f"http://127.0.0.1:{port}/realtime/market-snapshot")
+
+        assert response["indexes"][0]["source"] == "cls-quote-index"
+        assert response["breadth"]["source"] == "cls-quote-breadth"
+        assert response["breadth"]["up"] == 3322
+        assert response["breadth"]["down"] == 2049
+        assert response["breadth"]["flat"] == 156
+        assert response["breadth"]["total"] == 5527
+        assert response["breadth"]["distribution"]["suspend"] == 12
+        assert response["strong_sectors"][0]["name"] == "电子化学品"
+        assert response["strong_sectors"][0]["source"] == "cls-hot-plate"
+        assert abs(response["strong_sectors"][0]["change_pct"] - 0.0706) < 0.000001
+        assert response["strong_sectors"][0]["leading_symbol"] == "300576"
+        assert any("quote/index/home" in url for url in requested_urls)
+        assert any("web_quote/plate/hot_plate" in url for url in requested_urls)
     finally:
         server.shutdown()
         thread.join(timeout=5)
@@ -668,7 +1097,7 @@ def test_service_realtime_market_snapshot_prefers_ths_concept_quotes_over_indust
         thread.join(timeout=5)
 
 
-def test_service_realtime_market_snapshot_does_not_fall_back_to_eastmoney_concept_api(tmp_path):
+def test_service_realtime_market_snapshot_falls_back_to_eastmoney_sector_api_without_using_it_for_breadth(tmp_path):
     class FakeResponse:
         text = ""
         encoding = "utf-8"
@@ -683,14 +1112,30 @@ def test_service_realtime_market_snapshot_does_not_fall_back_to_eastmoney_concep
         def json(self):
             return self._payload
 
-    requested_urls = []
+    requested_requests = []
 
     def requester(url, **kwargs):
-        requested_urls.append(url)
+        requested_requests.append((url, kwargs.get("params", {})))
         if "hq.sinajs.cn" in url:
             return FakeResponse(
                 text='var hq_str_sh000001="上证指数,0,100,101,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2026-06-06,10:30:00";'
             )
+        params = kwargs.get("params", {})
+        fs = str(params.get("fs", ""))
+        if "m:90+t:3" in fs:
+            return FakeResponse(
+                {
+                    "data": {
+                        "diff": [
+                            {"f12": "BK1036", "f14": "半导体", "f3": 2.5, "f128": "688001"},
+                            {"f12": "BK0985", "f14": "机器人概念", "f3": 1.8, "f128": "300024"},
+                            {"f12": "BK1122", "f14": "AI应用", "f3": 1.5, "f128": "300001"},
+                        ]
+                    }
+                }
+            )
+        if "m:90+t:2" in fs:
+            return FakeResponse({"data": {"diff": [{"f12": "BK0473", "f14": "电力行业", "f3": 1.2}]}})
         return FakeResponse({"data": {"diff": []}})
 
     server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
@@ -702,11 +1147,307 @@ def test_service_realtime_market_snapshot_does_not_fall_back_to_eastmoney_concep
         port = server.server_address[1]
         response = _request_json("GET", f"http://127.0.0.1:{port}/realtime/market-snapshot")
 
-        assert response["strong_sectors"] == []
-        assert not any("eastmoney.com" in url for url in requested_urls)
+        assert response["strong_sectors"][0]["name"] == "半导体"
+        assert response["strong_sectors"][0]["source"] == "eastmoney-sector"
+        assert abs(response["strong_sectors"][0]["change_pct"] - 0.025) < 0.000001
+        assert response["breadth"] is None
+        assert response["message"].endswith("红绿家数暂不可用，未展示全市场宽度。")
+        assert any("eastmoney.com" in url for url, _ in requested_requests)
+        assert not any(
+            "eastmoney.com" in url
+            and params.get("fs") == "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048"
+            for url, params in requested_requests
+        )
     finally:
         server.shutdown()
         thread.join(timeout=5)
+
+
+def test_realtime_provider_retries_eastmoney_sector_hosts_before_giving_up(tmp_path):
+    class FakeResponse:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            return
+
+        def json(self):
+            return self._payload
+
+    requested_urls = []
+
+    def requester(url, **kwargs):
+        requested_urls.append(url)
+        if "push2.eastmoney.com/api/qt/clist/get" in url and "82.push2" not in url:
+            raise OSError("remote disconnected")
+        return FakeResponse(
+            {
+                "data": {
+                    "diff": [
+                        {"f12": "BK1036", "f14": "半导体", "f3": 2.5, "f128": "688001"},
+                        {"f12": "BK0985", "f14": "机器人概念", "f3": 1.8, "f128": "300024"},
+                        {"f12": "BK1122", "f14": "AI应用", "f3": 1.5, "f128": "300001"},
+                    ]
+                }
+            }
+        )
+
+    provider = RealtimeMarketProvider(Warehouse(tmp_path), requester=requester)
+
+    sectors = provider._parse_sector_rows(
+        provider._fetch_eastmoney_sector_rows(["m:90+t:3+f:!50", "m:90+t:3"]),
+        "eastmoney-sector",
+    )
+
+    assert sectors[0].name == "半导体"
+    assert sectors[0].source == "eastmoney-sector"
+    assert any(url.startswith("https://push2.eastmoney.com") for url in requested_urls)
+    assert any(url.startswith("https://82.push2.eastmoney.com") for url in requested_urls)
+
+
+def test_realtime_provider_rejects_too_few_eastmoney_sector_rows_with_diagnostics(tmp_path):
+    class FakeResponse:
+        def raise_for_status(self):
+            return
+
+        def json(self):
+            return {
+                "data": {
+                    "diff": [
+                        {"f12": "BK1036", "f14": "半导体", "f3": 2.5, "f128": "688001"},
+                    ]
+                }
+            }
+
+    diagnostics: list[str] = []
+    provider = RealtimeMarketProvider(Warehouse(tmp_path), requester=lambda url, **kwargs: FakeResponse())
+
+    rows = provider._fetch_eastmoney_sector_rows(["m:90+t:3+f:!50"], diagnostics=diagnostics)
+
+    assert rows == []
+    assert any("valid_rows=1" in item and "below_min=3" in item for item in diagnostics)
+
+
+def test_realtime_provider_reports_eastmoney_sector_request_failures(tmp_path):
+    def requester(url, **kwargs):
+        raise OSError("remote disconnected")
+
+    diagnostics: list[str] = []
+    provider = RealtimeMarketProvider(Warehouse(tmp_path), requester=requester)
+
+    rows = provider._fetch_eastmoney_sector_rows(["m:90+t:3+f:!50"], diagnostics=diagnostics)
+
+    assert rows == []
+    assert any("request failed" in item and "remote disconnected" in item for item in diagnostics)
+    assert any("m:90+t:3+f:!50" in item for item in diagnostics)
+
+
+def test_realtime_provider_treats_eastmoney_sub_one_sector_changes_as_percent_units(tmp_path):
+    class FakeResponse:
+        def raise_for_status(self):
+            return
+
+        def json(self):
+            return {
+                "data": {
+                    "diff": [
+                        {"f12": "BK1036", "f14": "半导体", "f3": 0.8, "f128": "688001"},
+                        {"f12": "BK0985", "f14": "机器人概念", "f3": 0.7, "f128": "300024"},
+                        {"f12": "BK1122", "f14": "AI应用", "f3": 0.6, "f128": "300001"},
+                    ]
+                }
+            }
+
+    provider = RealtimeMarketProvider(Warehouse(tmp_path), requester=lambda url, **kwargs: FakeResponse())
+
+    sectors = provider._parse_sector_rows(
+        provider._fetch_eastmoney_sector_rows(["m:90+t:3+f:!50"]),
+        "eastmoney-sector",
+    )
+
+    assert sectors[0].name == "半导体"
+    assert abs(sectors[0].change_pct - 0.008) < 0.000001
+
+
+def test_realtime_provider_bounds_slow_ths_sector_sources_before_eastmoney_fallback(tmp_path):
+    class FakeResponse:
+        text = ""
+        encoding = "utf-8"
+
+        def __init__(self, payload=None):
+            self._payload = payload or {}
+
+        def raise_for_status(self):
+            return
+
+        def json(self):
+            return self._payload
+
+    requested_requests = []
+
+    def requester(url, **kwargs):
+        params = kwargs.get("params", {})
+        requested_requests.append((url, kwargs.get("timeout"), params))
+        if "q.10jqka.com.cn/gn/" in url or "q.10jqka.com.cn/thshy/" in url:
+            raise TimeoutError("ths sector source timed out quickly")
+        if "eastmoney.com/api/qt/clist/get" in url:
+            return FakeResponse(
+                {
+                    "data": {
+                        "diff": [
+                            {"f12": "BK1036", "f14": "半导体", "f3": 2.5, "f128": "688001"},
+                            {"f12": "BK0985", "f14": "机器人概念", "f3": 1.8, "f128": "300024"},
+                            {"f12": "BK1122", "f14": "AI应用", "f3": 1.5, "f128": "300001"},
+                        ]
+                    }
+                }
+            )
+        return FakeResponse({"data": {"diff": []}})
+
+    provider = RealtimeMarketProvider(Warehouse(tmp_path), requester=requester)
+    provider.timeout = 4.0
+    provider.sector_time_budget = 3.0
+
+    sectors = provider._fetch_live_sectors()
+
+    assert sectors[0].source == "eastmoney-sector"
+    ths_timeouts = [
+        timeout
+        for url, timeout, _ in requested_requests
+        if "q.10jqka.com.cn/gn/" in url or "q.10jqka.com.cn/thshy/" in url
+    ]
+    assert ths_timeouts
+    assert max(ths_timeouts) <= 1.0
+    assert not any(
+        "eastmoney.com" in url
+        and params.get("fs") == "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048"
+        for url, _, params in requested_requests
+    )
+
+
+def test_realtime_provider_uses_akshare_sector_fallback_when_eastmoney_sector_unavailable(tmp_path, monkeypatch):
+    class FakeAkshare:
+        def stock_board_concept_name_em(self):
+            return pd.DataFrame(
+                [
+                    {"板块代码": "BK1036", "板块名称": "半导体", "涨跌幅": 2.5, "领涨股票": "688001"},
+                    {"板块代码": "BK0985", "板块名称": "机器人概念", "涨跌幅": 1.8, "领涨股票": "300024"},
+                ]
+            )
+
+        def stock_board_industry_name_em(self):
+            return pd.DataFrame([])
+
+    import sys
+
+    monkeypatch.setitem(sys.modules, "akshare", FakeAkshare())
+    provider = RealtimeMarketProvider(Warehouse(tmp_path))
+    provider._fetch_cls_hot_plate_sectors = lambda diagnostics: []
+    provider._fetch_ths_concept_section_rows = lambda: []
+    provider._fetch_ths_industry_html_rows = lambda: []
+    provider._fetch_eastmoney_sector_rows = lambda fs_values: []
+    provider._fetch_sina_sectors = lambda: []
+
+    sectors = provider._fetch_live_sectors()
+
+    assert sectors[0].name == "半导体"
+    assert sectors[0].source == "akshare-sector"
+    assert abs(sectors[0].change_pct - 0.025) < 0.000001
+
+
+def test_realtime_provider_times_out_slow_akshare_sector_before_eastmoney_backup(tmp_path):
+    provider = RealtimeMarketProvider(Warehouse(tmp_path))
+    provider.sector_source_timeout = 0.01
+    provider._fetch_ths_concept_section_rows = lambda: []
+    provider._fetch_ths_industry_html_rows = lambda: []
+    provider._fetch_sina_sectors = lambda: []
+
+    def slow_akshare_rows(board_type):
+        time.sleep(0.2)
+        return [{"f12": "BK1036", "f14": "akshare-sector-name", "f3": 9.9}]
+
+    provider._fetch_akshare_sector_rows = slow_akshare_rows
+    provider._fetch_eastmoney_sector_rows = lambda fs_values: [
+        {"f12": "BK1036", "f14": "eastmoney-sector-name", "f3": 2.5}
+    ]
+    diagnostics: list[str] = []
+
+    started_at = time.perf_counter()
+    sectors = provider._fetch_live_sectors(diagnostics)
+    elapsed = time.perf_counter() - started_at
+
+    assert elapsed < 0.15
+    assert sectors[0].name == "eastmoney-sector-name"
+    assert sectors[0].source == "eastmoney-sector"
+    assert any("akshare-sector" in item and "timeout" in item.lower() for item in diagnostics)
+
+
+def test_realtime_provider_prefers_sina_sector_before_akshare_fallback(tmp_path, monkeypatch):
+    class FakeAkshare:
+        def stock_board_concept_name_em(self):
+            return pd.DataFrame([{"板块代码": "BK1036", "板块名称": "半导体", "涨跌幅": 9.9}])
+
+        def stock_board_industry_name_em(self):
+            return pd.DataFrame([])
+
+    import sys
+
+    monkeypatch.setitem(sys.modules, "akshare", FakeAkshare())
+    provider = RealtimeMarketProvider(Warehouse(tmp_path))
+    provider._fetch_cls_hot_plate_sectors = lambda diagnostics: []
+    provider._fetch_ths_concept_section_rows = lambda: []
+    provider._fetch_ths_industry_html_rows = lambda: []
+    provider._fetch_eastmoney_sector_rows = lambda fs_values: []
+    provider._fetch_sina_sectors = lambda: [SectorMover(name="机器人行业", change_pct=0.03, source="sina-sector")]
+
+    sectors = provider._fetch_live_sectors()
+
+    assert sectors[0].name == "机器人行业"
+    assert sectors[0].source == "sina-sector"
+
+
+def test_realtime_provider_prefers_sina_sector_before_eastmoney_backup(tmp_path):
+    provider = RealtimeMarketProvider(Warehouse(tmp_path))
+    eastmoney_calls = []
+
+    provider._fetch_cls_hot_plate_sectors = lambda diagnostics: []
+    provider._fetch_ths_concept_section_rows = lambda: []
+    provider._fetch_ths_industry_html_rows = lambda: []
+    provider._fetch_sina_sectors = lambda: [SectorMover(name="sina-sector-name", change_pct=0.03, source="sina-sector")]
+
+    def eastmoney_rows(fs_values):
+        eastmoney_calls.append(fs_values)
+        return [{"f12": "BK1036", "f14": "eastmoney-sector-name", "f3": 5.0}]
+
+    provider._fetch_eastmoney_sector_rows = eastmoney_rows
+
+    sectors = provider._fetch_live_sectors([])
+
+    assert sectors[0].name == "sina-sector-name"
+    assert sectors[0].source == "sina-sector"
+    assert eastmoney_calls == []
+
+
+def test_realtime_provider_reports_failed_live_sector_sources(tmp_path):
+    provider = RealtimeMarketProvider(Warehouse(tmp_path))
+    diagnostics: list[str] = []
+
+    provider._fetch_cls_hot_plate_sectors = lambda diagnostics: []
+    provider._fetch_ths_concept_section_rows = lambda: []
+    provider._fetch_ths_industry_html_rows = lambda: []
+    provider._fetch_sina_sectors = lambda: []
+    provider._fetch_akshare_sector_rows = lambda board_type: []
+    provider._fetch_eastmoney_sector_rows = lambda fs_values: []
+    provider._fetch_ths_hot_topic_rows = lambda: []
+
+    sectors = provider._fetch_live_sectors(diagnostics)
+
+    assert sectors == []
+    assert any("ths-concept-section" in item for item in diagnostics)
+    assert any("ths-industry-html" in item for item in diagnostics)
+    assert any("sina-sector" in item for item in diagnostics)
+    assert any("akshare-sector" in item for item in diagnostics)
+    assert any("eastmoney-sector" in item for item in diagnostics)
 
 
 def test_service_realtime_market_snapshot_parses_sub_one_ths_concept_pct_as_percent_unit(tmp_path):
@@ -820,10 +1561,10 @@ def test_service_realtime_market_snapshot_falls_back_to_ths_industry_page_when_c
         def json(self):
             return self._payload
 
-    requested_urls = []
+    requested_requests = []
 
     def requester(url, **kwargs):
-        requested_urls.append(url)
+        requested_requests.append((url, kwargs.get("params", {})))
         if "hq.sinajs.cn" in url:
             return FakeResponse(
                 text='var hq_str_sh000001="上证指数,0,100,101,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2026-05-27,10:30:00";'
@@ -860,7 +1601,11 @@ def test_service_realtime_market_snapshot_falls_back_to_ths_industry_page_when_c
         assert response["strong_sectors"][0]["name"] == "小金属"
         assert response["strong_sectors"][0]["source"] == "ths-industry-html"
         assert "同花顺行业板块总览" in response["message"]
-        assert not any("eastmoney.com" in url for url in requested_urls)
+        assert not any(
+            "eastmoney.com" in url
+            and params.get("fs") == "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048"
+            for url, params in requested_requests
+        )
     finally:
         server.shutdown()
         thread.join(timeout=5)
@@ -881,10 +1626,10 @@ def test_service_realtime_market_snapshot_uses_ths_market_summary_breadth_when_a
         def json(self):
             return self._payload
 
-    requested_urls = []
+    requested_requests = []
 
     def requester(url, **kwargs):
-        requested_urls.append(url)
+        requested_requests.append((url, kwargs.get("params", {})))
         if "hq.sinajs.cn" in url:
             return FakeResponse(
                 text='var hq_str_sh000001="上证指数,0,100,101,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2026-05-27,10:30:00";'
@@ -904,13 +1649,17 @@ def test_service_realtime_market_snapshot_uses_ths_market_summary_breadth_when_a
 
         assert response["breadth"] == {"up": 3210, "down": 1820, "flat": 120, "total": 5150, "source": "ths-market-summary"}
         assert "红绿家数来自同花顺市场总览" in response["message"]
-        assert not any("eastmoney.com" in url for url in requested_urls)
+        assert not any(
+            "eastmoney.com" in url
+            and params.get("fs") == "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048"
+            for url, params in requested_requests
+        )
     finally:
         server.shutdown()
         thread.join(timeout=5)
 
 
-def test_service_realtime_market_snapshot_prefers_sina_breadth_before_eastmoney_fallback(tmp_path):
+def test_service_realtime_market_snapshot_rejects_partial_sina_breadth_before_fallback(tmp_path):
     import pandas as pd
 
     class FakeResponse:
@@ -980,8 +1729,217 @@ def test_service_realtime_market_snapshot_prefers_sina_breadth_before_eastmoney_
         port = server.server_address[1]
         response = _request_json("GET", f"http://127.0.0.1:{port}/realtime/market-snapshot")
 
-        assert response["breadth"] == {"up": 1, "down": 1, "flat": 1, "total": 3, "source": "sina-a-share-live"}
-        assert "红绿家数来自新浪实时个股" in response["message"]
+        assert response["breadth"] is None
+        assert response["status"] == "stale"
+        assert any("sina-a-share-live" in item and "全市场红绿家数不完整" in item for item in response["diagnostics"])
+        assert any("local-latest" in item and "全市场红绿家数不完整" in item for item in response["diagnostics"])
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_realtime_provider_rejects_partial_live_breadth_with_diagnostics(tmp_path):
+    warehouse = Warehouse(tmp_path)
+    provider = RealtimeMarketProvider(warehouse)
+    diagnostics: list[str] = []
+
+    provider._latest_local_symbol_count = lambda: 5100
+    provider._fetch_cls_breadth = lambda: None
+    provider._fetch_ths_market_summary_breadth = lambda: None
+    provider._fetch_sina_breadth = lambda: MarketBreadth(
+        up=107,
+        down=80,
+        flat=5,
+        total=192,
+        source="sina-a-share-live",
+    )
+    provider._fetch_tencent_breadth = lambda diagnostics: None
+    provider._fetch_akshare_breadth = lambda diagnostics: None
+    provider._fetch_heavy_breadth = lambda diagnostics: None
+    provider._fetch_eastmoney_breadth = lambda diagnostics: None
+
+    breadth = provider._fetch_live_breadth(diagnostics)
+
+    assert breadth is None
+    assert any("sina-a-share-live" in item and "total=192" in item for item in diagnostics)
+    assert any("全市场红绿家数不完整" in item for item in diagnostics)
+
+
+def test_realtime_provider_rejects_breadth_below_local_pool_ratio(tmp_path):
+    warehouse = Warehouse(tmp_path)
+    provider = RealtimeMarketProvider(warehouse)
+    diagnostics: list[str] = []
+
+    provider._latest_local_symbol_count = lambda: 5100
+
+    accepted = provider._breadth_is_complete(
+        MarketBreadth(up=1800, down=1200, flat=100, total=3100, source="sina-a-share-live"),
+        5100,
+        diagnostics,
+    )
+
+    assert accepted is False
+    assert any("sina-a-share-live" in item and "total=3100" in item and "比例=60.8%" in item for item in diagnostics)
+
+
+def test_realtime_provider_rejects_partial_local_breadth_against_warehouse_coverage():
+    from datetime import date, datetime, timezone
+
+    bars = pd.DataFrame(
+        [
+            {
+                "symbol": f"{index:06d}",
+                "trade_date": pd.Timestamp("2026-06-05"),
+                "open": 10.0,
+                "high": 10.5,
+                "low": 9.8,
+                "close": 10.0,
+                "volume": 1000,
+            }
+            for index in range(1, 193)
+        ]
+    )
+
+    class PartialLatestWarehouse:
+        def read_latest_daily_bars(self, days=3):
+            return bars
+
+        def coverage(self):
+            return [
+                DatasetCoverage(
+                    dataset="daily_bars",
+                    symbols=5100,
+                    start_date=date(2015, 1, 5),
+                    end_date=date(2026, 6, 5),
+                    missing_rows=0,
+                )
+            ]
+
+    provider = RealtimeMarketProvider(PartialLatestWarehouse())
+    provider._skip_local_topic_fetch_once = True
+
+    snapshot = provider._snapshot_from_local(datetime(2026, 6, 7, tzinfo=timezone.utc))
+
+    assert snapshot.breadth is None
+    assert any("local-latest" in item and "total=192" in item for item in snapshot.diagnostics)
+
+
+def test_realtime_provider_heavy_breadth_uses_browser_provider_after_public_html_failure(tmp_path):
+    warehouse = Warehouse(tmp_path)
+    provider = RealtimeMarketProvider(warehouse)
+    provider._latest_local_symbol_count = lambda: 5100
+
+    def requester(*args, **kwargs):
+        raise RuntimeError("public html blocked")
+
+    provider.requester = requester
+
+    class FakeBrowserProvider:
+        def fetch_breadth_from_dom(self, url):
+            return MarketBreadth(up=3300, down=1500, flat=300, total=5100, source="browser-market-provider")
+
+    provider._heavy_market_provider = HeavyMarketCrawlerProvider(
+        requester=requester,
+        timeout=0.01,
+        browser_provider=FakeBrowserProvider(),
+    )
+
+    diagnostics: list[str] = []
+    breadth = provider._fetch_live_breadth(diagnostics)
+
+    assert breadth is not None
+    assert breadth.source == "browser-market-provider"
+
+
+def test_heavy_market_crawler_does_not_reuse_cached_breadth_as_current_live_data():
+    def requester(*args, **kwargs):
+        raise RuntimeError("public market crawler blocked")
+
+    provider = HeavyMarketCrawlerProvider(requester=requester, timeout=0.01)
+    provider._last_successful_breadth = MarketBreadth(
+        up=3300,
+        down=1500,
+        flat=300,
+        total=5100,
+        source="heavy-market-crawler",
+    )
+
+    assert provider.fetch_breadth() is None
+
+
+def test_realtime_provider_live_message_labels_heavy_breadth_source(tmp_path):
+    provider = RealtimeMarketProvider(Warehouse(tmp_path))
+
+    message = provider._build_live_message(
+        MarketBreadth(up=3300, down=1500, flat=300, total=5100, source="browser-market-provider"),
+        [],
+    )
+
+    assert "浏览器公开行情爬虫" in message
+
+
+def test_realtime_provider_live_message_does_not_claim_local_breadth_when_breadth_missing(tmp_path):
+    provider = RealtimeMarketProvider(Warehouse(tmp_path))
+
+    message = provider._build_live_message(
+        None,
+        [SectorMover(name="半导体", change_pct=0.025, source="sina-sector")],
+    )
+
+    assert "红绿家数暂不可用" in message
+    assert "红绿家数暂回退" not in message
+
+
+def test_service_market_fupan_keeps_user_mode_candidates_out_of_briefing(tmp_path):
+    class FakeResponse:
+        text = ""
+        encoding = "utf-8"
+        content = b""
+        apparent_encoding = "utf-8"
+
+        def __init__(self, payload=None, text=""):
+            self._payload = payload or {}
+            self.text = text
+            self.content = text.encode("utf-8")
+
+        def raise_for_status(self):
+            return
+
+        def json(self):
+            return self._payload
+
+    requested_requests = []
+
+    def requester(url, **kwargs):
+        requested_requests.append((url, kwargs.get("params", {})))
+        if "stock.10jqka.com.cn/fupan/" in url:
+            return FakeResponse(
+                text="""
+                <html><body>
+                  <div id="fpzj">复盘摘要：机器人和算力活跃。</div>
+                  <div class="fp_item_hd"><h2>同花顺解盘</h2></div>
+                  <div class="fp_item_cnt"><p>机器人板块午后持续走强，算力方向有承接。</p></div>
+                </body></html>
+                """
+            )
+        raise AssertionError(f"unexpected network request: {url}")
+
+    server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
+    server.state.briefing_provider.requester = requester
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        response = _request_json("GET", f"http://127.0.0.1:{port}/market/fupan")
+
+        assert response["source"] == "ths-fupan"
+        assert [section["title"] for section in response["sections"]] == ["同花顺解盘"]
+        assert "当日 user 模式匹配个股" not in json.dumps(response, ensure_ascii=False)
+        assert not any(
+            "eastmoney.com" in url
+            and params.get("fs") == "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048"
+            for url, params in requested_requests
+        )
     finally:
         server.shutdown()
         thread.join(timeout=5)
@@ -1045,10 +2003,10 @@ def test_service_realtime_market_snapshot_uses_local_breadth_without_eastmoney_w
         def json(self):
             return self._payload
 
-    requested_urls = []
+    requested_requests = []
 
     def requester(url, **kwargs):
-        requested_urls.append(url)
+        requested_requests.append((url, kwargs.get("params", {})))
         if "hq.sinajs.cn" in url:
             return FakeResponse(
                 text='var hq_str_sh000001="上证指数,0,100,101,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2026-05-27,10:30:00";'
@@ -1064,8 +2022,13 @@ def test_service_realtime_market_snapshot_uses_local_breadth_without_eastmoney_w
         port = server.server_address[1]
         response = _request_json("GET", f"http://127.0.0.1:{port}/realtime/market-snapshot")
 
-        assert response["breadth"]["source"] == "local-latest"
-        assert not any("eastmoney.com" in url for url in requested_urls)
+        assert response["breadth"] is None
+        assert any("local-latest" in item and "全市场红绿家数不完整" in item for item in response["diagnostics"])
+        assert not any(
+            "eastmoney.com" in url
+            and params.get("fs") == "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048"
+            for url, params in requested_requests
+        )
     finally:
         server.shutdown()
         thread.join(timeout=5)
@@ -1113,6 +2076,101 @@ def test_realtime_provider_sina_breadth_batches_are_bounded(tmp_path):
     assert requested_symbol_counts == [400, 5]
 
 
+def test_realtime_provider_returns_breadth_without_waiting_for_slow_sector_sources(tmp_path):
+    warehouse = Warehouse(tmp_path)
+    provider = RealtimeMarketProvider(warehouse)
+    provider.sector_time_budget = 0.02
+    provider._fetch_indexes = lambda: [
+        MarketIndexQuote(
+            symbol="sh000001",
+            name="上证指数",
+            last=3100.0,
+            previous_close=3080.0,
+            change=20.0,
+            change_pct=0.0064935,
+            source="fake-live",
+        )
+    ]
+    provider._fetch_live_breadth = lambda: MarketBreadth(up=3200, down=1700, flat=200, total=5100, source="fast-breadth")
+
+    def slow_sectors():
+        time.sleep(0.2)
+        return [SectorMover(name="慢板块", change_pct=0.05, source="slow-sector")]
+
+    provider._fetch_live_sectors = slow_sectors
+
+    def local_snapshot(now):
+        return RealtimeMarketSnapshot(
+            status="stale",
+            source="local-latest",
+            updated_at=now,
+            indexes=[],
+            breadth=MarketBreadth(up=1, down=1, flat=0, total=2, source="local-latest"),
+            strong_sectors=[SectorMover(name="本地题材", change_pct=0.02, source="local-market-group")],
+            yesterday_strong_sectors=[],
+            message="local",
+        )
+
+    provider._snapshot_from_local = local_snapshot
+
+    started_at = time.perf_counter()
+    snapshot = provider.market_snapshot()
+    elapsed = time.perf_counter() - started_at
+
+    assert elapsed < 0.15
+    assert snapshot.status == "stale"
+    assert snapshot.breadth is not None
+    assert snapshot.breadth.source == "fast-breadth"
+    assert snapshot.strong_sectors[0].source == "local-market-group"
+    assert any("实时强势题材接口超时" in item for item in snapshot.diagnostics)
+
+
+def test_realtime_provider_does_not_cache_stale_snapshot_with_local_fallback_sectors(tmp_path):
+    warehouse = Warehouse(tmp_path)
+    provider = RealtimeMarketProvider(warehouse)
+    provider._fetch_indexes = lambda: [
+        MarketIndexQuote(
+            symbol="sh000001",
+            name="涓婅瘉鎸囨暟",
+            last=3100.0,
+            previous_close=3080.0,
+            change=20.0,
+            change_pct=0.0064935,
+            source="fake-live",
+        )
+    ]
+    provider._fetch_live_breadth = lambda: MarketBreadth(
+        up=3200,
+        down=1700,
+        flat=200,
+        total=5100,
+        source="fast-breadth",
+    )
+    provider._fetch_live_sectors = lambda: []
+
+    def local_snapshot(now):
+        return RealtimeMarketSnapshot(
+            status="stale",
+            source="local-latest",
+            updated_at=now,
+            indexes=[],
+            breadth=None,
+            strong_sectors=[SectorMover(name="鏈湴棰樻潗", change_pct=0.02, source="local-market-group")],
+            yesterday_strong_sectors=[],
+            message="local",
+        )
+
+    provider._snapshot_from_local = local_snapshot
+
+    snapshot = provider.market_snapshot()
+
+    assert snapshot.status == "stale"
+    assert snapshot.breadth is not None
+    assert snapshot.breadth.source == "fast-breadth"
+    assert snapshot.strong_sectors[0].source == "local-market-group"
+    assert provider._last_successful_snapshot is None
+
+
 def test_service_realtime_market_snapshot_tracks_yesterday_strong_sectors_from_local_history(tmp_path):
     class FakeResponse:
         text = ""
@@ -1128,10 +2186,10 @@ def test_service_realtime_market_snapshot_tracks_yesterday_strong_sectors_from_l
         def json(self):
             return self._payload
 
-    requested_urls = []
+    requested_requests = []
 
     def requester(url, **kwargs):
-        requested_urls.append(url)
+        requested_requests.append((url, kwargs.get("params", {})))
         if "hq.sinajs.cn" in url:
             return FakeResponse(
                 text='var hq_str_sh000001="上证指数,0,100,101,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2026-05-27,10:30:00";'
@@ -1223,7 +2281,11 @@ def test_service_realtime_market_snapshot_tracks_yesterday_strong_sectors_from_l
         assert response["yesterday_strong_sectors"][0]["name"] == "电力设备"
         assert response["yesterday_strong_sectors"][0]["source"] == "local-yesterday-group"
         assert response["message"].endswith("昨日强势板块追踪来自本地历史。")
-        assert not any("eastmoney.com" in url for url in requested_urls)
+        assert not any(
+            "eastmoney.com" in url
+            and params.get("fs") == "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048"
+            for url, params in requested_requests
+        )
     finally:
         server.shutdown()
         thread.join(timeout=5)
@@ -1651,6 +2713,179 @@ def test_service_market_commentary_uses_configured_provider(tmp_path):
         thread.join(timeout=5)
 
 
+def test_service_market_finance_returns_cls_market_board_payload(tmp_path):
+    class FakeResponse:
+        text = ""
+        encoding = "utf-8"
+
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            return
+
+        def json(self):
+            return self._payload
+
+    def requester(url, **kwargs):
+        if "quote/index/tline" in url:
+            return FakeResponse(
+                {
+                    "code": 200,
+                    "data": [
+                        {"date": 20260609, "minute": 930, "last_px": 3977.539, "change": 0.0047},
+                        {"date": 20260609, "minute": 931, "last_px": 3966.391, "change": -0.0028},
+                    ],
+                }
+            )
+        if "v3/transaction/anchor" in url:
+            return FakeResponse(
+                {
+                    "errno": 0,
+                    "data": [
+                        {
+                            "symbol_code": "cls80025",
+                            "symbol_name": "PCB",
+                            "article_id": 2394344,
+                            "c_time": "2026-06-09 09:31:30",
+                            "float": "up",
+                            "schema": "cailianshe://plate_detail?plate_id=cls80025",
+                        }
+                    ],
+                }
+            )
+        if "quote/index/basic" in url:
+            return FakeResponse({"code": 200, "data": {"preclose_px": 3959.337}})
+        if "v2/quote/a/stock/emotion" in url:
+            return FakeResponse(
+                {
+                    "code": 200,
+                    "data": {
+                        "market_degree": "56",
+                        "shsz_balance": "2.64万亿",
+                        "shsz_balance_change_px": "-1524亿",
+                        "up_ratio_num": "130",
+                        "up_open_num": "25",
+                        "performance": "1.74%",
+                        "up_down_dis": {
+                            "rise_num": 3322,
+                            "fall_num": 2049,
+                            "flat_num": 156,
+                            "suspend_num": 12,
+                        },
+                    },
+                }
+            )
+        if "quote/index/up_down_analysis" in url:
+            return FakeResponse(
+                {
+                    "code": 200,
+                    "data": [
+                        {
+                            "secu_code": "sh601869",
+                            "secu_name": "长飞光纤",
+                            "change": 0.1,
+                            "last_px": 484.33,
+                            "time": "2026-06-09 13:34:47",
+                            "up_reason": "光纤|全球光纤光缆行业领先企业。",
+                            "limit_up_days": 1,
+                            "plate": [{"secu_code": "cls81670", "secu_name": "光纤光缆", "change": 0.0393}],
+                        }
+                    ],
+                }
+            )
+        raise AssertionError(f"unexpected url: {url}")
+
+    server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
+    server.state.finance_provider.requester = requester
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        response = _request_json("GET", f"http://127.0.0.1:{port}/market/finance")
+
+        assert response["source"] == "cls-finance"
+        assert response["source_url"] == "https://www.cls.cn/finance"
+        assert response["preclose_px"] == 3959.337
+        assert response["tline"][0]["minute"] == 930
+        assert response["anchors"][0]["name"] == "PCB"
+        assert response["emotion"]["market_degree"] == 56.0
+        assert response["emotion"]["breadth"]["up"] == 3322
+        assert response["up_pool"][0]["symbol"] == "601869"
+        assert response["up_pool"][0]["plates"][0]["name"] == "光纤光缆"
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_service_market_finance_returns_empty_board_when_provider_raises(tmp_path):
+    class BrokenFinanceProvider:
+        def current_board(self):
+            raise ValueError("finance payload changed")
+
+    server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
+    server.state.finance_provider = BrokenFinanceProvider()
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        response = _request_json("GET", f"http://127.0.0.1:{port}/market/finance")
+
+        assert response["source"] == "cls-finance"
+        assert response["source_url"] == "https://www.cls.cn/finance"
+        assert response["tline"] == []
+        assert response["up_pool"] == []
+        assert "finance payload changed" in response["diagnostics"][0]
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_service_market_commentary_returns_backend_brief_fallback_when_provider_raises(tmp_path):
+    class BrokenCommentaryProvider:
+        def current_commentary(self):
+            raise TimeoutError("commentary upstream timeout")
+
+    server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
+    server.state.commentary_provider = BrokenCommentaryProvider()
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        response = _request_json("GET", f"http://127.0.0.1:{port}/market/commentary")
+
+        assert response["source"] == "local-brief-commentary"
+        assert response["mode"] == "local_brief_review"
+        assert response["stance"] == "defensive"
+        assert "后端简短判断" in response["summary"]
+        assert "commentary upstream timeout" in response["diagnostics"][0]
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_service_market_commentary_does_not_hide_programming_errors(tmp_path):
+    class BrokenCommentaryProvider:
+        def current_commentary(self):
+            raise AttributeError("bad field access")
+
+    server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
+    server.state.commentary_provider = BrokenCommentaryProvider()
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        try:
+            _request_json("GET", f"http://127.0.0.1:{port}/market/commentary")
+        except Exception as exc:
+            assert "Remote end closed connection" in str(exc) or "bad field access" in str(exc)
+        else:
+            raise AssertionError("programming error was hidden behind commentary fallback")
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
 def test_service_market_news_summary_uses_configured_provider(tmp_path):
     class FakeNewsSummaryProvider:
         def latest_summary(self):
@@ -2002,6 +3237,43 @@ def test_service_returns_sync_job_progress_by_id(tmp_path):
         assert started["job"]["current_symbol"] == "000002"
         assert progress["job"]["status"] == "completed"
         assert progress["job"]["imported_rows"] == 200
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_service_cancels_sync_job_by_id(tmp_path):
+    class FakeManager:
+        def cancel_job(self, job_id):
+            from datetime import date
+
+            from astock_backtester.models import SyncJobStatus
+
+            assert job_id == "job-cancel"
+            return SyncJobStatus(
+                job_id=job_id,
+                mode="capital_flow_backfill",
+                status="cancelling",
+                total_symbols=3,
+                completed_symbols=1,
+                processed_symbols=1,
+                imported_rows=5,
+                returned_rows=8,
+                current_symbol="000002",
+                start_date=date(2026, 6, 1),
+                end_date=date(2026, 6, 5),
+            )
+
+    server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
+    server.state.sync_manager = FakeManager()
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        response = _request_json("POST", f"http://127.0.0.1:{port}/sync/jobs/job-cancel/cancel", {})
+
+        assert response["job"]["status"] == "cancelling"
+        assert response["job"]["returned_rows"] == 8
     finally:
         server.shutdown()
         thread.join(timeout=5)

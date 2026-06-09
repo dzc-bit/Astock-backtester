@@ -4,12 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "astock-backtester"
-version = "1.1.0"
+version = "1.2.1"
 description = "Windows desktop A-share daily historical backtester backend"
 requires-python = ">=3.11"
 dependencies = [
   "adata>=2.9.5",
+  "akshare>=1.16",
   "beautifulsoup4>=4.14",
+  "curl_cffi>=0.15",
   "numpy>=1.26",
   "pandas>=2.2",
   "pyarrow>=15",

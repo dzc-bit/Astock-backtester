@@ -8,7 +8,6 @@ from typing import Any, Callable, Literal
 from urllib.parse import urljoin
 from urllib.parse import urlparse
 
-import pandas as pd
 import requests
 from bs4 import BeautifulSoup, Tag
 
@@ -44,12 +43,33 @@ def _clean_text(value: str | None, max_length: int | None = None) -> str:
     return text
 
 
+_THS_BOARD_CODE_PATTERN = re.compile(r"(?<!\d)88\d{4}(?!\d)")
+
+
+def _clean_display_text(value: str | None, max_length: int | None = None) -> str:
+    text = _clean_text(value, max_length=max_length)
+    if not text:
+        return ""
+    return _clean_text(_THS_BOARD_CODE_PATTERN.sub("", text))
+
+
 def _node_text(node: Tag | None, max_length: int | None = None) -> str:
     return _clean_text(node.get_text(" ", strip=True) if node else "", max_length=max_length)
 
 
 _TIMESTAMP_PATTERN = re.compile(r"\d{4}[-/年]\d{1,2}[-/月]\d{1,2}日?(?:\s+\d{1,2}:\d{2}(?::\d{2})?)?")
 _NUMERIC_TOKEN_PATTERN = re.compile(r"^[+-]?\d+(?:\.\d+)?%?$")
+_CN_FIELD_KEYWORDS = (
+    "名称",
+    "板块",
+    "股票数",
+    "计算方式",
+    "涨幅",
+    "涨跌幅",
+    "最新",
+    "同比指数盈利",
+)
+_SENTENCE_PUNCTUATION_PATTERN = re.compile(r"[，。；、：,.!?！？]")
 
 
 def _is_percent_text(value: str) -> bool:
@@ -62,6 +82,48 @@ def _is_number_text(value: str) -> bool:
 
 def _is_rank_text(value: str) -> bool:
     return bool(re.fullmatch(r"\d{1,3}", value.strip()))
+
+
+def _numeric_soup_tokens(text: str) -> list[str]:
+    return [
+        token
+        for token in re.split(r"\s+", text)
+        if token and (_NUMERIC_TOKEN_PATTERN.match(token) or re.search(r"\d", token))
+    ]
+
+
+def _is_headerless_market_number_row(row: list[str]) -> bool:
+    if len(row) < 4:
+        return False
+    first = row[0].strip()
+    if not first or _is_number_text(first):
+        return False
+    numeric_cells = [cell for cell in row[1:] if _is_number_text(cell) or _is_percent_text(cell)]
+    has_market_shape = any(_is_percent_text(cell) for cell in row[1:]) and len(numeric_cells) >= 3
+    return has_market_shape and not any(keyword in first for keyword in _CN_FIELD_KEYWORDS)
+
+
+def _is_disallowed_section_title(title: str | None) -> bool:
+    compact = re.sub(r"\s+", "", title or "")
+    return "同比指数盈利" in compact
+
+
+def _is_ths_board_code_cell(value: str | None) -> bool:
+    return bool(re.fullmatch(r"88\d{4}", (value or "").strip()))
+
+
+def _drop_ths_board_code_columns(rows: list[list[str]]) -> list[list[str]]:
+    if len(rows) < 2:
+        return rows
+    width = max(len(row) for row in rows)
+    drop_indexes: set[int] = set()
+    for index in range(width):
+        cells = [row[index].strip() for row in rows[1:] if index < len(row) and row[index].strip()]
+        if cells and all(_is_ths_board_code_cell(cell) for cell in cells):
+            drop_indexes.add(index)
+    if not drop_indexes:
+        return rows
+    return [[cell for index, cell in enumerate(row) if index not in drop_indexes] for row in rows]
 
 
 def _is_stock_gain_price_row(row: list[str], title: str | None) -> bool:
@@ -116,6 +178,8 @@ def _is_noisy_content_line(text: str) -> bool:
     compact = re.sub(r"\s+", "", cleaned)
     if re.fullmatch(r"[%％]+", compact):
         return True
+    if compact == "同比指数盈利":
+        return True
     timestamp_count = len(_TIMESTAMP_PATTERN.findall(cleaned))
     without_timestamps = _TIMESTAMP_PATTERN.sub("", cleaned).strip()
     if timestamp_count >= 2 and len(without_timestamps) <= 24:
@@ -124,11 +188,15 @@ def _is_noisy_content_line(text: str) -> bool:
     cjk_count = len(re.findall(r"[\u4e00-\u9fff]", without_timestamps))
     digit_count = len(re.findall(r"\d", without_timestamps))
     text_length = max(len(re.sub(r"\s+", "", without_timestamps)), 1)
-    numeric_tokens = [
-        token
-        for token in re.split(r"\s+", without_timestamps)
-        if token and (_NUMERIC_TOKEN_PATTERN.match(token) or re.search(r"\d", token))
-    ]
+    numeric_tokens = _numeric_soup_tokens(without_timestamps)
+    has_field_keywords = sum(1 for keyword in _CN_FIELD_KEYWORDS if keyword in without_timestamps) >= 2
+    if (
+        has_field_keywords
+        and len(numeric_tokens) >= 3
+        and (_is_percent_text(without_timestamps) or timestamp_count > 0)
+        and not _SENTENCE_PUNCTUATION_PATTERN.search(without_timestamps)
+    ):
+        return True
     if digit_count >= 8 and cjk_count <= 6 and digit_count / text_length >= 0.35:
         return True
     if len(numeric_tokens) >= 4 and cjk_count <= 8 and not re.search(r"[，。；、：]", without_timestamps):
@@ -148,9 +216,17 @@ def _readable_content_from_node(node: Tag | None) -> str:
         return ""
     blocks = [_node_text(block) for block in node.select("h1,h2,h3,p,li")]
     if not blocks:
+        leaf_selectors = "div,section,article,span"
+        leaf_nodes = [
+            block
+            for block in node.select(leaf_selectors)
+            if not block.select_one(f"h1,h2,h3,p,li,{leaf_selectors}")
+        ]
+        blocks = [_node_text(block) for block in leaf_nodes]
+    if not blocks:
         blocks = [_node_text(node)]
     filtered = [block for block in blocks if block and not _is_noisy_content_line(block)]
-    return "\n\n".join(_clean_text(block) for block in filtered)
+    return "\n\n".join(_clean_display_text(block) for block in filtered)
 
 
 def _ths_headers(referer: str = THS_REFERER) -> dict[str, str]:
@@ -187,12 +263,16 @@ def _section_title(node: Tag, fallback: str) -> str:
 
 
 def _table_from_node(table: Tag, title: str | None = None) -> MarketBriefingTable | None:
-    rows: list[list[str]] = []
+    raw_rows: list[list[str]] = []
     for tr in table.select("tr"):
         cells = [_node_text(cell, max_length=160) for cell in tr.select("th,td")]
         cells = [cell for cell in cells if cell]
         if cells:
-            rows.append(cells)
+            raw_rows.append(cells)
+    rows = [
+        [_clean_display_text(cell) for cell in row]
+        for row in _drop_ths_board_code_columns(raw_rows)
+    ]
     if not rows:
         return None
 
@@ -202,6 +282,8 @@ def _table_from_node(table: Tag, title: str | None = None) -> MarketBriefingTabl
         data_rows = rows[1:]
     else:
         data_rows = rows
+        if not _is_stock_like_title(title) and all(_is_headerless_market_number_row(row) for row in data_rows):
+            return None
         if not _is_stock_like_title(title) and all(_is_noisy_content_line(" ".join(row)) for row in data_rows):
             return None
         if data_rows and len(data_rows[0]) >= 3 and _is_rank_text(data_rows[0][0]):
@@ -228,7 +310,7 @@ def _links_from_node(node: Tag, base_url: str, limit: int = 8) -> list[MarketBri
     seen: set[str] = set()
     for anchor in node.select("a[href]"):
         href = str(anchor.get("href") or "").strip()
-        title = _clean_text(str(anchor.get("title") or "") or anchor.get_text(" ", strip=True), max_length=120)
+        title = _clean_display_text(str(anchor.get("title") or "") or anchor.get_text(" ", strip=True), max_length=120)
         if not href or not title:
             continue
         url = urljoin(base_url, href)
@@ -306,7 +388,7 @@ def _article_body(soup: BeautifulSoup) -> str | None:
     paragraphs = [paragraph for paragraph in paragraphs if len(paragraph) >= 8 and not _is_noisy_content_line(paragraph)]
     if not paragraphs:
         return None
-    return "\n\n".join(paragraphs)
+    return "\n\n".join(_clean_display_text(paragraph) for paragraph in paragraphs)
 
 
 def _safe_float(value: Any) -> float | None:
@@ -321,25 +403,39 @@ def _safe_float(value: Any) -> float | None:
         return None
 
 
+def _coerce_float(value: float | None) -> float | None:
+    if value is None:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if number != number:
+        return None
+    return number
+
+
 def _format_decimal(value: float | None, digits: int = 2) -> str:
-    if value is None or pd.isna(value):
+    number = _coerce_float(value)
+    if number is None:
         return "--"
-    return f"{float(value):.{digits}f}"
+    return f"{number:.{digits}f}"
 
 
 def _format_pct(value: float | None) -> str:
-    if value is None or pd.isna(value):
+    pct = _coerce_float(value)
+    if pct is None:
         return "--"
-    pct = float(value)
     if abs(pct) <= 1:
         pct *= 100
     return f"{pct:.2f}%"
 
 
 def _format_percent_points(value: float | None) -> str:
-    if value is None or pd.isna(value):
+    number = _coerce_float(value)
+    if number is None:
         return "--"
-    return f"{float(value):.2f}%"
+    return f"{number:.2f}%"
 
 
 def _sina_stock_symbol(symbol: str) -> str | None:
@@ -372,13 +468,15 @@ def _market_code(code: str) -> str:
 
 
 def _section_from_mapping(item: dict[str, Any]) -> MarketBriefingSection | None:
-    title = _clean_text(str(item.get("title") or "公开行情回顾"))
-    content = _clean_text(str(item.get("content") or ""))
+    title = _clean_display_text(str(item.get("title") or "公开行情回顾"))
+    if _is_disallowed_section_title(title):
+        return None
+    content = _clean_display_text(str(item.get("content") or ""))
     raw_links = item.get("links") if isinstance(item.get("links"), list) else []
     links = [
-        MarketBriefingLink(title=_clean_text(str(link.get("title") or "")), url=str(link.get("url") or "") or None)
+        MarketBriefingLink(title=_clean_display_text(str(link.get("title") or "")), url=str(link.get("url") or "") or None)
         for link in raw_links
-        if isinstance(link, dict) and _clean_text(str(link.get("title") or ""))
+        if isinstance(link, dict) and _clean_display_text(str(link.get("title") or ""))
     ]
     raw_tables = item.get("tables") if isinstance(item.get("tables"), list) else []
     tables: list[MarketBriefingTable] = []
@@ -392,9 +490,15 @@ def _section_from_mapping(item: dict[str, Any]) -> MarketBriefingSection | None:
         columns = table.get("columns") if isinstance(table.get("columns"), list) else []
         tables.append(
             MarketBriefingTable(
-                title=_clean_text(str(table.get("title") or "")) or None,
-                columns=[_clean_text(str(column)) for column in columns if _clean_text(str(column))],
-                rows=[{_clean_text(str(key)): _clean_text(str(value)) for key, value in row.items()} for row in normalized_rows],
+                title=_clean_display_text(str(table.get("title") or "")) or None,
+                columns=[_clean_display_text(str(column)) for column in columns if _clean_display_text(str(column))],
+                rows=[
+                    {
+                        _clean_display_text(str(key)): _clean_display_text(str(value))
+                        for key, value in row.items()
+                    }
+                    for row in normalized_rows
+                ],
             )
         )
     if not content and not tables and not links:
@@ -402,27 +506,34 @@ def _section_from_mapping(item: dict[str, Any]) -> MarketBriefingSection | None:
     return MarketBriefingSection(title=title, content=content or None, links=links, tables=tables)
 
 
+def _first_section_link_url(sections: list[MarketBriefingSection]) -> str | None:
+    for section in sections:
+        for link in section.links:
+            url = (link.url or "").strip()
+            if url:
+                return url
+    return None
+
+
 @dataclass
 class MarketBriefingProvider:
     timeout: float = 8.0
     requester: Callable[..., requests.Response] = field(default_factory=lambda: requests.Session().get)
     fallback_provider: Callable[[], list[dict[str, Any]]] | None = None
-    latest_bars_provider: Callable[[], pd.DataFrame] | None = None
-    realtime_spot_provider: Callable[[], list[dict[str, Any]]] | None = None
 
     def latest_fupan(self) -> MarketBriefingResponse:
         try:
             soup = self._fetch_ths_html(THS_FUPAN_URL)
             return self._parse_fupan(soup)
         except Exception as exc:
-            return self._fallback("fupan", THS_FUPAN_URL, f"同花顺复盘读取失败：{exc}")
+            return self._fupan_market_or_local_fallback([f"同花顺复盘读取失败：{exc}"])
 
     def latest_zaopan(self) -> MarketBriefingResponse:
         try:
             soup = self._fetch_ths_html(THS_ZAOPAN_URL)
             return self._parse_zaopan(soup)
         except Exception as exc:
-            return self._fallback("zaopan", THS_ZAOPAN_URL, f"同花顺早盘读取失败：{exc}")
+            return self._zaopan_market_or_local_fallback([f"同花顺早盘读取失败：{exc}"])
 
     def _fetch_ths_html(self, url: str) -> BeautifulSoup:
         response = self._request_ths(url)
@@ -494,13 +605,17 @@ class MarketBriefingProvider:
             return
 
     def _parse_fupan(self, soup: BeautifulSoup) -> MarketBriefingResponse:
-        summary = _node_text(soup.select_one("#fpzj"))
+        summary = _clean_display_text(_node_text(soup.select_one("#fpzj")))
+        if _is_noisy_content_line(summary):
+            summary = ""
         sections: list[MarketBriefingSection] = []
         diagnostics: list[str] = []
         headers = soup.select(".fp_item_hd")
         contents = soup.select(".fp_item_cnt")
         for header, content in zip(headers, contents):
-            title = _node_text(header.select_one("h1,h2,h3")) or _node_text(header, max_length=40)
+            title = _clean_display_text(_node_text(header.select_one("h1,h2,h3")) or _node_text(header, max_length=40))
+            if _is_disallowed_section_title(title):
+                continue
             content_without_tables = _remove_non_textual_nodes(content)
             tables = [
                 table
@@ -514,6 +629,7 @@ class MarketBriefingProvider:
         expanded_sections, article_diagnostics = self._expand_article_links(sections[:8], THS_FUPAN_URL)
         diagnostics.extend(article_diagnostics)
         source = "ths-fupan"
+        source_url: str | None = THS_FUPAN_URL
         if not summary and not expanded_sections:
             fallback_sections, fallback_diagnostics = self._market_fallback_sections()
             diagnostics.append("同花顺复盘页未解析到有效章节。")
@@ -522,17 +638,15 @@ class MarketBriefingProvider:
                 expanded_sections = fallback_sections
                 summary = fallback_sections[0].content or "同花顺复盘页暂不可用，已使用公开行情与本地最近交易日生成回顾。"
                 source = "ths-fupan+market-fallback"
-        candidate_section, candidate_diagnostic = self._user_mode_candidate_section()
-        if candidate_section is not None:
-            expanded_sections.append(candidate_section)
-        if candidate_diagnostic is not None:
-            diagnostics.append(candidate_diagnostic)
+                source_url = _first_section_link_url(fallback_sections)
+            else:
+                return self._local_brief_fupan(diagnostics)
         return MarketBriefingResponse(
             kind="fupan",
             updated_at=datetime.now(timezone.utc),
             source=source,
-            source_url=THS_FUPAN_URL,
-            summary=summary or "同花顺复盘已读取，但页面暂未提供摘要。",
+            source_url=source_url,
+            summary=summary or (expanded_sections[0].content if expanded_sections and expanded_sections[0].content else "同花顺复盘已读取，但页面暂未提供摘要。"),
             sections=expanded_sections,
             diagnostics=diagnostics,
         )
@@ -589,21 +703,82 @@ class MarketBriefingProvider:
             diagnostics=diagnostics,
         )
 
-    def _fallback(
-        self,
-        kind: Literal["fupan", "zaopan"],
-        source_url: str,
-        diagnostic: str,
-    ) -> MarketBriefingResponse:
-        label = "复盘" if kind == "fupan" else "早盘"
+    def _fupan_market_or_local_fallback(self, diagnostics: list[str]) -> MarketBriefingResponse:
+        fallback_sections, fallback_diagnostics = self._market_fallback_sections()
+        diagnostics.extend(fallback_diagnostics)
+        if fallback_sections:
+            return MarketBriefingResponse(
+                kind="fupan",
+                updated_at=datetime.now(timezone.utc),
+                source="ths-fupan+market-fallback",
+                source_url=_first_section_link_url(fallback_sections),
+                summary=fallback_sections[0].content or "同花顺复盘页暂不可用，已使用公开行情生成回顾线索。",
+                sections=fallback_sections,
+                diagnostics=diagnostics,
+            )
+        return self._local_brief_fupan(diagnostics)
+
+    def _zaopan_market_or_local_fallback(self, diagnostics: list[str]) -> MarketBriefingResponse:
+        fallback_sections, fallback_diagnostics = self._market_fallback_sections()
+        diagnostics.extend(fallback_diagnostics)
+        if fallback_sections:
+            return MarketBriefingResponse(
+                kind="zaopan",
+                updated_at=datetime.now(timezone.utc),
+                source="ths-zaopan+market-fallback",
+                source_url=_first_section_link_url(fallback_sections),
+                summary=fallback_sections[0].content or "同花顺早盘页暂不可用，已使用公开行情生成早盘线索。",
+                sections=fallback_sections,
+                diagnostics=diagnostics,
+            )
+        return self._local_brief_zaopan(diagnostics)
+
+    def _local_brief_fupan(self, diagnostics: list[str]) -> MarketBriefingResponse:
+        diagnostics = list(diagnostics)
+        diagnostics.append("同花顺复盘和公开行情兜底均不可用，已生成本地简短防守复盘。")
+        content = (
+            "同花顺结构化复盘暂不可用，公开行情兜底也未形成可用结构。"
+            "当前只给防守口径：不把新闻、局部行情或空页面包装成确定复盘结论；"
+            "等待同花顺正文、指数表或活跃个股表恢复后再确认强势方向。"
+        )
+        section = MarketBriefingSection(
+            title="本地简短复盘",
+            content=content,
+            links=[],
+            tables=[],
+        )
         return MarketBriefingResponse(
-            kind=kind,
+            kind="fupan",
             updated_at=datetime.now(timezone.utc),
-            source="fallback",
-            source_url=source_url,
-            summary=f"同花顺{label}暂不可用，已保留{label}评价入口。",
-            sections=[],
-            diagnostics=[diagnostic],
+            source="ths-fupan+local-brief",
+            source_url=None,
+            summary=content,
+            sections=[section],
+            diagnostics=diagnostics,
+        )
+
+    def _local_brief_zaopan(self, diagnostics: list[str]) -> MarketBriefingResponse:
+        diagnostics = list(diagnostics)
+        diagnostics.append("同花顺早盘和公开行情兜底均不可用，已生成本地简短防守早盘。")
+        content = (
+            "同花顺结构化早盘暂不可用，公开行情兜底也未形成可用结构。"
+            "当前只给防守口径：不把新闻、局部行情或空页面包装成确定早盘结论，"
+            "等待同花顺正文、指数表或活跃个股表恢复后再确认盘前线索。"
+        )
+        section = MarketBriefingSection(
+            title="本地简短早盘",
+            content=content,
+            links=[],
+            tables=[],
+        )
+        return MarketBriefingResponse(
+            kind="zaopan",
+            updated_at=datetime.now(timezone.utc),
+            source="ths-zaopan+local-brief",
+            source_url=None,
+            summary=content,
+            sections=[section],
+            diagnostics=diagnostics,
         )
 
     def _market_fallback_sections(self) -> tuple[list[MarketBriefingSection], list[str]]:
@@ -754,206 +929,3 @@ class MarketBriefingProvider:
                 }
             )
         return out
-
-    def _user_mode_candidate_section(self) -> tuple[MarketBriefingSection | None, str | None]:
-        diagnostics: list[str] = []
-        rows = self._user_mode_candidates_from_realtime(diagnostics)
-        source_note = "实时行情"
-        if not rows:
-            rows = self._user_mode_candidates_from_latest_bars()
-            source_note = "本地最近交易日"
-            if rows and diagnostics:
-                diagnostics.append("复盘 user 模式个股：实时行情暂不可用，已回退到本地最近交易日。")
-        price_column = "现价" if rows and "现价" in rows[0] else "收盘价"
-        if not rows:
-            if self.realtime_spot_provider is None and self.latest_bars_provider is None:
-                return None, None
-            diagnostics.append("复盘 user 模式个股未生成：实时行情、本地最近交易日或公开行情暂不可用。")
-            return None, " ".join(diagnostics)
-        return (
-            MarketBriefingSection(
-                title="当日 user 模式匹配个股",
-                content=(
-                    f"结合复盘后的{source_note}，按当前默认 user 模式筛选：流通市值约 10-300 亿、"
-                    "量能温和放大、换手健康；仅作复盘线索，不构成确定结论。"
-                ),
-                links=[],
-                tables=[
-                    MarketBriefingTable(
-                        title="当日 user 模式匹配个股",
-                        columns=["代码", "名称", price_column, "涨跌幅", "匹配理由", "rank_score"],
-                        rows=rows[:8],
-                    )
-                ],
-            ),
-            " ".join(diagnostics) if diagnostics else None,
-        )
-
-    def _realtime_spot_rows(self, diagnostics: list[str]) -> list[dict[str, Any]]:
-        if self.realtime_spot_provider is not None:
-            try:
-                rows = self.realtime_spot_provider()
-            except Exception as exc:
-                diagnostics.append(f"复盘 user 模式实时行情读取失败：{exc}")
-                return []
-            return rows if isinstance(rows, list) else []
-        if self.latest_bars_provider is None:
-            return []
-        return self._fallback_spot_rows(diagnostics)
-
-    def _user_mode_candidates_from_realtime(self, diagnostics: list[str]) -> list[dict[str, str]]:
-        spot_rows = self._realtime_spot_rows(diagnostics)
-        candidates: list[tuple[float, dict[str, str]]] = []
-        for row in spot_rows:
-            if not isinstance(row, dict):
-                continue
-            code = normalize_symbol(str(row.get("代码") or row.get("code") or row.get("symbol") or ""))
-            name = _clean_text(str(row.get("名称") or row.get("name") or ""))
-            price = _safe_float(row.get("现价") or row.get("最新价") or row.get("close") or row.get("price"))
-            change_pct = _safe_float(row.get("涨跌幅") or row.get("change_pct") or row.get("pct_chg"))
-            if not code or not name or price is None or change_pct is None:
-                continue
-            turnover = _safe_float(row.get("换手率") or row.get("turnover_rate") or row.get("turnover"))
-            volume_ratio = _safe_float(row.get("量比") or row.get("volume_ratio"))
-            float_market_cap = _safe_float(row.get("流通市值") or row.get("float_market_cap"))
-            if float_market_cap is not None and float_market_cap < 100_000_000:
-                float_market_cap *= 100_000_000
-
-            if not 2.0 <= change_pct <= 12.0:
-                continue
-            if volume_ratio is not None and not 1.1 <= volume_ratio <= 3.5:
-                continue
-            if turnover is not None and not 1.0 <= turnover <= 12.0:
-                continue
-            if float_market_cap is not None and not 1_000_000_000 <= float_market_cap <= 30_000_000_000:
-                continue
-
-            score = 60 + change_pct * 2
-            reasons = [f"实时行情涨跌幅{_format_percent_points(change_pct)}"]
-            if volume_ratio is not None:
-                score += min(volume_ratio, 3.5) * 8
-                reasons.append(f"量比{_format_decimal(volume_ratio)}")
-            if turnover is not None:
-                score += min(turnover, 12.0)
-                reasons.append(f"换手{_format_percent_points(turnover)}")
-            if float_market_cap is not None:
-                reasons.append(f"流通市值约{_format_decimal(float_market_cap / 100_000_000, digits=1)}亿")
-
-            candidates.append(
-                (
-                    score,
-                    {
-                        "代码": code,
-                        "名称": name,
-                        "现价": _format_decimal(price),
-                        "涨跌幅": _format_percent_points(change_pct),
-                        "匹配理由": "；".join(reasons),
-                        "rank_score": _format_decimal(score, digits=1),
-                    },
-                )
-            )
-        candidates.sort(key=lambda item: item[0], reverse=True)
-        return [row for _, row in candidates[:12]]
-
-    def _latest_bars(self) -> pd.DataFrame:
-        if self.latest_bars_provider is None:
-            return pd.DataFrame()
-        try:
-            frame = self.latest_bars_provider()
-        except Exception:
-            return pd.DataFrame()
-        return frame if isinstance(frame, pd.DataFrame) else pd.DataFrame()
-
-    def _user_mode_candidates_from_latest_bars(self) -> list[dict[str, str]]:
-        frame = self._latest_bars()
-        if frame.empty or "symbol" not in frame or "trade_date" not in frame:
-            return []
-        data = frame.copy()
-        data["symbol"] = data["symbol"].astype(str).map(normalize_symbol)
-        data["trade_date"] = pd.to_datetime(data["trade_date"], errors="coerce")
-        data = data.dropna(subset=["trade_date", "symbol", "close", "volume"])
-        if data.empty:
-            return []
-        latest_date = data["trade_date"].max()
-        previous_dates = sorted(date for date in data["trade_date"].drop_duplicates().tolist() if date < latest_date)
-        if not previous_dates:
-            return []
-        previous_date = previous_dates[-1]
-        latest = data[data["trade_date"] == latest_date].copy()
-        previous = data[data["trade_date"] == previous_date][["symbol", "close", "volume"]].rename(
-            columns={"close": "previous_close", "volume": "previous_volume"}
-        )
-        latest = latest.merge(previous, on="symbol", how="left")
-        latest["close"] = pd.to_numeric(latest["close"], errors="coerce")
-        latest["previous_close"] = pd.to_numeric(latest["previous_close"], errors="coerce")
-        latest["volume"] = pd.to_numeric(latest["volume"], errors="coerce")
-        latest["previous_volume"] = pd.to_numeric(latest["previous_volume"], errors="coerce")
-        latest["change_pct_calc"] = (latest["close"] / latest["previous_close"]) - 1
-        latest["volume_ratio"] = latest["volume"] / latest["previous_volume"]
-        turnover_column = "turnover_rate" if "turnover_rate" in latest else "turnover" if "turnover" in latest else None
-        if turnover_column is not None:
-            latest["turnover_for_filter"] = pd.to_numeric(latest[turnover_column], errors="coerce")
-            latest.loc[latest["turnover_for_filter"] > 1, "turnover_for_filter"] = latest["turnover_for_filter"] / 100.0
-        else:
-            latest["turnover_for_filter"] = pd.NA
-        if "float_market_cap" in latest:
-            latest["float_market_cap_for_filter"] = pd.to_numeric(latest["float_market_cap"], errors="coerce")
-        else:
-            latest["float_market_cap_for_filter"] = pd.NA
-
-        mask = (
-            latest["close"].gt(0)
-            & latest["previous_close"].gt(0)
-            & latest["volume_ratio"].between(1.2, 2.5, inclusive="both")
-            & latest["change_pct_calc"].between(-0.03, 0.12, inclusive="both")
-        )
-        cap_known = latest["float_market_cap_for_filter"].notna()
-        mask &= (~cap_known) | latest["float_market_cap_for_filter"].between(1_000_000_000, 30_000_000_000, inclusive="both")
-        turnover_known = latest["turnover_for_filter"].notna()
-        mask &= (~turnover_known) | latest["turnover_for_filter"].between(0.02, 0.08, inclusive="both")
-        candidates = latest[mask].copy()
-        if candidates.empty:
-            return []
-        candidates["rank_score_num"] = (
-            candidates["volume_ratio"].clip(upper=2.5) * 25
-            + candidates["change_pct_calc"].fillna(0) * 100
-            + candidates["turnover_for_filter"].fillna(0.03) * 120
-        )
-        candidates = candidates.sort_values(["rank_score_num", "change_pct_calc"], ascending=False)
-        rows: list[dict[str, str]] = []
-        for _, item in candidates.head(12).iterrows():
-            name = _clean_text(str(item.get("name") or item.get("stock_name") or "")) or "--"
-            reasons = [
-                f"量比{float(item['volume_ratio']):.2f}",
-                f"涨跌幅{_format_pct(float(item['change_pct_calc']))}",
-            ]
-            if not pd.isna(item.get("turnover_for_filter")):
-                reasons.append(f"换手{_format_pct(float(item['turnover_for_filter']))}")
-            rows.append(
-                {
-                    "代码": str(item["symbol"]),
-                    "名称": name,
-                    "收盘价": _format_decimal(float(item["close"])),
-                    "涨跌幅": _format_pct(float(item["change_pct_calc"])),
-                    "匹配理由": "；".join(reasons),
-                    "rank_score": _format_decimal(float(item["rank_score_num"]), digits=1),
-                }
-            )
-        return rows
-
-    def _user_mode_candidates_from_eastmoney(self) -> list[dict[str, str]]:
-        diagnostics: list[str] = []
-        spot_rows = self._fallback_spot_rows(diagnostics)
-        rows: list[dict[str, str]] = []
-        for index, row in enumerate(spot_rows[:8]):
-            rows.append(
-                {
-                    "代码": row.get("代码", "--"),
-                    "名称": row.get("名称", "--"),
-                    "现价": row.get("现价", "--"),
-                    "涨跌幅": row.get("涨跌幅", "--"),
-                    "匹配理由": "公开实时行情涨幅靠前，缺少本地量比/换手确认",
-                    "rank_score": _format_decimal(60 - index * 2, digits=1),
-                }
-            )
-        return rows

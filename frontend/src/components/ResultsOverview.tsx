@@ -1,6 +1,6 @@
 import { Play } from "lucide-react";
 import { Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
-import type { BacktestResult, DailyStrategyMatches, MatchedStock } from "../types";
+import type { BacktestResult, DailyStrategyMatches } from "../types";
 
 type Props = {
   result: BacktestResult | null;
@@ -34,19 +34,50 @@ function movementClass(value: number | null | undefined): "up-text" | "down-text
   return value > 0 ? "up-text" : "down-text";
 }
 
-function MatchedStocksPanel({ dailyMatches, legacyMatches }: { dailyMatches?: DailyStrategyMatches | null; legacyMatches?: MatchedStock[] }) {
-  const hasPayload = Boolean(dailyMatches) || Array.isArray(legacyMatches);
-  const rawItems = dailyMatches?.matches ?? legacyMatches ?? [];
+function isToday(value: string | null | undefined): boolean {
+  if (!value) {
+    return false;
+  }
+  const today = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).format(new Date());
+  return value === today;
+}
+
+function normalizedEquityCurve(result: BacktestResult | null): BacktestResult["equity_curve"] {
+  if (!result) {
+    return [];
+  }
+  const byDate = new Map<string, BacktestResult["equity_curve"][number]>();
+  for (const point of result.equity_curve) {
+    if (!point.trade_date || !Number.isFinite(point.equity)) {
+      continue;
+    }
+    byDate.set(point.trade_date, point);
+  }
+  return Array.from(byDate.values()).sort((left, right) => left.trade_date.localeCompare(right.trade_date));
+}
+
+function MatchedStocksPanel({ dailyMatches }: { dailyMatches?: DailyStrategyMatches | null }) {
+  const hasPayload = Boolean(dailyMatches);
+  const rawItems = dailyMatches?.matches ?? [];
   const items = [...rawItems].sort((left, right) => (right.rank_score ?? 0) - (left.rank_score ?? 0));
+  const matchesAreToday = isToday(dailyMatches?.trade_date);
+  const title = matchesAreToday ? "今日 user 模式候选" : "本地最近交易日候选";
+  const kicker = matchesAreToday ? "当日符合用户策略的个股" : "本地最近交易日/非实时";
   const dateLabel = dailyMatches
-    ? `信号日 ${dailyMatches.signal_date} / 展示日 ${dailyMatches.trade_date}`
-    : "兼容旧字段 matched_stocks";
+    ? `信号日 ${dailyMatches.signal_date} / 展示日 ${dailyMatches.trade_date} / 本地回测快照`
+    : "等待 latest_strategy_matches";
+  const priceLabel = matchesAreToday ? "本地收盘价" : "本地最近收盘价";
   return (
-    <section className="matched-stocks-panel" aria-label="今日策略命中">
+    <section className="matched-stocks-panel" aria-label="策略命中">
       <div className="matched-stocks-head">
         <div>
-          <span className="section-kicker">今日符合条件个股</span>
-          <h3>今日策略命中</h3>
+          <span className="section-kicker">{kicker}</span>
+          <h3>{title}</h3>
           <small>{dateLabel}</small>
         </div>
         <strong>{hasPayload ? `${items.length} 只` : "待对接"}</strong>
@@ -61,7 +92,7 @@ function MatchedStocksPanel({ dailyMatches, legacyMatches }: { dailyMatches?: Da
               </div>
               <div className="matched-stock-quote">
                 <strong className={movementClass(stock.change_pct)}>{formatPercent(stock.change_pct)}</strong>
-                <span>收盘 {formatPrice(stock.close)}</span>
+                <span>{priceLabel} {formatPrice(stock.close)}</span>
                 {stock.rank_score != null ? <small>评分 {stock.rank_score.toFixed(2)}</small> : null}
               </div>
               <div className="matched-stock-reasons">
@@ -76,11 +107,11 @@ function MatchedStocksPanel({ dailyMatches, legacyMatches }: { dailyMatches?: Da
         </div>
       ) : (
         <div className="matched-stocks-empty">
-          <strong>{hasPayload ? "今日没有股票命中当前策略" : "等待后端返回当日命中股票"}</strong>
+          <strong>{hasPayload ? `${matchesAreToday ? "今日" : "本地最近交易日"}没有股票命中当前策略` : "等待回测结果返回策略候选"}</strong>
           <span>
             {hasPayload
               ? "可以放宽入场条件、扩大股票池，或查看数据中心是否缺少行情/资金字段。"
-              : "主线程对接 matched_stocks 后，这里会展示代码、名称、收盘价、涨跌幅和命中原因。"}
+              : "回测完成后，这里会展示代码、名称、本地收盘价、涨跌幅、匹配理由和 rank_score。"}
           </span>
         </div>
       )}
@@ -98,6 +129,9 @@ export function ResultsOverview({
   onOpenRiskAlerts
 }: Props) {
   const issueCount = result?.preflight_issues.length ?? 0;
+  const chartData = normalizedEquityCurve(result);
+  const chartStart = chartData[0]?.trade_date;
+  const chartEnd = chartData.at(-1)?.trade_date;
   const zeroTradeHint = result && result.metrics.trade_count === 0
     ? "本次没有产生交易。常见原因是日期范围过短、股票池过窄、条件过严或本地字段缺失。"
     : null;
@@ -166,16 +200,22 @@ export function ResultsOverview({
               <span>{zeroTradeHint}</span>
             </div>
           ) : null}
-          <MatchedStocksPanel dailyMatches={result.latest_strategy_matches} legacyMatches={result.matched_stocks} />
+          <MatchedStocksPanel dailyMatches={result.latest_strategy_matches} />
           <div className="chart">
-            <ResponsiveContainer width="100%" height={220}>
-              <LineChart data={result.equity_curve}>
-                <XAxis dataKey="trade_date" />
-                <YAxis />
-                <Tooltip />
-                <Line type="monotone" dataKey="equity" stroke="#0f766e" strokeWidth={2} dot={false} />
-              </LineChart>
-            </ResponsiveContainer>
+            <div className="chart-head">
+              <strong>历史权益曲线</strong>
+              {chartStart && chartEnd ? <span>回测区间 {chartStart} 至 {chartEnd}</span> : null}
+            </div>
+            <div className="chart-body">
+              <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={220}>
+                <LineChart data={chartData}>
+                  <XAxis dataKey="trade_date" />
+                  <YAxis />
+                  <Tooltip />
+                  <Line type="monotone" dataKey="equity" stroke="#0f766e" strokeWidth={2} dot={false} />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
           </div>
         </>
       ) : !isRunning ? (

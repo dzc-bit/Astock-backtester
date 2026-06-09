@@ -7,7 +7,14 @@ from astock_backtester.condition_parser import (
     validate_exit_condition_text,
 )
 from astock_backtester.conditions import evaluate_condition, evaluate_group, registered_conditions
-from astock_backtester.indicators import add_macd, add_market_heat, add_moving_average, add_returns, add_volume_ratio
+from astock_backtester import indicators
+from astock_backtester.indicators import (
+    add_macd,
+    add_market_heat,
+    add_moving_average,
+    add_returns,
+    add_volume_ratio,
+)
 from astock_backtester.models import ConditionGroup, ConditionNode, ConditionOperator
 from astock_backtester.sample_data import sample_daily_bars
 
@@ -25,6 +32,8 @@ def test_registry_contains_core_first_version_conditions():
 
     assert "market_cap_between" in ids
     assert "capital_flow_n_day_sum_at_least" in ids
+    assert "capital_flow_today_at_least" in ids
+    assert "capital_flow_n_day_positive_count_at_least" in ids
     assert "market_rising_ratio_at_least" in ids
     assert "close_above_ma" in ids
     assert "macd_histogram_at_least" in ids
@@ -62,6 +71,51 @@ def test_capital_flow_rolling_sum_is_date_bound():
 
     assert result.passed is True
     assert result.observed_value == 9_000_000
+
+
+def test_capital_flow_today_condition_uses_signal_day_value():
+    df = enriched_frame()
+    row = df[(df["symbol"] == "AAA") & (df["trade_date"] == pd.Timestamp("2024-01-04"))].iloc[0]
+    node = ConditionNode(id="flow-today", condition_id="capital_flow_today_at_least", params={"min": 4_000_000})
+
+    result = evaluate_condition(node, row, df)
+
+    assert result.passed is True
+    assert result.observed_value == 4_000_000
+
+
+def test_capital_flow_positive_count_uses_precomputed_column():
+    assert hasattr(indicators, "add_capital_flow_positive_count")
+
+    df = indicators.add_capital_flow_positive_count(enriched_frame(), [3])
+    row = df[(df["symbol"] == "AAA") & (df["trade_date"] == pd.Timestamp("2024-01-05"))].iloc[0]
+    node = ConditionNode(
+        id="flow-days",
+        condition_id="capital_flow_n_day_positive_count_at_least",
+        params={"window": 3, "min_count": 2},
+    )
+
+    result = evaluate_condition(node, row, df)
+
+    assert result.passed is True
+    assert result.observed_value == 2
+
+
+def test_capital_flow_positive_count_requires_enough_history():
+    assert hasattr(indicators, "add_capital_flow_positive_count")
+
+    df = indicators.add_capital_flow_positive_count(enriched_frame(), [3])
+    row = df[(df["symbol"] == "AAA") & (df["trade_date"] == pd.Timestamp("2024-01-03"))].iloc[0]
+    node = ConditionNode(
+        id="flow-days",
+        condition_id="capital_flow_n_day_positive_count_at_least",
+        params={"window": 3, "min_count": 2},
+    )
+
+    result = evaluate_condition(node, row, df)
+
+    assert result.passed is False
+    assert result.observed_value is None
 
 
 def test_and_group_requires_all_conditions():

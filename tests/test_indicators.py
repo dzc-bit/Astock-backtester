@@ -1,5 +1,6 @@
 import pandas as pd
 
+from astock_backtester import indicators
 from astock_backtester.indicators import (
     add_capital_flow_sum,
     add_macd,
@@ -99,3 +100,16 @@ def test_add_capital_flow_sum_uses_rolling_symbol_window():
 
     assert pd.isna(aaa.loc[1, "main_net_inflow_sum_3d"])
     assert aaa.loc[2, "main_net_inflow_sum_3d"] == 9_000_000
+
+
+def test_add_capital_flow_positive_count_uses_rolling_symbol_window():
+    assert hasattr(indicators, "add_capital_flow_positive_count")
+
+    result = indicators.add_capital_flow_positive_count(sample_daily_bars(), windows=[3])
+    aaa = result[result["symbol"] == "AAA"].reset_index(drop=True)
+    bbb = result[result["symbol"] == "BBB"].reset_index(drop=True)
+
+    assert pd.isna(aaa.loc[1, "main_net_inflow_positive_count_3d"])
+    assert aaa.loc[2, "main_net_inflow_positive_count_3d"] == 3
+    assert aaa.loc[3, "main_net_inflow_positive_count_3d"] == 2
+    assert bbb.loc[4, "main_net_inflow_positive_count_3d"] == 2

@@ -4,6 +4,7 @@
 node_modules/
 dist/
 release-assets/
+项目说明书.md
 src-tauri/target/
 src-tauri/gen/
 src-tauri/bin/

@@ -1,7 +1,26 @@
 import { render, screen } from "@testing-library/react";
 import { expect, it, vi } from "vitest";
+import type { ReactNode } from "react";
 import type { BacktestResult } from "../types";
 import { ResultsOverview } from "./ResultsOverview";
+
+vi.mock("recharts", () => ({
+  ResponsiveContainer: ({ children }: { children: ReactNode }) => <div data-testid="responsive-container">{children}</div>,
+  LineChart: ({ children, data }: { children: ReactNode; data?: unknown[] }) => <div data-testid="line-chart" data-points={data?.length ?? 0}>{children}</div>,
+  Tooltip: () => null,
+  XAxis: () => null,
+  YAxis: () => null,
+  Line: () => null
+}));
+
+function shanghaiToday(): string {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).format(new Date());
+}
 
 function buildResult(overrides: Partial<BacktestResult> = {}): BacktestResult {
   return {
@@ -26,12 +45,14 @@ function buildResult(overrides: Partial<BacktestResult> = {}): BacktestResult {
 }
 
 it("lists today's matched stocks after a strategy run", () => {
+  const today = shanghaiToday();
+
   render(
     <ResultsOverview
       result={buildResult({
         latest_strategy_matches: {
-          signal_date: "2026-06-01",
-          trade_date: "2026-06-01",
+          signal_date: today,
+          trade_date: today,
           matches: [
             {
               symbol: "600519",
@@ -55,13 +76,14 @@ it("lists today's matched stocks after a strategy run", () => {
     />
   );
 
-  expect(screen.getByRole("region", { name: "今日策略命中" })).toBeInTheDocument();
-  expect(screen.getByText("今日策略命中")).toBeInTheDocument();
-  expect(screen.getByText("信号日 2026-06-01 / 展示日 2026-06-01")).toBeInTheDocument();
+  expect(screen.getByRole("region", { name: "策略命中" })).toBeInTheDocument();
+  expect(screen.getByText("今日 user 模式候选")).toBeInTheDocument();
+  expect(screen.getByText("当日符合用户策略的个股")).toBeInTheDocument();
+  expect(screen.getByText(`信号日 ${today} / 展示日 ${today} / 本地回测快照`)).toBeInTheDocument();
   expect(screen.getByText("600519")).toBeInTheDocument();
   expect(screen.getByText("贵州茅台")).toBeInTheDocument();
   expect(screen.getByText("+2.13%")).toBeInTheDocument();
-  expect(screen.getByText("收盘 1688.80")).toBeInTheDocument();
+  expect(screen.getByText("本地收盘价 1688.80")).toBeInTheDocument();
   expect(screen.getByText("收盘价站上20日均线")).toBeInTheDocument();
   expect(screen.getByText("主力净流入放大")).toBeInTheDocument();
 });
@@ -91,16 +113,39 @@ it("prefers latest strategy matches over legacy matched stocks and sorts by rank
   expect(cards[0]).toHaveTextContent("评分 2.40");
 });
 
-it("shows a friendly empty state when no stocks match today", () => {
+it("does not display legacy matched stocks without latest strategy matches", () => {
   render(
     <ResultsOverview
-      result={buildResult({ matched_stocks: [] })}
+      result={buildResult({
+        matched_stocks: [{ symbol: "OLD", name: "legacy", close: 1, change_pct: 0, reasons: ["legacy"] }]
+      })}
       onRun={vi.fn()}
       onOpenRiskAlerts={vi.fn()}
     />
   );
 
-  expect(screen.getByText("今日策略命中")).toBeInTheDocument();
+  expect(screen.queryByText("OLD")).not.toBeInTheDocument();
+  expect(screen.queryByText("legacy")).not.toBeInTheDocument();
+});
+
+it("shows a friendly empty state when no stocks match today", () => {
+  const today = shanghaiToday();
+
+  render(
+    <ResultsOverview
+      result={buildResult({
+        latest_strategy_matches: {
+          signal_date: today,
+          trade_date: today,
+          matches: []
+        }
+      })}
+      onRun={vi.fn()}
+      onOpenRiskAlerts={vi.fn()}
+    />
+  );
+
+  expect(screen.getByText("今日 user 模式候选")).toBeInTheDocument();
   expect(screen.getByText("今日没有股票命中当前策略")).toBeInTheDocument();
 });
 
@@ -110,4 +155,50 @@ it("shows annualized return beside the other backtest metrics", () => {
   expect(screen.getByText("总收益 3.20%")).toBeInTheDocument();
   expect(screen.getByText("年化收益 4.10%")).toBeInTheDocument();
   expect(screen.getByText("最大回撤 -1.80%")).toBeInTheDocument();
+});
+
+it("does not label old backtest matches as today's hits and separates the equity chart", () => {
+  render(
+    <ResultsOverview
+      result={buildResult({
+        latest_strategy_matches: {
+          signal_date: "2024-03-13",
+          trade_date: "2024-03-13",
+          matches: []
+        },
+        equity_curve: [
+          { trade_date: "2024-01-04", equity: 100000, cash: 100000, market_value: 0, drawdown_pct: 0 },
+          { trade_date: "2024-03-13", equity: 90000, cash: 90000, market_value: 0, drawdown_pct: -0.1 }
+        ]
+      })}
+      onRun={vi.fn()}
+      onOpenRiskAlerts={vi.fn()}
+    />
+  );
+
+  expect(screen.getByRole("region", { name: "策略命中" })).toBeInTheDocument();
+  expect(screen.getByText("本地最近交易日候选")).toBeInTheDocument();
+  expect(screen.queryByText("今日 user 模式候选")).not.toBeInTheDocument();
+  expect(screen.getByText("历史权益曲线")).toBeInTheDocument();
+  expect(screen.getByText("回测区间 2024-01-04 至 2024-03-13")).toBeInTheDocument();
+});
+
+it("normalizes the equity curve by date before rendering the chart", () => {
+  render(
+    <ResultsOverview
+      result={buildResult({
+        equity_curve: [
+          { trade_date: "2024-01-04", equity: 100000, cash: 100000, market_value: 0, drawdown_pct: 0 },
+          { trade_date: "2024-01-04", equity: 99999, cash: 99999, market_value: 0, drawdown_pct: -0.00001 },
+          { trade_date: "2024-01-06", equity: Number.NaN, cash: 0, market_value: 0, drawdown_pct: 0 },
+          { trade_date: "2024-01-05", equity: 101000, cash: 51000, market_value: 50000, drawdown_pct: 0 }
+        ]
+      })}
+      onRun={vi.fn()}
+      onOpenRiskAlerts={vi.fn()}
+    />
+  );
+
+  expect(screen.getByTestId("line-chart")).toHaveAttribute("data-points", "2");
+  expect(screen.getByText("回测区间 2024-01-04 至 2024-01-05")).toBeInTheDocument();
 });
