@@ -12,7 +12,9 @@
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "A股策略回测工作台",
+        "create": false,
         "width": 1280,
         "height": 860,
         "minWidth": 960,

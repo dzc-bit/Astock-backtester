@@ -25,6 +25,7 @@ describe("workspace desktop layout", () => {
     expect(styles).toMatch(
       /\.market-news-layout,\s*\.market-insight-layout\s*\{[^}]*grid-template-columns:\s*minmax\(620px,\s*1\.45fr\)\s*minmax\(360px,\s*0\.9fr\);[^}]*align-items:\s*start;/s
     );
+    expect(styles).toMatch(/\.cls-finance-panel,\s*\.news-summary-panel\s*\{[^}]*height:\s*390px;[^}]*max-height:\s*390px;/s);
     expect(styles).not.toMatch(/\.market-insight-layout\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1\.12fr\)\s*minmax\(340px,\s*0\.88fr\);/s);
   });
 

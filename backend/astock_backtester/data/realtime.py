@@ -798,16 +798,26 @@ class RealtimeMarketProvider:
         return []
 
     def _fetch_cls_hot_plate_sectors(self, diagnostics: list[str]) -> list[SectorMover]:
+        timeout = self._sector_request_timeout(max_seconds=2.0)
+        executor = ThreadPoolExecutor(max_workers=1)
+        future = executor.submit(
+            cls_request_json,
+            self.requester,
+            CLS_HOT_PLATE_URL,
+            params={"type": "industry,concept,area", "way": "change", "rever": 1},
+            timeout=timeout,
+        )
         try:
-            payload = cls_request_json(
-                self.requester,
-                CLS_HOT_PLATE_URL,
-                params={"type": "industry,concept,area", "way": "change", "rever": 1},
-                timeout=self._sector_request_timeout(max_seconds=2.0),
-            )
+            payload = future.result(timeout=timeout)
+        except TimeoutError:
+            future.cancel()
+            diagnostics.append(f"cls-hot-plate strong-sector source timeout after {timeout:g}s.")
+            return []
         except Exception as exc:
             diagnostics.append(f"cls-hot-plate strong-sector source failed: {exc}")
             return []
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
         rows = _sector_rows_from_cls_hot_plate(payload)
         sectors = self._parse_sector_rows(rows, "cls-hot-plate")
         if sectors:

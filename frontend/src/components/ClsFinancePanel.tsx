@@ -1,4 +1,4 @@
-import { Activity, Eye, Flame, Gauge, RadioTower, X } from "lucide-react";
+import { Activity, Eye, Flame, Gauge, RadioTower, Sparkles, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { ClsFinancePoolItem, ClsFinanceResponse } from "../types";
 
@@ -38,6 +38,70 @@ function compactText(value: string | null | undefined, maxLength = 48): string {
 function formatMinute(minute: number): string {
   const value = minute.toString().padStart(4, "0");
   return `${value.slice(0, 2)}:${value.slice(2)}`;
+}
+
+function joinNames(names: string[], maxItems = 4): string {
+  const uniqueNames = Array.from(new Set(names.map((name) => name.trim()).filter(Boolean)));
+  if (uniqueNames.length === 0) {
+    return "暂无明确板块";
+  }
+  const visible = uniqueNames.slice(0, maxItems);
+  const suffix = uniqueNames.length > visible.length ? ` 等 ${uniqueNames.length} 个` : "";
+  return `${visible.join("、")}${suffix}`;
+}
+
+function marketMoodLabel(value: number | null | undefined): string {
+  if (value == null) {
+    return "等待热度";
+  }
+  if (value >= 50) {
+    return "热度偏强";
+  }
+  if (value >= 40) {
+    return "热度中性";
+  }
+  return "热度偏弱";
+}
+
+function buildBriefingCards(finance: ClsFinanceResponse) {
+  const emotion = finance.emotion ?? null;
+  const anchorNames = finance.anchors.map((anchor) => anchor.name);
+  const firstReason = compactText(finance.up_pool[0]?.reason, 46);
+  const breadth = emotion?.breadth;
+  const anchorUpCount = finance.anchors.filter((anchor) => anchor.direction !== "down").length;
+  const anchorDownCount = finance.anchors.filter((anchor) => anchor.direction === "down").length;
+  return [
+    {
+      title: "盘面热度",
+      sentiment: (emotion?.market_degree ?? 0) >= 50 ? "positive" : "neutral",
+      meta: `${finance.tline.length} 个分时点 / ${marketMoodLabel(emotion?.market_degree)}`,
+      summary: `财联社市场热度 ${emotion?.market_degree != null ? emotion.market_degree.toFixed(1) : "--"}，涨停 ${emotion?.up_limit ?? "--"} 家，开板 ${emotion?.open_limit ?? "--"} 家。`,
+      headlines: [
+        breadth ? `上涨 ${breadth.up} / 下跌 ${breadth.down}` : "暂无完整涨跌分布",
+        emotion?.performance ? `指数表现 ${emotion.performance}` : "等待指数表现"
+      ]
+    },
+    {
+      title: "重点板块",
+      sentiment: finance.anchors.length > 0 ? "positive" : "neutral",
+      meta:
+        finance.anchors.length > 0
+          ? `${finance.anchors.length} 个锚点 / ${anchorUpCount} 强 ${anchorDownCount} 弱`
+          : "0 个锚点 / 暂无锚点",
+      summary: joinNames(anchorNames),
+      headlines:
+        finance.anchors.length > 0
+          ? finance.anchors.slice(0, 2).map((anchor) => `${anchor.direction === "down" ? "走弱" : "走强"}：${anchor.name}`)
+          : ["暂无明确要点"]
+    },
+    {
+      title: "涨停动因",
+      sentiment: (finance.up_pool.length > 0 ? "positive" : "neutral") as "positive" | "neutral",
+      meta: `${finance.up_pool.length} 个样本 / ${finance.up_pool.length > 0 ? "涨停池" : "暂无涨停池"}`,
+      summary: finance.up_pool.length > 0 ? `涨停池 ${finance.up_pool.length} 只，首条原因：${firstReason}` : "暂无涨停池明细。",
+      headlines: finance.up_pool.length > 0 ? [`${finance.up_pool.length} 只涨停样本`, "查看涨停明细获取个股列表"] : ["暂无明确要点"]
+    }
+  ];
 }
 
 function tlinePath(finance: ClsFinanceResponse): string {
@@ -135,6 +199,7 @@ export function ClsFinancePanel({ finance, isLoading = false }: Props) {
   const path = finance ? tlinePath(finance) : "";
   const upPool = finance?.up_pool ?? [];
   const anchors = finance?.anchors.slice(0, 8) ?? [];
+  const briefingCards = finance ? buildBriefingCards(finance) : [];
 
   return (
     <section className="surface cls-finance-panel" aria-label="财联社看盘">
@@ -213,6 +278,28 @@ export function ClsFinancePanel({ finance, isLoading = false }: Props) {
               ) : (
                 <span className="cls-finance-muted">暂无盘面锚点</span>
               )}
+            </div>
+
+            <div className="cls-finance-briefing-list" aria-label="财联社盘面归纳">
+              {briefingCards.map((card) => (
+                <article className={`news-summary-topic cls-finance-briefing-card ${card.sentiment}`} key={card.title}>
+                  <div className="news-summary-topic-head">
+                    <div>
+                      <span>{card.meta}</span>
+                      <h3>{card.title}</h3>
+                    </div>
+                    <Sparkles size={17} aria-hidden="true" />
+                  </div>
+                  <p className="news-summary-brief">{card.summary}</p>
+                  <div className="news-summary-teasers" aria-label={`${card.title}精要`}>
+                    {card.headlines.map((headline) => (
+                      <span className="news-summary-chip" key={headline}>
+                        {compactText(headline, 34)}
+                      </span>
+                    ))}
+                  </div>
+                </article>
+              ))}
             </div>
           </div>
         </div>

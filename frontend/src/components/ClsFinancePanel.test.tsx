@@ -65,7 +65,7 @@ function buildFinance(): ClsFinanceResponse {
   };
 }
 
-it("renders CLS finance market board without an inline limit-up pool list", () => {
+it("renders CLS finance market board with news-summary style briefing cards", () => {
   render(<ClsFinancePanel finance={buildFinance()} />);
 
   expect(screen.getByRole("region", { name: "财联社看盘" })).toBeInTheDocument();
@@ -76,11 +76,39 @@ it("renders CLS finance market board without an inline limit-up pool list", () =
   expect(screen.getByText("开板 25")).toBeInTheDocument();
   expect(screen.getByText("PCB")).toBeInTheDocument();
   expect(screen.getByText("油气设服")).toBeInTheDocument();
+  expect(screen.getByText("盘面热度")).toBeInTheDocument();
+  expect(screen.getByText("重点板块")).toBeInTheDocument();
+  expect(screen.getByText("涨停动因")).toBeInTheDocument();
+  expect(screen.getByText("财联社市场热度 56.0，涨停 130 家，开板 25 家。")).toBeInTheDocument();
+  expect(screen.getByText("PCB、油气设服")).toBeInTheDocument();
+  expect(screen.getByText("3 个分时点 / 热度偏强")).toBeInTheDocument();
+  expect(screen.getByText("2 个锚点 / 1 强 1 弱")).toBeInTheDocument();
+  expect(screen.getByText("1 个样本 / 涨停池")).toBeInTheDocument();
+  expect(screen.queryByText(/个来源/)).not.toBeInTheDocument();
+  expect(screen.queryByText(/positive/)).not.toBeInTheDocument();
   expect(screen.getByRole("button", { name: "查看涨停明细" })).toBeInTheDocument();
   expect(screen.queryByText("长飞光纤")).not.toBeInTheDocument();
   expect(screen.queryByText("光纤光缆")).not.toBeInTheDocument();
   expect(screen.queryByText("行情评价")).not.toBeInTheDocument();
   expect(screen.queryByText("明日观察")).not.toBeInTheDocument();
+});
+
+it("renders explicit fallback chips when CLS anchors and limit-up samples are empty", () => {
+  const finance = {
+    ...buildFinance(),
+    anchors: [],
+    up_pool: [],
+    emotion: {
+      ...buildFinance().emotion,
+      market_degree: 42
+    }
+  };
+
+  render(<ClsFinancePanel finance={finance} />);
+
+  expect(screen.getByText("0 个锚点 / 暂无锚点")).toBeInTheDocument();
+  expect(screen.getByText("0 个样本 / 暂无涨停池")).toBeInTheDocument();
+  expect(screen.getAllByText("暂无明确要点").length).toBeGreaterThanOrEqual(1);
 });
 
 it("opens the limit-up pool in a scrollable dialog on demand", async () => {
