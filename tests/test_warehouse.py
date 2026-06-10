@@ -118,6 +118,29 @@ def test_warehouse_coverage_uses_partition_stats_without_full_read(tmp_path, mon
     assert coverage["capital_flow"].missing_rows == 3
 
 
+def test_warehouse_coverage_counts_latest_daily_rows_missing_from_known_symbols(tmp_path):
+    warehouse = Warehouse(tmp_path)
+    warehouse.write_daily_bars(
+        pd.DataFrame(
+            {
+                "symbol": ["000001", "000002", "000003", "000001"],
+                "trade_date": ["2026-06-05", "2026-06-05", "2026-06-05", "2026-06-08"],
+                "open": [10.0, 10.0, 10.0, 10.2],
+                "high": [10.5, 10.5, 10.5, 10.4],
+                "low": [9.8, 9.8, 9.8, 10.0],
+                "close": [10.2, 10.2, 10.2, 10.3],
+                "volume": [1000, 1000, 1000, 1200],
+            }
+        )
+    )
+
+    coverage = {item.dataset: item for item in warehouse.coverage()}
+
+    assert coverage["daily_bars"].symbols == 3
+    assert coverage["daily_bars"].end_date.isoformat() == "2026-06-08"
+    assert coverage["daily_bars"].missing_rows == 2
+
+
 def test_warehouse_separates_capital_flow_only_rows_from_daily_bar_coverage(tmp_path):
     warehouse = Warehouse(tmp_path)
     warehouse.write_daily_bars(

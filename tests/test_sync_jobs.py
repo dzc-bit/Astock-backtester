@@ -104,6 +104,40 @@ def test_full_market_job_can_run_asynchronously_and_report_progress(tmp_path):
     assert warehouse.read_daily_bars()["symbol"].nunique() == 3
 
 
+def test_full_market_job_uses_large_write_batches_for_daily_incremental_import(tmp_path):
+    class CountingWarehouse(Warehouse):
+        def __init__(self, cache_root):
+            super().__init__(cache_root)
+            self.write_batches = []
+
+        def write_daily_bars(self, frame):
+            self.write_batches.append(int(len(frame)))
+            super().write_daily_bars(frame)
+
+    warehouse = CountingWarehouse(tmp_path)
+    manager = SyncJobManager(warehouse=warehouse, provider=FakeProvider())
+    symbols = [f"{index:06d}" for index in range(251)]
+
+    status = manager.start_full_market(
+        symbols=symbols,
+        start_date="2026-06-09",
+        end_date="2026-06-09",
+    )
+
+    eventually = None
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        eventually = manager.get_job(status.job_id)
+        if eventually and eventually.status == "completed":
+            break
+        sleep(0.02)
+
+    assert eventually is not None
+    assert eventually.status == "completed"
+    assert eventually.imported_rows == 251
+    assert warehouse.write_batches == [251]
+
+
 def test_capital_flow_job_reports_completed_with_errors_when_rows_import_with_failures(tmp_path):
     cache = LocalCache(tmp_path)
     warehouse = Warehouse(tmp_path)

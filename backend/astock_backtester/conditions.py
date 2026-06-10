@@ -295,6 +295,16 @@ EVALUATORS: dict[str, Evaluator] = {
 def evaluate_condition(node: ConditionNode, row: pd.Series, frame: pd.DataFrame) -> ConditionResult:
     if not node.enabled:
         return ConditionResult(True, f"{node.condition_id} disabled")
+    data_lag_days = int(node.data_lag_days or 0)
+    if data_lag_days > 0:
+        if "symbol" not in frame.columns or "trade_date" not in frame.columns:
+            return ConditionResult(False, f"{node.condition_id} unavailable for {data_lag_days}d data lag")
+        symbol_frame = frame[
+            (frame["symbol"] == row["symbol"]) & (frame["trade_date"] < row["trade_date"])
+        ].sort_values("trade_date")
+        if len(symbol_frame) < data_lag_days:
+            return ConditionResult(False, f"{node.condition_id} unavailable for {data_lag_days}d data lag")
+        row = symbol_frame.iloc[-data_lag_days]
     try:
         evaluator = EVALUATORS[node.condition_id]
     except KeyError as exc:

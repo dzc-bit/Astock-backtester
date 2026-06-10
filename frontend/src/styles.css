@@ -225,20 +225,13 @@ body {
   background: linear-gradient(180deg, #ffffff, #effaf8);
 }
 
-.market-news-layout {
+.market-news-layout,
+.market-insight-layout {
   display: grid;
   grid-template-columns: minmax(620px, 1.45fr) minmax(360px, 0.9fr);
   gap: 16px;
   padding: 18px 30px 0;
-  align-items: stretch;
-}
-
-.market-insight-layout {
-  display: grid;
-  grid-template-columns: minmax(0, 1.12fr) minmax(340px, 0.88fr);
-  gap: 16px;
-  padding: 18px 30px 0;
-  align-items: stretch;
+  align-items: start;
 }
 
 .market-dashboard,

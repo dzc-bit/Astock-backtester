@@ -186,6 +186,7 @@ class Warehouse:
         capital_flow_missing_rows = 0
         first_daily_date_by_symbol: dict[str, pd.Timestamp] = {}
         flow_start_by_symbol: dict[str, pd.Timestamp] = {}
+        daily_symbols_by_date: dict[pd.Timestamp, set[str]] = {}
         missing_capital_flow_frames: list[pd.DataFrame] = []
 
         def update_range(current_start: date | None, current_end: date | None, frame: pd.DataFrame) -> tuple[date | None, date | None]:
@@ -222,6 +223,10 @@ class Warehouse:
             if not ohlc_complete.empty:
                 daily_symbols.update(str(symbol) for symbol in ohlc_complete["symbol"].dropna().astype(str).unique())
                 daily_start, daily_end = update_range(daily_start, daily_end, ohlc_complete)
+                for trade_date, date_frame in ohlc_complete.groupby("trade_date"):
+                    daily_symbols_by_date.setdefault(pd.Timestamp(trade_date), set()).update(
+                        str(symbol) for symbol in date_frame["symbol"].dropna().astype(str).unique()
+                    )
                 daily_starts = (
                     ohlc_complete.groupby(ohlc_complete["symbol"].astype(str))["trade_date"]
                     .min()
@@ -304,6 +309,10 @@ class Warehouse:
                     )
                     missing_flow = missing_flow.loc[~before_source_start]
             capital_flow_missing_rows += int(len(missing_flow))
+
+        if daily_symbols and daily_end is not None:
+            latest_symbols = daily_symbols_by_date.get(pd.Timestamp(daily_end), set())
+            daily_missing_rows = max(0, len(daily_symbols) - len(latest_symbols))
 
         return [
             DatasetCoverage(
