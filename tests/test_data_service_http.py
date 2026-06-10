@@ -1363,6 +1363,7 @@ def test_realtime_provider_uses_akshare_sector_fallback_when_eastmoney_sector_un
 def test_realtime_provider_times_out_slow_akshare_sector_before_eastmoney_backup(tmp_path):
     provider = RealtimeMarketProvider(Warehouse(tmp_path))
     provider.sector_source_timeout = 0.01
+    provider._fetch_cls_hot_plate_sectors = lambda diagnostics: []
     provider._fetch_ths_concept_section_rows = lambda: []
     provider._fetch_ths_industry_html_rows = lambda: []
     provider._fetch_sina_sectors = lambda: []
@@ -1385,6 +1386,49 @@ def test_realtime_provider_times_out_slow_akshare_sector_before_eastmoney_backup
     assert sectors[0].name == "eastmoney-sector-name"
     assert sectors[0].source == "eastmoney-sector"
     assert any("akshare-sector" in item and "timeout" in item.lower() for item in diagnostics)
+
+
+def test_realtime_provider_keeps_cls_hot_plate_on_request_timeout_only(tmp_path):
+    class FakeResponse:
+        def __init__(self, payload=None):
+            self._payload = payload or {}
+
+        def raise_for_status(self):
+            return
+
+        def json(self):
+            return self._payload
+
+    requested: list[tuple[str, float | None]] = []
+
+    def requester(url, **kwargs):
+        requested.append((url, kwargs.get("timeout")))
+        time.sleep(0.03)
+        return FakeResponse(
+            {
+                "data": {
+                    "industry": [
+                        {
+                            "secu_code": "cls82247",
+                            "secu_name": "cls-sector-name",
+                            "change": 0.035,
+                            "up_stock": [{"secu_code": "sz300576"}],
+                        }
+                    ],
+                    "concept": [],
+                    "area": [],
+                }
+            }
+        )
+
+    provider = RealtimeMarketProvider(Warehouse(tmp_path), requester=requester)
+    provider.sector_source_timeout = 0.01
+
+    sectors = provider._fetch_cls_hot_plate_sectors([])
+
+    assert sectors[0].name == "cls-sector-name"
+    assert sectors[0].source == "cls-hot-plate"
+    assert requested == [("https://x-quote.cls.cn/web_quote/plate/hot_plate", 0.01)]
 
 
 def test_realtime_provider_prefers_sina_sector_before_akshare_fallback(tmp_path, monkeypatch):

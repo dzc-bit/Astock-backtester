@@ -552,7 +552,7 @@ export function App() {
     custom: settings.custom_symbols.length > 0 ? `自选 ${settings.custom_symbols.length} 只` : "自选代码"
   }[settings.stock_pool];
   const marketBreadthLabel = marketSnapshot?.breadth
-    ? marketSnapshot.status === "live" && !marketSnapshot.breadth.source.startsWith("local")
+    ? marketSnapshot.status === "live"
       ? `今日实时红盘 ${marketSnapshot.breadth.up} / 全市场 ${marketSnapshot.breadth.total}`
       : `本地最近交易日/非实时 红盘 ${marketSnapshot.breadth.up} / 样本 ${marketSnapshot.breadth.total}`
     : `${poolLabel} / 等待实时行情`;

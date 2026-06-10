@@ -866,6 +866,35 @@ describe("A 股回测工作台界面", () => {
     expect(screen.queryByText(/今日实时红盘 3200/)).not.toBeInTheDocument();
   });
 
+  it("labels live breadth as realtime even when the breadth source is local-latest", async () => {
+    apiMocks.loadRealtimeMarketSnapshot.mockResolvedValue({
+      status: "live",
+      source: "ashare-sina+local",
+      updated_at: "2026-05-27T07:30:00Z",
+      indexes: [
+        {
+          symbol: "sh000001",
+          name: "上证指数",
+          last: 3120.5,
+          previous_close: 3100,
+          change: 20.5,
+          change_pct: 0.0066129,
+          source: "ashare-sina",
+          updated_at: "2026-05-27T07:30:00Z"
+        }
+      ],
+      breadth: { up: 1545, down: 3600, flat: 62, total: 5207, source: "local-latest" },
+      strong_sectors: [],
+      yesterday_strong_sectors: [],
+      message: "实时红绿家数已返回"
+    });
+
+    render(<App />);
+
+    expect(await screen.findByText("今日实时红盘 1545 / 全市场 5207")).toBeInTheDocument();
+    expect(screen.queryByText(/本地最近交易日\/非实时 红盘 1545/)).not.toBeInTheDocument();
+  });
+
   it("shows structured market data and independent commentary after market close", async () => {
     apiMocks.loadRealtimeMarketSnapshot.mockResolvedValue({
       status: "live",
