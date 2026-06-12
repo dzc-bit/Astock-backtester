@@ -160,6 +160,132 @@ class Warehouse:
             .reset_index(drop=True)
         )
 
+    def list_daily_symbols(self) -> list[str]:
+        symbols: set[str] = set()
+        for path in sorted(self.daily_bars_root.glob("year=*/daily_bars.parquet")):
+            try:
+                available_columns = set(pq.ParquetFile(path).schema_arrow.names)
+            except Exception:
+                continue
+            if "symbol" not in available_columns:
+                continue
+            frame = self._safe_read_parquet(path, columns=["symbol"])
+            if frame.empty or "symbol" not in frame:
+                continue
+            symbols.update(str(symbol) for symbol in frame["symbol"].dropna().astype(str).unique())
+        return sorted(symbol for symbol in symbols if symbol)
+
+    def health_coverage(self) -> list[DatasetCoverage]:
+        paths = sorted(self.daily_bars_root.glob("year=*/daily_bars.parquet"))
+        if not paths:
+            return [
+                DatasetCoverage(dataset="daily_bars", symbols=0, start_date=None, end_date=None),
+                DatasetCoverage(dataset="market_cap", symbols=0, start_date=None, end_date=None),
+                DatasetCoverage(dataset="capital_flow", symbols=0, start_date=None, end_date=None),
+            ]
+
+        wanted_columns = ["symbol", "trade_date", *OHLC_COLUMNS, "float_market_cap", "main_net_inflow"]
+        daily_start: date | None = None
+        daily_end: date | None = None
+        latest_path: Path | None = None
+        latest_partition_end: date | None = None
+
+        for path in paths:
+            try:
+                parquet = pq.ParquetFile(path)
+            except Exception:
+                continue
+            available_columns = set(parquet.schema_arrow.names)
+            if "trade_date" not in available_columns or "symbol" not in available_columns:
+                continue
+            part_start, part_end = _parquet_trade_date_range(parquet)
+            if part_start is None or part_end is None:
+                continue
+            daily_start = part_start if daily_start is None else min(daily_start, part_start)
+            daily_end = part_end if daily_end is None else max(daily_end, part_end)
+            if latest_partition_end is None or part_end > latest_partition_end:
+                latest_partition_end = part_end
+                latest_path = path
+
+        daily_symbols: set[str] = set()
+        market_cap_symbols: set[str] = set()
+        capital_flow_symbols: set[str] = set()
+        market_cap_start: date | None = None
+        market_cap_end: date | None = None
+        capital_flow_start: date | None = None
+        capital_flow_end: date | None = None
+        daily_missing_rows = 0
+        market_cap_missing_rows = 0
+        capital_flow_missing_rows = 0
+
+        if latest_path is not None:
+            try:
+                available_columns = set(pq.ParquetFile(latest_path).schema_arrow.names)
+            except Exception:
+                available_columns = set()
+            selected_columns = [column for column in wanted_columns if column in available_columns]
+            if "symbol" in selected_columns and "trade_date" in selected_columns:
+                frame = self._safe_read_parquet(latest_path, columns=selected_columns)
+                if not frame.empty:
+                    frame["symbol"] = frame["symbol"].astype(str)
+                    frame["trade_date"] = pd.to_datetime(frame["trade_date"], errors="coerce")
+                    frame = frame.dropna(subset=["trade_date"])
+
+                if not frame.empty:
+                    present_ohlc = [column for column in OHLC_COLUMNS if column in frame]
+                    if len(present_ohlc) == len(OHLC_COLUMNS):
+                        ohlc_complete_mask = frame[present_ohlc].notna().all(axis=1)
+                        ohlc_complete = frame.loc[ohlc_complete_mask]
+                        daily_missing_rows = int((~ohlc_complete_mask).sum())
+                    else:
+                        ohlc_complete = frame.iloc[0:0]
+                        daily_missing_rows = int(len(frame))
+
+                    if not ohlc_complete.empty:
+                        daily_symbols.update(symbol for symbol in ohlc_complete["symbol"].dropna().astype(str).unique() if symbol)
+
+                    if "float_market_cap" in ohlc_complete:
+                        market_cap_mask = ohlc_complete["float_market_cap"].notna()
+                        market_cap_frame = ohlc_complete.loc[market_cap_mask]
+                        market_cap_symbols.update(symbol for symbol in market_cap_frame["symbol"].dropna().astype(str).unique() if symbol)
+                        market_cap_missing_rows = int((~market_cap_mask).sum())
+                        market_cap_start, market_cap_end = _frame_date_range(market_cap_frame)
+                    else:
+                        market_cap_missing_rows = int(len(ohlc_complete))
+
+                    if "main_net_inflow" in ohlc_complete:
+                        capital_flow_mask = ohlc_complete["main_net_inflow"].notna()
+                        capital_flow_frame = ohlc_complete.loc[capital_flow_mask]
+                        capital_flow_symbols.update(symbol for symbol in capital_flow_frame["symbol"].dropna().astype(str).unique() if symbol)
+                        capital_flow_missing_rows = int((~capital_flow_mask).sum())
+                        capital_flow_start, capital_flow_end = _frame_date_range(capital_flow_frame)
+                    else:
+                        capital_flow_missing_rows = int(len(ohlc_complete))
+
+        return [
+            DatasetCoverage(
+                dataset="daily_bars",
+                symbols=len(daily_symbols),
+                start_date=daily_start,
+                end_date=daily_end,
+                missing_rows=daily_missing_rows,
+            ),
+            DatasetCoverage(
+                dataset="market_cap",
+                symbols=len(market_cap_symbols),
+                start_date=market_cap_start,
+                end_date=market_cap_end,
+                missing_rows=market_cap_missing_rows,
+            ),
+            DatasetCoverage(
+                dataset="capital_flow",
+                symbols=len(capital_flow_symbols),
+                start_date=capital_flow_start,
+                end_date=capital_flow_end,
+                missing_rows=capital_flow_missing_rows,
+            ),
+        ]
+
     def coverage(self) -> list[DatasetCoverage]:
         paths = sorted(self.daily_bars_root.glob("year=*/daily_bars.parquet"))
         if not paths:
@@ -186,6 +312,7 @@ class Warehouse:
         capital_flow_missing_rows = 0
         first_daily_date_by_symbol: dict[str, pd.Timestamp] = {}
         flow_start_by_symbol: dict[str, pd.Timestamp] = {}
+        daily_symbols_by_date: dict[pd.Timestamp, set[str]] = {}
         missing_capital_flow_frames: list[pd.DataFrame] = []
 
         def update_range(current_start: date | None, current_end: date | None, frame: pd.DataFrame) -> tuple[date | None, date | None]:
@@ -222,6 +349,10 @@ class Warehouse:
             if not ohlc_complete.empty:
                 daily_symbols.update(str(symbol) for symbol in ohlc_complete["symbol"].dropna().astype(str).unique())
                 daily_start, daily_end = update_range(daily_start, daily_end, ohlc_complete)
+                for trade_date, date_frame in ohlc_complete.groupby("trade_date"):
+                    daily_symbols_by_date.setdefault(pd.Timestamp(trade_date), set()).update(
+                        str(symbol) for symbol in date_frame["symbol"].dropna().astype(str).unique()
+                    )
                 daily_starts = (
                     ohlc_complete.groupby(ohlc_complete["symbol"].astype(str))["trade_date"]
                     .min()
@@ -305,6 +436,10 @@ class Warehouse:
                     missing_flow = missing_flow.loc[~before_source_start]
             capital_flow_missing_rows += int(len(missing_flow))
 
+        if daily_symbols and daily_end is not None:
+            latest_symbols = daily_symbols_by_date.get(pd.Timestamp(daily_end), set())
+            daily_missing_rows = max(0, len(daily_symbols) - len(latest_symbols))
+
         return [
             DatasetCoverage(
                 dataset="daily_bars",
@@ -342,6 +477,42 @@ def _require_ohlc_rows(frame: pd.DataFrame) -> pd.DataFrame:
     if not all(column in frame for column in OHLC_COLUMNS):
         return pd.DataFrame()
     return frame.dropna(subset=OHLC_COLUMNS)
+
+
+def _frame_date_range(frame: pd.DataFrame) -> tuple[date | None, date | None]:
+    if frame.empty or "trade_date" not in frame:
+        return None, None
+    dates = pd.to_datetime(frame["trade_date"], errors="coerce").dropna()
+    if dates.empty:
+        return None, None
+    return dates.min().date(), dates.max().date()
+
+
+def _parquet_trade_date_range(parquet: pq.ParquetFile) -> tuple[date | None, date | None]:
+    names = parquet.schema_arrow.names
+    if "trade_date" not in names:
+        return None, None
+    column_index = names.index("trade_date")
+    min_date: date | None = None
+    max_date: date | None = None
+    for row_group_index in range(parquet.metadata.num_row_groups):
+        try:
+            stats = parquet.metadata.row_group(row_group_index).column(column_index).statistics
+        except Exception:
+            stats = None
+        if stats is None or stats.min is None or stats.max is None:
+            continue
+        start = pd.Timestamp(stats.min).date()
+        end = pd.Timestamp(stats.max).date()
+        min_date = start if min_date is None else min(min_date, start)
+        max_date = end if max_date is None else max(max_date, end)
+    if min_date is not None and max_date is not None:
+        return min_date, max_date
+    try:
+        frame = parquet.read(columns=["trade_date"]).to_pandas()
+    except Exception:
+        return None, None
+    return _frame_date_range(frame)
 
 
 def _uses_symbol_capital_flow_source_start(

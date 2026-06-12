@@ -47,7 +47,7 @@ class DataServiceState:
         self.cache = LocalCache(cache_dir)
         self.warehouse = Warehouse(cache_dir)
         self.akshare_provider = AkshareProvider()
-        self.provider = CompositeProvider([ADataProvider(), self.akshare_provider, HttpAStockProvider()])
+        self.provider = CompositeProvider([ADataProvider(), HttpAStockProvider(), self.akshare_provider])
         self.capital_flow_crawler = CapitalFlowCrawler()
         self.sync_manager = SyncJobManager(
             warehouse=self.warehouse,
@@ -384,7 +384,7 @@ class DataServiceHandler(BaseHTTPRequestHandler):
                 )
                 return
             if self.path == "/sync/full-market":
-                symbols = payload.get("symbols") or self.server.state.provider.list_symbols()
+                symbols = payload.get("symbols") or self._full_market_sync_symbols()
                 if not symbols:
                     raise ValueError("No symbols available for full-market sync.")
                 start_method = getattr(self.server.state.sync_manager, "start_full_market", None)
@@ -551,6 +551,14 @@ class DataServiceHandler(BaseHTTPRequestHandler):
         if not frame.empty and "symbol" in frame:
             symbols.update(str(symbol) for symbol in frame["symbol"].dropna().astype(str).unique())
         return sorted(symbol for symbol in symbols if symbol)
+
+    def _full_market_sync_symbols(self) -> list[str]:
+        list_local_symbols = getattr(self.server.state.warehouse, "list_daily_symbols", None)
+        if callable(list_local_symbols):
+            local_symbols = [str(symbol) for symbol in list_local_symbols() if str(symbol).strip()]
+            if local_symbols:
+                return local_symbols
+        return [str(symbol) for symbol in self.server.state.provider.list_symbols() if str(symbol).strip()]
 
 
 def create_server(host: str, port: int, cache_dir: str | Path) -> DataServiceServer:

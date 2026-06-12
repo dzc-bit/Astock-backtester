@@ -118,6 +118,29 @@ def test_warehouse_coverage_uses_partition_stats_without_full_read(tmp_path, mon
     assert coverage["capital_flow"].missing_rows == 3
 
 
+def test_warehouse_coverage_counts_latest_daily_rows_missing_from_known_symbols(tmp_path):
+    warehouse = Warehouse(tmp_path)
+    warehouse.write_daily_bars(
+        pd.DataFrame(
+            {
+                "symbol": ["000001", "000002", "000003", "000001"],
+                "trade_date": ["2026-06-05", "2026-06-05", "2026-06-05", "2026-06-08"],
+                "open": [10.0, 10.0, 10.0, 10.2],
+                "high": [10.5, 10.5, 10.5, 10.4],
+                "low": [9.8, 9.8, 9.8, 10.0],
+                "close": [10.2, 10.2, 10.2, 10.3],
+                "volume": [1000, 1000, 1000, 1200],
+            }
+        )
+    )
+
+    coverage = {item.dataset: item for item in warehouse.coverage()}
+
+    assert coverage["daily_bars"].symbols == 3
+    assert coverage["daily_bars"].end_date.isoformat() == "2026-06-08"
+    assert coverage["daily_bars"].missing_rows == 2
+
+
 def test_warehouse_separates_capital_flow_only_rows_from_daily_bar_coverage(tmp_path):
     warehouse = Warehouse(tmp_path)
     warehouse.write_daily_bars(
@@ -328,3 +351,21 @@ def test_warehouse_overwrites_corrupt_partition_when_new_rows_arrive(tmp_path):
 
     assert loaded["trade_date"].dt.strftime("%Y-%m-%d").tolist() == ["2026-05-26"]
     assert loaded.loc[0, "close"] == 10.2
+
+
+def test_warehouse_lists_daily_symbols_with_column_projection(tmp_path, monkeypatch):
+    warehouse = Warehouse(tmp_path)
+    warehouse.write_daily_bars(_bars())
+
+    original_read_parquet = warehouse._safe_read_parquet
+    requested_columns = []
+
+    def read_with_column_probe(path, columns=None):
+        requested_columns.append(columns)
+        return original_read_parquet(path, columns=columns)
+
+    monkeypatch.setattr(warehouse, "_safe_read_parquet", read_with_column_probe)
+
+    assert warehouse.list_daily_symbols() == ["000001", "600519"]
+    assert requested_columns
+    assert all(columns == ["symbol"] for columns in requested_columns)

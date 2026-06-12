@@ -28,6 +28,11 @@ const staleRecentCoverage = [
   { dataset: "capital_flow", symbols: 4900, start_date: "2015-01-05", end_date: "2026-05-26", missing_rows: 0 }
 ];
 
+const staleSingleSymbolCoverage = [
+  { dataset: "daily_bars", symbols: 1, start_date: "2026-05-01", end_date: "2026-05-26", missing_rows: 0 },
+  { dataset: "capital_flow", symbols: 1, start_date: "2026-05-01", end_date: "2026-05-26", missing_rows: 0 }
+];
+
 describe("DataCenter", () => {
   const setupUser = () => userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
 
@@ -184,7 +189,7 @@ describe("DataCenter", () => {
     await waitFor(() => expect(apiMocks.fetchDailyBars).toHaveBeenCalledWith(
       "http://127.0.0.1:9011",
       ["600519", "000001"],
-      "2026-06-01",
+      "2024-01-03",
       "2026-06-05"
     ));
     expect(onCoverageChange).toHaveBeenCalledWith(coverage);
@@ -203,7 +208,7 @@ describe("DataCenter", () => {
 
     await waitFor(() => expect(apiMocks.startFullMarketSync).toHaveBeenCalledWith(
       "http://127.0.0.1:9011",
-      "2026-06-01",
+      "2024-01-03",
       "2026-06-05"
     ));
     expect(apiMocks.fetchDailyBars).not.toHaveBeenCalled();
@@ -314,7 +319,7 @@ describe("DataCenter", () => {
     await waitFor(() => expect(apiMocks.fetchCapitalFlow).toHaveBeenCalledWith(
       "http://127.0.0.1:9011",
       ["600519", "000001"],
-      "2026-06-01",
+      "2024-01-03",
       "2026-06-05"
     ));
     expect(onCoverageChange).toHaveBeenCalledWith(coverage);
@@ -351,7 +356,7 @@ describe("DataCenter", () => {
     await waitFor(() => expect(apiMocks.fetchCapitalFlow).toHaveBeenCalledWith(
       "http://127.0.0.1:9011",
       [],
-      "2026-06-01",
+      "2024-01-03",
       "2026-06-05"
     ));
     await waitFor(() => expect(apiMocks.loadDataServiceHealth).toHaveBeenLastCalledWith("http://127.0.0.1:9011"));
@@ -604,7 +609,7 @@ describe("DataCenter", () => {
     expect(screen.getAllByText(/导入 20 行/).length).toBeGreaterThan(0);
   });
 
-  it("uses a recent business-day range and moves the date inputs after successful fetch coverage", async () => {
+  it("uses local coverage end date and moves the date inputs after successful fetch coverage", async () => {
     const user = setupUser();
     const updatedCoverage = [
       { dataset: "daily_bars", symbols: 1, start_date: "2024-01-02", end_date: "2026-06-05", missing_rows: 0 }
@@ -622,7 +627,7 @@ describe("DataCenter", () => {
 
     render(<DataCenter cacheDir=".astock-cache" coverage={coverage} onCoverageChange={onCoverageChange} />);
 
-    expect(await screen.findByLabelText("开始日期")).toHaveValue("2026-06-01");
+    expect(await screen.findByLabelText("开始日期")).toHaveValue("2024-01-03");
     expect(screen.getByLabelText("结束日期")).toHaveValue("2026-06-05");
     await user.type(screen.getByLabelText("股票代码"), "600519");
     await user.click(screen.getByRole("button", { name: "补全缺失数据" }));
@@ -630,7 +635,7 @@ describe("DataCenter", () => {
     await waitFor(() => expect(apiMocks.fetchDailyBars).toHaveBeenCalledWith(
       "http://127.0.0.1:9011",
       ["600519"],
-      "2026-06-01",
+      "2024-01-03",
       "2026-06-05"
     ));
     expect(onCoverageChange).toHaveBeenCalledWith(updatedCoverage);
@@ -661,6 +666,30 @@ describe("DataCenter", () => {
     await waitFor(() => expect(apiMocks.fetchDailyBars).toHaveBeenCalledWith(
       "http://127.0.0.1:9011",
       ["600519"],
+      "2026-05-26",
+      "2026-06-05"
+    ));
+  });
+
+  it("fills a recently stale single-symbol cache from the local coverage end date", async () => {
+    const user = setupUser();
+    apiMocks.loadDataServiceHealth.mockResolvedValue({
+      ok: true,
+      cache_path: "C:\\cache",
+      port: 9011,
+      coverage: staleSingleSymbolCoverage
+    });
+
+    render(<DataCenter cacheDir=".astock-cache" coverage={staleSingleSymbolCoverage} onCoverageChange={vi.fn()} />);
+
+    expect(await screen.findByLabelText("开始日期")).toHaveValue("2026-05-26");
+    expect(screen.getByLabelText("结束日期")).toHaveValue("2026-06-05");
+    await user.type(screen.getByLabelText("股票代码"), "000001");
+    await user.click(screen.getByRole("button", { name: "补全缺失数据" }));
+
+    await waitFor(() => expect(apiMocks.fetchDailyBars).toHaveBeenCalledWith(
+      "http://127.0.0.1:9011",
+      ["000001"],
       "2026-05-26",
       "2026-06-05"
     ));

@@ -6,6 +6,7 @@ import time as monotonic_time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta, timezone
+from threading import Lock
 from typing import Any, Callable, Iterable
 
 import pandas as pd
@@ -479,6 +480,8 @@ class RealtimeMarketProvider:
     _last_successful_snapshot: RealtimeMarketSnapshot | None = field(default=None, init=False, repr=False)
     _skip_local_topic_fetch_once: bool = field(default=False, init=False, repr=False)
     _heavy_market_provider: HeavyMarketCrawlerProvider | None = field(default=None, init=False, repr=False)
+    _cls_home_payload_cache: dict[str, Any] | None = field(default=None, init=False, repr=False)
+    _cls_home_payload_lock: Lock = field(default_factory=Lock, init=False, repr=False)
 
     def market_snapshot(self) -> RealtimeMarketSnapshot:
         for event in self.market_snapshot_events():
@@ -501,6 +504,7 @@ class RealtimeMarketProvider:
         self._ths_industry_rows_cache = None
         self._last_live_sector_rows = []
         self._skip_local_topic_fetch_once = False
+        self._cls_home_payload_cache = None
 
         indexes: list[MarketIndexQuote] = []
         live_breadth: MarketBreadth | None = None
@@ -651,6 +655,20 @@ class RealtimeMarketProvider:
         yield {"type": "result", "snapshot": snapshot}
 
     def _call_live_breadth(self, diagnostics: list[str]) -> MarketBreadth | None:
+        if self.breadth_time_budget is not None:
+            executor = ThreadPoolExecutor(max_workers=1)
+            future = executor.submit(self._call_live_breadth_unbounded, diagnostics)
+            try:
+                return future.result(timeout=self.breadth_time_budget)
+            except TimeoutError:
+                future.cancel()
+                diagnostics.append(f"realtime breadth source timeout after {self.breadth_time_budget:g}s.")
+                return None
+            finally:
+                executor.shutdown(wait=False, cancel_futures=True)
+        return self._call_live_breadth_unbounded(diagnostics)
+
+    def _call_live_breadth_unbounded(self, diagnostics: list[str]) -> MarketBreadth | None:
         try:
             return self._fetch_live_breadth(diagnostics)
         except TypeError:
@@ -706,11 +724,14 @@ class RealtimeMarketProvider:
         return quotes
 
     def _fetch_cls_home_payload(self) -> dict[str, Any]:
-        return cls_request_json(
-            self.requester,
-            CLS_QUOTE_HOME_URL,
-            timeout=min(self.timeout, 2.5),
-        )
+        with self._cls_home_payload_lock:
+            if self._cls_home_payload_cache is None:
+                self._cls_home_payload_cache = cls_request_json(
+                    self.requester,
+                    CLS_QUOTE_HOME_URL,
+                    timeout=min(self.timeout, 2.5),
+                )
+            return self._cls_home_payload_cache
 
     def _fetch_cls_indexes(self) -> list[MarketIndexQuote]:
         try:
@@ -1514,7 +1535,8 @@ class RealtimeMarketProvider:
 
     def _coverage_symbol_count(self) -> int:
         try:
-            coverage = self.warehouse.coverage()
+            health_coverage = getattr(self.warehouse, "health_coverage", None)
+            coverage = health_coverage() if callable(health_coverage) else self.warehouse.coverage()
         except Exception:
             return 0
         for item in coverage:

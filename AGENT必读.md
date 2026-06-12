@@ -29,7 +29,15 @@ git branch --show-current
 https://github.com/dzc-bit/Astock-backtester.git
 ```
 
-保护已有未提交修改。不要覆盖无关文件，不要清理、删除、迁移 `D:\New project 6\运行产物`。版本号统一保持 `1.2.2`，除非用户明确要求改版本。
+保护已有未提交修改。不要覆盖无关文件，不要清理、删除、迁移 `D:\New project 6\运行产物`。当前版本按用户要求维护为 `1.2.3`；除非用户明确要求，不要再改版本号。
+
+截至 2026-06-13，当前目标修复版需要覆盖安装到桌面端目录：
+
+```text
+D:\New project 6\运行产物\桌面软件\A股策略回测工作台
+```
+
+覆盖安装后必须重新比对工作区 sidecar 与安装目录 `bin\astock-data-service.exe` 的 SHA256。不要复用旧 hash，也不要做 1.2.2 回退。
 
 ## 2. 绝对不要碰错边界
 
@@ -83,6 +91,8 @@ https://github.com/dzc-bit/Astock-backtester.git
 - 或满足本地股票池合理比例
 
 `total=192`、`total=26` 这类局部样本必须判失败并写入 diagnostics，不能标记为全市场 live。
+
+红绿家数链路必须有外层时间预算。慢 provider 不能拖住整个 `/realtime/market-snapshot` 或 `/market/commentary`；超时要快速返回 diagnostics，再走后续可用来源或本地防守口径。
 
 红绿家数 provider 链：
 
@@ -159,6 +169,8 @@ docs/capital-flow-crawler-report.md
 `/coverage/daily-bars` 必须使用 A 股交易日历。不要用普通工作日直接判断缺失交易日。
 
 数据中心的“补全缺失数据”默认是全市场补齐：股票代码为空时走 `/sync/full-market`；只有用户显式输入股票代码时，才走指定股票 `/fetch/daily-bars`。全市场同步运行中，覆盖表的日线 `missing_rows` 要随本次 `imported_rows` 做可视化下降，不能一直静态显示旧缺口。
+
+默认无股票参数的 `/coverage/daily-bars` 不能全量扫描多年历史明细，否则会拖慢数据中心；应走最近分区/轻量摘要。指定股票或指定日期范围时，才需要逐股精确缺口明细。
 
 春节、清明、劳动节、国庆等合法休市日不能进入 `missing_trade_dates`。
 
@@ -297,3 +309,50 @@ git branch --show-current
 - 无归属 untracked 文件
 
 只提交源码、测试、文档和必要版本文件。
+
+## 15. 近期踩坑记录
+
+这些是 2026-06-10 到 2026-06-12 这轮修复和交付里实际踩过的坑，后续 agent 先按这些避坑，不要重复试错。
+
+### 范围和目标漂移
+
+- 用户一旦明确说“不要回退”“只完成目标”，就不要再查 release 或执行回退流程。当前目标版本是 1.2.3；继续做 1.2.2 回退会偏离目标。
+- “不要动项目内容”在本仓通常表示不要改源码、测试、业务逻辑、构建脚本或运行数据。若用户只要求写 `AGENT必读.md`，就只编辑这一个文件。
+- `项目说明书.md` 是本地开发说明且被 `.gitignore` 忽略；`AGENT必读.md` 是 agent 接手入口。不要把两者职责混在一起。
+
+### Windows 编码和中文路径
+
+- 读 `AGENT必读.md`、`项目说明书.md` 等中文文件时必须显式 `-Encoding UTF8`，否则 PowerShell 输出可能乱码，容易误判文档内容。
+- Python here-string 里直接写中文路径，经过 PowerShell 管道后可能变成错误路径。启动 sidecar 探针时优先用 `Path("D:/New project 6") / "\u8fd0\u884c\u4ea7\u7269" / ...` 或 `subprocess.Popen([...])` 参数数组。
+- `D:\New project 6` 是真实根目录；不要在 `C:\Users\...\Documents\New project 6` Junction 路径下测试、构建或清理。
+
+### Sidecar 和安装验证
+
+- 覆盖安装前先停掉旧桌面端和旧 sidecar，否则安装目录里的 sidecar 可能没有真正替换。安装后必须比对工作区 sidecar 与安装目录 sidecar 的 SHA256。
+- `npm run tauri -- build --ci` 可能曾经外层非零但已生成安装包；判断构建结果要看安装包、`.sig` 时间戳以及安装后 hash 和接口探针。
+- 探针结束后要再查一次 `astock-data-service` 进程并停掉。上一轮就出现过探针进程仍在，最终交付前必须清掉。
+- 清理工作区构建产物时可以删 `.pyinstaller`、`.pytest_cache`、`dist`、`src-tauri/target`、`src-tauri/bin`、`src-tauri/gen`、`__pycache__`；不要删 `.tools`、`node_modules`、`.astock-cache`、`.reference`、`运行产物`。
+
+### 实时行情和红绿家数
+
+- `/realtime/market-snapshot` 慢不一定是“爬虫太重”，也可能是某个 provider 没有外层时间预算，拖住整个 `ThreadPoolExecutor`。红绿家数分支必须有外层超时并写 diagnostics。
+- 红绿家数不能只看接口成功或 `status=live`。必须检查 `breadth.total >= 3000` 或本地股票池比例，局部样本要判失败，不能伪装全市场 live。
+- `/market/commentary` 会依赖实时快照；实时快照超时会连带拖慢行情评价。排查时要同时测 `/realtime/market-snapshot` 和 `/market/commentary`。
+
+### 数据中心和覆盖检查
+
+- 数据中心“补全缺失数据”无股票输入时走 `/sync/full-market`，不是逐股 `/fetch/daily-bars`。不要把两个入口混成一个。
+- `/coverage/daily-bars` 默认无参数时不能全量读多年日线，否则本地服务会超时；默认路径应使用最近分区/轻量摘要。只有指定股票或日期范围时才读精确逐股缺口。
+- `/health` 已走轻量 `health_coverage()`，但 `_safe_coverage()` 仍可能需要精确覆盖统计。不要为了性能把所有 coverage 调用都粗暴替换成轻量摘要，否则会影响资金流独立行和精确缺口测试。
+- 最新日期补齐是否有效要看真实探针：`/sync/full-market` 是否能快速起任务、是否使用本地股票池、`start_date/end_date` 是否到最新交易日，并且要能取消 job。
+
+### 回测候选和 NDJSON
+
+- user 模式候选正式来源是 `/run/backtest/stream` 最后一个 NDJSON `result.latest_strategy_matches.matches`，不是同花顺复盘、新闻汇总或本地旧快照。
+- `/run/backtest/stream` 不能用普通 JSON 方式判断。必须逐行解析 NDJSON，最后事件可以是 `result` 或真实错误；探针 payload 要有至少一个合法 entry group，否则只是在测请求体验证错误。
+
+### 清理和最终复查
+
+- 清理前先列出绝对路径，并确认路径以 `D:\New project 6` 开头。不要用模糊通配符清理 `运行产物`。
+- `git status --ignored --short` 里剩下 `.tools`、`node_modules`、`.astock-cache`、`.reference`、`运行产物` 是正常的，不是必须删除的临时文件。
+- `git diff --check` 在 Windows 上可能只报 LF/CRLF 提示；这不是 whitespace error。真正要关注的是命令退出码和是否有 trailing whitespace 等错误。

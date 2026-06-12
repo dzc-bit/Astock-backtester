@@ -23,6 +23,7 @@ class SyncJobManager:
     capital_flow_fetcher: Callable[[list[str], str, str], dict[str, Any]] | None = None
     full_market_batch_size: int = 25
     full_market_workers: int = 4
+    full_market_write_batch_rows: int = 25_000
     capital_flow_batch_size: int = 20
 
     def __post_init__(self) -> None:
@@ -45,6 +46,7 @@ class SyncJobManager:
                 frame = self.provider.fetch_daily_bars(symbol, start_date, end_date)
                 if not frame.empty:
                     self.warehouse.write_daily_bars(frame)
+                    status.returned_rows += int(len(frame))
                     status.imported_rows += int(len(frame))
                     status.completed_symbols += 1
                 else:
@@ -132,9 +134,11 @@ class SyncJobManager:
         with self._lock:
             return job_id in self._cancelled
 
-    def _finish_cancelled(self, job_id: str) -> bool:
+    def _finish_cancelled(self, job_id: str, pending_frames: list[pd.DataFrame] | None = None) -> bool:
         if not self._is_cancel_requested(job_id):
             return False
+        if pending_frames:
+            self._flush_full_market_frames(job_id, pending_frames)
         current = self.get_job(job_id)
         if current:
             current.current_symbol = None
@@ -144,8 +148,10 @@ class SyncJobManager:
 
     def _run_full_market_job(self, job_id: str, symbols: list[str], start_date: str, end_date: str) -> None:
         try:
+            pending_frames: list[pd.DataFrame] = []
+            pending_rows = 0
             for batch in _chunks(symbols, self.full_market_batch_size):
-                if self._finish_cancelled(job_id):
+                if self._finish_cancelled(job_id, pending_frames):
                     return
                 frames: list[pd.DataFrame] = []
                 with ThreadPoolExecutor(max_workers=max(1, self.full_market_workers)) as executor:
@@ -176,15 +182,20 @@ class SyncJobManager:
                         frames.append(frame)
                         current = self.get_job(job_id)
                         if current:
-                            self._mutate(job_id, completed_symbols=current.completed_symbols + 1)
+                            self._mutate(
+                                job_id,
+                                completed_symbols=current.completed_symbols + 1,
+                                returned_rows=current.returned_rows + int(len(frame)),
+                            )
                 if frames:
-                    merged = pd.concat(frames, ignore_index=True)
-                    self.warehouse.write_daily_bars(merged)
-                    current = self.get_job(job_id)
-                    if current:
-                        self._mutate(job_id, imported_rows=current.imported_rows + int(len(merged)))
-                if self._finish_cancelled(job_id):
+                    pending_frames.extend(frames)
+                    pending_rows += sum(int(len(frame)) for frame in frames)
+                    if pending_rows >= self.full_market_write_batch_rows:
+                        pending_rows = self._flush_full_market_frames(job_id, pending_frames)
+                if self._finish_cancelled(job_id, pending_frames):
                     return
+            if pending_frames:
+                self._flush_full_market_frames(job_id, pending_frames)
             final = self.get_job(job_id)
             if final:
                 final.current_symbol = None
@@ -197,6 +208,17 @@ class SyncJobManager:
                 current.status = "failed"
                 current.errors.append(str(exc))
                 self._store(current)
+
+    def _flush_full_market_frames(self, job_id: str, frames: list[pd.DataFrame]) -> int:
+        if not frames:
+            return 0
+        merged = pd.concat(frames, ignore_index=True)
+        frames.clear()
+        self.warehouse.write_daily_bars(merged)
+        current = self.get_job(job_id)
+        if current:
+            self._mutate(job_id, imported_rows=current.imported_rows + int(len(merged)))
+        return 0
 
     def _run_capital_flow_job(self, job_id: str, symbols: list[str], start_date: str, end_date: str) -> None:
         try:

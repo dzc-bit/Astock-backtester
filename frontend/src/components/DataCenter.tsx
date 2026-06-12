@@ -58,7 +58,7 @@ function dailyBarsCoverage(coverage: DatasetCoverage[]): DatasetCoverage | undef
 function coverageFillDateRange(coverage: DatasetCoverage[]): { startDate: string; endDate: string } {
   const fallback = recentBusinessDateRange();
   const daily = dailyBarsCoverage(coverage);
-  if (daily?.end_date && daily.symbols >= 100 && daily.end_date < fallback.endDate) {
+  if (daily?.end_date && daily.end_date < fallback.endDate) {
     return { startDate: daily.end_date, endDate: fallback.endDate };
   }
   return fallback;

@@ -9,6 +9,7 @@ from astock_backtester.data.providers import (
     ADataProvider,
     AkshareProvider,
     CompositeProvider,
+    HttpAStockProvider,
     enrich_market_cap_from_share_history,
 )
 
@@ -124,6 +125,126 @@ def test_composite_provider_falls_back_when_primary_returns_empty():
     result = provider.fetch_daily_bars("000001", "2024-01-02", "2024-01-02")
 
     assert result.loc[0, "source"] == "fallback"
+
+
+def test_composite_provider_falls_back_when_primary_stops_before_requested_latest_trade_date():
+    class StaleProvider:
+        name = "stale"
+
+        def fetch_daily_bars(self, symbol, start_date, end_date):
+            return pd.DataFrame(
+                {
+                    "symbol": [symbol],
+                    "trade_date": ["2026-06-03"],
+                    "open": [1.0],
+                    "high": [1.0],
+                    "low": [1.0],
+                    "close": [1.0],
+                    "volume": [1],
+                }
+            )
+
+        def fetch_share_history(self, symbol):
+            return pd.DataFrame()
+
+    class FreshProvider:
+        name = "fresh"
+
+        def fetch_daily_bars(self, symbol, start_date, end_date):
+            return pd.DataFrame(
+                {
+                    "symbol": [symbol],
+                    "trade_date": ["2026-06-05"],
+                    "open": [2.0],
+                    "high": [2.0],
+                    "low": [2.0],
+                    "close": [2.0],
+                    "volume": [2],
+                }
+            )
+
+        def fetch_share_history(self, symbol):
+            return pd.DataFrame()
+
+    provider = CompositeProvider([StaleProvider(), FreshProvider()])
+
+    result = provider.fetch_daily_bars("000001", "2026-06-03", "2026-06-05")
+
+    assert result["trade_date"].dt.strftime("%Y-%m-%d").tolist() == ["2026-06-05"]
+    assert result.loc[0, "source"] == "fresh"
+
+
+def test_http_provider_reuses_adapter_for_repeated_symbol_fetches(monkeypatch):
+    created_adapters = []
+    calls = []
+
+    class FakeAdapter:
+        def __init__(self):
+            created_adapters.append(self)
+
+        def fetch_daily_bars(self, symbols, start_date, end_date):
+            calls.append((symbols, start_date, end_date))
+            return pd.DataFrame(
+                {
+                    "symbol": [symbols[0]],
+                    "trade_date": [start_date],
+                    "open": [1.0],
+                    "high": [1.0],
+                    "low": [1.0],
+                    "close": [1.0],
+                    "volume": [1],
+                }
+            )
+
+    monkeypatch.setattr(
+        "astock_backtester.data.providers.AStockDataAdapter.from_http_sources",
+        lambda **kwargs: FakeAdapter(),
+    )
+    provider = HttpAStockProvider()
+
+    first = provider.fetch_daily_bars("000001", "2024-01-02", "2024-01-02")
+    second = provider.fetch_daily_bars("000002", "2024-01-02", "2024-01-02")
+
+    assert len(created_adapters) == 1
+    assert calls == [
+        (["000001"], "2024-01-02", "2024-01-02"),
+        (["000002"], "2024-01-02", "2024-01-02"),
+    ]
+    assert first.loc[0, "source"] == "http"
+    assert second.loc[0, "source"] == "http"
+
+
+def test_http_provider_builds_fast_adapter_without_optional_enrichment(monkeypatch):
+    captured = {}
+
+    class FakeAdapter:
+        def fetch_daily_bars(self, symbols, start_date, end_date):
+            return pd.DataFrame(
+                {
+                    "symbol": [symbols[0]],
+                    "trade_date": [start_date],
+                    "open": [1.0],
+                    "high": [1.0],
+                    "low": [1.0],
+                    "close": [1.0],
+                    "volume": [1],
+                }
+            )
+
+    def fake_from_http_sources(**kwargs):
+        captured.update(kwargs)
+        return FakeAdapter()
+
+    monkeypatch.setattr(
+        "astock_backtester.data.providers.AStockDataAdapter.from_http_sources",
+        fake_from_http_sources,
+    )
+    provider = HttpAStockProvider()
+
+    result = provider.fetch_daily_bars("000001", "2024-01-02", "2024-01-02")
+
+    assert captured["include_optional_enrichment"] is False
+    assert result.loc[0, "source"] == "http"
 
 
 def test_adata_provider_lists_normalized_symbols():

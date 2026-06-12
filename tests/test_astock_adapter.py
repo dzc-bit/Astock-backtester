@@ -47,6 +47,8 @@ def test_fetch_status_is_explicit():
 
 def test_http_fetcher_maps_astock_data_sources_to_daily_bars():
     def fake_json_get(url, params, headers, timeout):
+        if "fqkline/get" in url:
+            return {}
         if "getstockquotation" in url:
             return {
                 "Result": {
@@ -81,8 +83,201 @@ def test_http_fetcher_maps_astock_data_sources_to_daily_bars():
     assert result["listing_days"].min() > 1000
 
 
+def test_http_fetcher_prefers_sina_kline_when_text_getter_is_configured():
+    calls: list[str] = []
+
+    def fake_text_get(url, params, headers, timeout):
+        calls.append("sina")
+        assert "CN_MarketDataService.getKLineData" in url
+        assert params["symbol"] == "sh600519"
+        return (
+            "var x=(["
+            '{"day":"2024-01-02","open":"10","high":"10.5","low":"9.8","close":"10.2","volume":"1000"},'
+            '{"day":"2024-01-03","open":"10.2","high":"10.8","low":"10.1","close":"10.7","volume":"1500"}'
+            "]);"
+        )
+
+    def fake_json_get(url, params, headers, timeout):
+        calls.append("json")
+        return {}
+
+    fetcher = HttpAStockFetcher(json_get=fake_json_get, text_get=fake_text_get)
+
+    result = fetcher.fetch_daily_bars(["600519"], "2024-01-02", "2024-01-03")
+
+    assert calls[0] == "sina"
+    assert "tencent" not in calls
+    assert result["trade_date"].dt.strftime("%Y-%m-%d").tolist() == ["2024-01-02", "2024-01-03"]
+    assert result["close"].tolist() == [10.2, 10.7]
+
+
+def test_http_fetcher_uses_tencent_when_sina_kline_is_empty():
+    calls: list[str] = []
+
+    def fake_text_get(url, params, headers, timeout):
+        calls.append("sina")
+        return "var x=([]);"
+
+    def fake_json_get(url, params, headers, timeout):
+        if "fqkline/get" in url:
+            calls.append("tencent")
+            assert timeout <= 5
+            assert params["param"].startswith("sh600519,day,2024-01-02,2024-01-03")
+            return {
+                "code": 0,
+                "data": {
+                    "sh600519": {
+                        "qfqday": [
+                            ["2024-01-02", "10", "10.2", "10.5", "9.8", "1000"],
+                            ["2024-01-03", "10.2", "10.7", "10.8", "10.1", "1500"],
+                        ]
+                    }
+                },
+            }
+        if "stock/kline/get" in url:
+            calls.append("eastmoney")
+            return {}
+        if "getstockquotation" in url:
+            calls.append("baidu")
+            return {}
+        return {}
+
+    fetcher = HttpAStockFetcher(json_get=fake_json_get, text_get=fake_text_get)
+
+    result = fetcher.fetch_daily_bars(["600519"], "2024-01-02", "2024-01-03")
+
+    assert calls == ["sina", "tencent"]
+    assert result["trade_date"].dt.strftime("%Y-%m-%d").tolist() == ["2024-01-02", "2024-01-03"]
+    assert result["close"].tolist() == [10.2, 10.7]
+
+
+def test_http_fetcher_prefers_eastmoney_kline_before_baidu():
+    calls: list[str] = []
+
+    def fake_json_get(url, params, headers, timeout):
+        if "fqkline/get" in url:
+            return {}
+        if "stock/kline/get" in url:
+            calls.append("eastmoney")
+            assert timeout <= 5
+            return {
+                "data": {
+                    "klines": [
+                        "2024-01-02,10,10.2,10.5,9.8,1000,10200,0,2.0,0.2,0.02",
+                        "2024-01-03,10.2,10.7,10.8,10.1,1500,16050,0,4.9,0.5,0.05",
+                    ]
+                }
+            }
+        if "getstockquotation" in url:
+            calls.append("baidu")
+            return {}
+        return {}
+
+    fetcher = HttpAStockFetcher(json_get=fake_json_get)
+
+    result = fetcher.fetch_daily_bars(["600519"], "2024-01-02", "2024-01-03")
+
+    assert calls == ["eastmoney"]
+    assert result["trade_date"].dt.strftime("%Y-%m-%d").tolist() == ["2024-01-02", "2024-01-03"]
+    assert result["close"].tolist() == [10.2, 10.7]
+    assert result["amount"].tolist() == [10200.0, 16050.0]
+
+
+def test_http_fetcher_falls_back_to_baidu_when_eastmoney_kline_disconnects():
+    calls: list[str] = []
+
+    def fake_json_get(url, params, headers, timeout):
+        if "fqkline/get" in url:
+            return {}
+        if "stock/kline/get" in url:
+            calls.append("eastmoney")
+            raise OSError("remote end closed connection")
+        if "getstockquotation" in url:
+            calls.append("baidu")
+            return {
+                "Result": {
+                    "newMarketData": {
+                        "keys": ["time", "open", "close", "high", "low", "volume"],
+                        "marketData": "2024-01-02,10,10.5,11,9.8,1000",
+                    }
+                }
+            }
+        return {}
+
+    fetcher = HttpAStockFetcher(json_get=fake_json_get)
+
+    result = fetcher.fetch_daily_bars(["600519"], "2024-01-02", "2024-01-02")
+
+    assert calls == ["eastmoney", "baidu"]
+    assert len(result) == 1
+    assert result.loc[0, "close"] == 10.5
+
+
+def test_http_fetcher_tries_next_eastmoney_transport_before_baidu():
+    calls: list[str] = []
+
+    def failing_eastmoney(url, params, headers, timeout):
+        calls.append("eastmoney-requests")
+        raise OSError("remote end closed connection")
+
+    def working_eastmoney(url, params, headers, timeout):
+        calls.append("eastmoney-curl")
+        return {"data": {"klines": ["2024-01-02,10,10.2,10.5,9.8,1000,10200,0,2.0,0.2,0.02"]}}
+
+    def fake_json_get(url, params, headers, timeout):
+        if "fqkline/get" in url:
+            return {}
+        if "getstockquotation" in url:
+            calls.append("baidu")
+        return {}
+
+    fetcher = HttpAStockFetcher(
+        json_get=fake_json_get,
+        eastmoney_json_getters=(("requests", failing_eastmoney), ("curl_cffi", working_eastmoney)),
+    )
+
+    result = fetcher.fetch_daily_bars(["600519"], "2024-01-02", "2024-01-02")
+
+    assert calls == ["eastmoney-requests", "eastmoney-curl"]
+    assert len(result) == 1
+    assert result.loc[0, "close"] == 10.2
+
+
+def test_http_fetcher_suspends_repeated_eastmoney_disconnects_for_batch_speed():
+    calls: list[tuple[str, str]] = []
+
+    def fake_json_get(url, params, headers, timeout):
+        if "fqkline/get" in url:
+            return {}
+        if "stock/kline/get" in url:
+            code = str(params["secid"]).split(".", 1)[1]
+            calls.append(("eastmoney", code))
+            raise OSError("remote end closed connection")
+        if "getstockquotation" in url:
+            code = str(params["code"])
+            calls.append(("baidu", code))
+            return {
+                "Result": {
+                    "newMarketData": {
+                        "keys": ["time", "open", "close", "high", "low", "volume"],
+                        "marketData": "2024-01-02,10,10.5,11,9.8,1000",
+                    }
+                }
+            }
+        return {}
+
+    fetcher = HttpAStockFetcher(json_get=fake_json_get)
+
+    result = fetcher.fetch_daily_bars(["600519", "000001"], "2024-01-02", "2024-01-02")
+
+    assert calls == [("eastmoney", "600519"), ("baidu", "600519"), ("baidu", "000001")]
+    assert result["symbol"].tolist() == ["600519", "000001"]
+
+
 def test_http_fetcher_maps_baidu_amount_turnover_and_estimated_float_market_cap():
     def fake_json_get(url, params, headers, timeout):
+        if "fqkline/get" in url:
+            return {}
         if "getstockquotation" in url:
             return {
                 "Result": {
@@ -120,6 +315,8 @@ def test_http_fetcher_maps_baidu_amount_turnover_and_estimated_float_market_cap(
 
 def test_http_fetcher_keeps_missing_flow_as_missing_value():
     def fake_json_get(url, params, headers, timeout):
+        if "fqkline/get" in url:
+            return {}
         if "getstockquotation" in url:
             return {
                 "Result": {
@@ -144,6 +341,8 @@ def test_http_fetcher_keeps_missing_flow_as_missing_value():
 
 def test_http_fetcher_keeps_daily_bars_when_optional_sources_fail():
     def fake_json_get(url, params, headers, timeout):
+        if "fqkline/get" in url:
+            return {}
         if "getstockquotation" in url:
             return {
                 "Result": {
@@ -165,8 +364,47 @@ def test_http_fetcher_keeps_daily_bars_when_optional_sources_fail():
     assert pd.isna(result.loc[0, "float_market_cap"])
 
 
+def test_http_fetcher_can_skip_optional_enrichment_for_fast_full_market_sync():
+    calls: list[str] = []
+
+    def fake_json_get(url, params, headers, timeout):
+        if "fqkline/get" in url:
+            calls.append("tencent")
+            return {}
+        if "fflow/daykline/get" in url:
+            calls.append("fund-flow")
+            raise AssertionError("optional fund flow should be skipped")
+        if "api/qt/stock/get" in url:
+            calls.append("stock-info")
+            raise AssertionError("optional stock info should be skipped")
+        return {}
+
+    def fake_text_get(url, params, headers, timeout):
+        calls.append("sina")
+        return (
+            "var x=(["
+            '{"day":"2024-01-02","open":"10","high":"10.5","low":"9.8","close":"10.2","volume":"1000"}'
+            "]);"
+        )
+
+    fetcher = HttpAStockFetcher(
+        json_get=fake_json_get,
+        text_get=fake_text_get,
+        include_optional_enrichment=False,
+    )
+
+    result = fetcher.fetch_daily_bars(["600519"], "2024-01-02", "2024-01-02")
+
+    assert calls == ["sina"]
+    assert len(result) == 1
+    assert result.loc[0, "close"] == 10.2
+    assert pd.isna(result.loc[0, "main_net_inflow"])
+
+
 def test_http_fetcher_keeps_daily_bars_when_optional_sources_return_unexpected_shapes():
     def fake_json_get(url, params, headers, timeout):
+        if "fqkline/get" in url:
+            return {}
         if "getstockquotation" in url:
             return {
                 "Result": {
@@ -193,10 +431,12 @@ def test_http_fetcher_retries_baidu_kline_when_result_shape_is_throttled():
 
     def fake_json_get(url, params, headers, timeout):
         nonlocal calls
+        if "fqkline/get" in url:
+            return {}
         if "getstockquotation" in url:
             calls += 1
             if calls == 1:
-                return {"ResultCode": "403", "Result": []}
+                return {"ResultCode": "0", "Result": []}
             return {
                 "ResultCode": "0",
                 "Result": {
@@ -215,6 +455,29 @@ def test_http_fetcher_retries_baidu_kline_when_result_shape_is_throttled():
     assert calls == 2
     assert len(result) == 1
     assert result.loc[0, "close"] == 10.5
+
+
+def test_http_fetcher_fast_fails_baidu_for_explicit_403_shape(monkeypatch):
+    calls = 0
+    sleeps: list[float] = []
+
+    def fake_json_get(url, params, headers, timeout):
+        nonlocal calls
+        if "fqkline/get" in url:
+            return {}
+        if "getstockquotation" in url:
+            calls += 1
+            return {"ResultCode": "403", "Result": []}
+        return {}
+
+    monkeypatch.setattr("astock_backtester.data.astock_adapter.time.sleep", lambda seconds: sleeps.append(seconds))
+    fetcher = HttpAStockFetcher(json_get=fake_json_get, eastmoney_json_getters=())
+
+    result = fetcher.fetch_daily_bars(["600519"], "2024-01-02", "2024-01-02")
+
+    assert result.empty
+    assert calls == 1
+    assert sleeps == []
 
 
 def test_cli_fetch_daily_bars_writes_cache(monkeypatch, tmp_path):

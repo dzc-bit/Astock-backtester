@@ -69,6 +69,7 @@ def test_full_market_job_persists_success_and_failure(tmp_path):
     assert status.completed_symbols == 2
     assert status.failed_symbols == 1
     assert status.imported_rows == 2
+    assert status.returned_rows == 2
     loaded = warehouse.read_daily_bars()
     assert sorted(loaded["symbol"].tolist()) == ["000001", "000003"]
 
@@ -102,6 +103,82 @@ def test_full_market_job_can_run_asynchronously_and_report_progress(tmp_path):
     assert eventually.status == "completed"
     assert eventually.completed_symbols == 3
     assert warehouse.read_daily_bars()["symbol"].nunique() == 3
+
+
+def test_full_market_job_uses_large_write_batches_for_daily_incremental_import(tmp_path):
+    class CountingWarehouse(Warehouse):
+        def __init__(self, cache_root):
+            super().__init__(cache_root)
+            self.write_batches = []
+
+        def write_daily_bars(self, frame):
+            self.write_batches.append(int(len(frame)))
+            super().write_daily_bars(frame)
+
+    warehouse = CountingWarehouse(tmp_path)
+    manager = SyncJobManager(warehouse=warehouse, provider=FakeProvider())
+    symbols = [f"{index:06d}" for index in range(251)]
+
+    status = manager.start_full_market(
+        symbols=symbols,
+        start_date="2026-06-09",
+        end_date="2026-06-09",
+    )
+
+    eventually = None
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        eventually = manager.get_job(status.job_id)
+        if eventually and eventually.status == "completed":
+            break
+        sleep(0.02)
+
+    assert eventually is not None
+    assert eventually.status == "completed"
+    assert eventually.imported_rows == 251
+    assert eventually.returned_rows == 251
+    assert warehouse.write_batches == [251]
+
+
+def test_full_market_job_flushes_pending_rows_when_cancelled_before_next_batch(tmp_path):
+    class CancelBeforeSecondBatch(SyncJobManager):
+        def __post_init__(self):
+            super().__post_init__()
+            self.cancel_checks = 0
+
+        def _is_cancel_requested(self, job_id):
+            self.cancel_checks += 1
+            return self.cancel_checks >= 3 or super()._is_cancel_requested(job_id)
+
+    warehouse = Warehouse(tmp_path)
+    manager = CancelBeforeSecondBatch(
+        warehouse=warehouse,
+        provider=FakeProvider(),
+        full_market_batch_size=1,
+        full_market_workers=1,
+        full_market_write_batch_rows=100,
+    )
+
+    status = manager.start_full_market(
+        symbols=["000001", "000002"],
+        start_date="2026-06-09",
+        end_date="2026-06-09",
+    )
+
+    eventually = None
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        eventually = manager.get_job(status.job_id)
+        if eventually and eventually.status != "running":
+            break
+        sleep(0.02)
+
+    assert eventually is not None
+    assert eventually.status == "cancelled"
+    assert eventually.completed_symbols == 1
+    assert eventually.imported_rows == 1
+    assert eventually.returned_rows == 1
+    assert warehouse.read_daily_bars()["symbol"].tolist() == ["000001"]
 
 
 def test_capital_flow_job_reports_completed_with_errors_when_rows_import_with_failures(tmp_path):
