@@ -253,6 +253,19 @@ D:\New project 6\运行产物\签名密钥\a-stock-backtester-v017.key
 - `npm run tauri -- build --ci` 外层曾返回非零但实际安装包和签名已生成；不要只看外层 wrapper，必须看真实产物和后续验证。
 - 本机可用 cargo 不一定在 `.tools\cargo-home\bin`，实际常用路径是 `.tools\rustup-home\toolchains\stable-x86_64-pc-windows-msvc\bin\cargo.exe`。
 - 覆盖安装不等于 sidecar 已替换，必须停旧进程后比对 hash，再探测端点。
+- 如果刚清理过 `src-tauri/target`、`src-tauri/bin`、`dist`，下一次覆盖安装会重新跑 Vite、PyInstaller 和 Rust release 编译；这是分钟级耗时，不是卡死。`tauri build` 的 `beforeBuildCommand` 还会再次执行 `build` 和 `build:data-service`，不要重复手动跑太多轮。
+- `cargo metadata` 报 `program not found` 时，不要安装新 Rust，也不要去 C 盘找；在当前命令里注入项目工具链：
+
+```powershell
+$env:CARGO_HOME='D:\New project 6\.tools\cargo-home'
+$env:RUSTUP_HOME='D:\New project 6\.tools\rustup-home'
+$env:PATH='D:\New project 6\.tools\rustup-home\toolchains\stable-x86_64-pc-windows-msvc\bin;' + $env:PATH
+```
+
+- Tauri 2.11 的 NSIS bundler 即使项目里有 `.tools\nsis-3.12`，也会按 `useLocalToolsDir` 查 `src-tauri\target\.tauri\NSIS`，并可能去 GitHub 下载 `nsis-3.11.zip`。本机网络到 GitHub release 可能超时；若 `Verifying NSIS package` 后卡在下载，先预置缓存：
+  - 复制 `.tools\nsis-3.12` 到 `src-tauri\target\.tauri\NSIS`。
+  - 确保 `src-tauri\target\.tauri\NSIS\Plugins\x86-unicode\additional\nsis_tauri_utils.dll` 存在。
+  - 该 DLL 应来自 `https://github.com/tauri-apps/nsis-tauri-utils/releases/download/nsis_tauri_utils-v0.5.3/nsis_tauri_utils.dll`，SHA1 必须是 `75197FEE3C6A814FE035788D1C34EAD39349B860`。不匹配时 Tauri 会删缓存重下。
 
 ## 13. 验证命令
 
@@ -332,6 +345,24 @@ git branch --show-current
 - `npm run tauri -- build --ci` 可能曾经外层非零但已生成安装包；判断构建结果要看安装包、`.sig` 时间戳以及安装后 hash 和接口探针。
 - 探针结束后要再查一次 `astock-data-service` 进程并停掉。上一轮就出现过探针进程仍在，最终交付前必须清掉。
 - 清理工作区构建产物时可以删 `.pyinstaller`、`.pytest_cache`、`dist`、`src-tauri/target`、`src-tauri/bin`、`src-tauri/gen`、`__pycache__`；不要删 `.tools`、`node_modules`、`.astock-cache`、`.reference`、`运行产物`。
+
+### 2026-06-13 覆盖安装为什么耗时
+
+- 这次先按最终交付要求清理了 `dist`、`src-tauri/bin`、`src-tauri/target` 和 `.pyinstaller`，用户随后要求覆盖安装，所以必须重新生成 sidecar、前端产物、Rust release 二进制和 NSIS 安装包。冷构建会明显慢，尤其是 PyInstaller 和 Rust release 编译。
+- `npm run tauri -- build --ci` 会先执行 `beforeBuildCommand`，再次跑 `npm run build` 和 `npm run build:data-service`。如果前面已经手动构建过，这是重复但符合 Tauri 打包流程；耗时不能误判为失败。
+- 初次 Tauri 打包失败点是 `cargo metadata` 找不到全局 `cargo`。正确处理是在本次命令环境注入 `.tools\rustup-home\toolchains\stable-x86_64-pc-windows-msvc\bin`，并设置 `CARGO_HOME` / `RUSTUP_HOME` 到项目 `.tools`，不要修改系统 PATH。
+- 第二个失败点是 NSIS 工具下载超时：Tauri 期望 `src-tauri\target\.tauri\NSIS`，不会直接使用 `.tools\nsis-3.12`。后续 agent 如果看到 `failed to bundle project timeout: global` 或卡在 `Downloading ... nsis-3.11.zip`，先按上一节预置 NSIS 缓存和 `nsis_tauri_utils.dll`，再重跑打包。
+- 同版本覆盖安装不需要改版本号。当前规则仍是用户未明确要求时保持 `1.2.3`，用本次签名安装包覆盖安装，然后用 hash 和接口探针证明安装目录已更新。
+- NSIS 静默安装可用：
+
+```powershell
+$installer = Get-ChildItem 'D:\New project 6\src-tauri\target\release\bundle\nsis' -Filter '*_x64-setup.exe' | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+Start-Process -FilePath $installer.FullName -ArgumentList @('/S', '/D=D:\New project 6\运行产物\桌面软件\A股策略回测工作台') -Wait -PassThru
+```
+
+- 探针不要把所有接口和多年全市场回测塞进一个脚本。先测 `/ping`、`/health`、`/coverage/daily-bars`，确认主仓最新日期；再单独测 `/realtime/market-snapshot`、`/market/commentary`、`/market/fupan`、`/market/zaopan`；最后只跑靠近主仓最新交易日的小窗口 `/run/backtest/stream`，验证 `result.latest_strategy_matches.signal_date/trade_date` 等于最新本地交易日。
+- 用 Python 启动安装目录 sidecar 探针时，`stdout/stderr` 建议设为 `subprocess.DEVNULL`。这次捕获管道后 `communicate()` 收尾曾阻塞，导致探针进程残留；每轮探针结束都要 `terminate/kill`，最终再用 `Get-Process` 查净。
+- 清理 `src-tauri/bin` 前必须先完成工作区 sidecar 与安装目录 sidecar 的 SHA256 比对；清理后工作区 sidecar 不存在，不能再补做 hash 对比。
 
 ### 实时行情和红绿家数
 
