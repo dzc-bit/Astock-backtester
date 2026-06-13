@@ -230,6 +230,92 @@ def test_warehouse_coverage_counts_latest_daily_rows_missing_from_known_symbols(
     assert coverage["daily_bars"].missing_rows == 2
 
 
+def test_warehouse_lists_symbols_missing_daily_bars_for_trade_dates_only(tmp_path):
+    warehouse = Warehouse(tmp_path)
+    warehouse.write_daily_bars(
+        pd.DataFrame(
+            {
+                "symbol": ["000001", "000001", "000002", "000003", "000003"],
+                "trade_date": ["2026-06-05", "2026-06-08", "2026-06-05", "2026-06-05", "2026-06-08"],
+                "open": [10.0, 10.1, 20.0, 30.0, float("nan")],
+                "high": [10.5, 10.6, 20.5, 30.5, float("nan")],
+                "low": [9.8, 9.9, 19.8, 29.8, float("nan")],
+                "close": [10.2, 10.3, 20.2, 30.2, float("nan")],
+                "volume": [1000, 1100, 1000, 1000, 0],
+            }
+        )
+    )
+
+    missing = warehouse.list_symbols_missing_daily_bars(
+        ["000001", "000002", "000003", "000004"],
+        "2026-06-05",
+        "2026-06-08",
+    )
+
+    assert missing == ["000002", "000003", "000004"]
+
+
+def test_warehouse_lists_missing_daily_bar_ranges_by_trade_date(tmp_path):
+    warehouse = Warehouse(tmp_path)
+    warehouse.write_daily_bars(
+        pd.DataFrame(
+            {
+                "symbol": ["000001", "000001", "000001", "000002"],
+                "trade_date": ["2026-06-08", "2026-06-09", "2026-06-12", "2026-06-09"],
+                "open": [10.0, 10.1, 10.4, 20.1],
+                "high": [10.5, 10.6, 10.8, 20.6],
+                "low": [9.8, 9.9, 10.1, 19.9],
+                "close": [10.2, 10.3, 10.5, 20.3],
+                "volume": [1000, 1100, 1300, 1100],
+            }
+        )
+    )
+
+    ranges = warehouse.list_missing_daily_bar_ranges(
+        ["000001", "000002"],
+        "2026-06-08",
+        "2026-06-12",
+    )
+
+    assert ranges == [
+        ("000001", "2026-06-10", "2026-06-11"),
+        ("000002", "2026-06-08", "2026-06-08"),
+        ("000002", "2026-06-10", "2026-06-12"),
+    ]
+
+
+def test_warehouse_missing_daily_bar_ranges_use_projected_partition_reads(tmp_path, monkeypatch):
+    warehouse = Warehouse(tmp_path)
+    warehouse.write_daily_bars(
+        pd.DataFrame(
+            {
+                "symbol": ["000001", "000001"],
+                "trade_date": ["2026-06-08", "2026-06-10"],
+                "open": [10.0, 10.2],
+                "high": [10.5, 10.7],
+                "low": [9.8, 10.0],
+                "close": [10.2, 10.4],
+                "volume": [1000, 1200],
+                "main_net_inflow": [1_000_000.0, 1_100_000.0],
+                "float_market_cap": [2_000_000_000.0, 2_100_000_000.0],
+            }
+        )
+    )
+
+    def fail_full_read(*args, **kwargs):
+        raise AssertionError("missing-gap selection should not load full daily rows")
+
+    monkeypatch.setattr(warehouse, "read_daily_bars", fail_full_read)
+
+    ranges = warehouse.list_missing_daily_bar_ranges(
+        ["000001"],
+        "2026-06-08",
+        "2026-06-10",
+    )
+
+    assert ranges == [("000001", "2026-06-09", "2026-06-09")]
+
+
 def test_warehouse_separates_capital_flow_only_rows_from_daily_bar_coverage(tmp_path):
     warehouse = Warehouse(tmp_path)
     warehouse.write_daily_bars(

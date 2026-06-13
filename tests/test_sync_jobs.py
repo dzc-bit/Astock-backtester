@@ -140,6 +140,96 @@ def test_full_market_job_uses_large_write_batches_for_daily_incremental_import(t
     assert warehouse.write_batches == [251]
 
 
+def test_full_market_job_can_flush_each_batch_for_resumable_missing_backfill(tmp_path):
+    class CountingWarehouse(Warehouse):
+        def __init__(self, cache_root):
+            super().__init__(cache_root)
+            self.write_batches = []
+
+        def write_daily_bars(self, frame):
+            self.write_batches.append(int(len(frame)))
+            return super().write_daily_bars(frame)
+
+    warehouse = CountingWarehouse(tmp_path)
+    manager = SyncJobManager(
+        warehouse=warehouse,
+        provider=FakeProvider(),
+        full_market_batch_size=2,
+        full_market_workers=1,
+    )
+
+    status = manager.start_full_market(
+        symbols=["000001", "000002", "000003"],
+        start_date="2026-06-09",
+        end_date="2026-06-09",
+        write_batch_rows=1,
+    )
+
+    eventually = None
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        eventually = manager.get_job(status.job_id)
+        if eventually and eventually.status == "completed":
+            break
+        sleep(0.02)
+
+    assert eventually is not None
+    assert eventually.status == "completed"
+    assert eventually.imported_rows == 3
+    assert warehouse.write_batches == [2, 1]
+
+
+def test_full_market_job_fetches_only_requested_missing_ranges(tmp_path):
+    class RecordingProvider(FakeProvider):
+        def __init__(self):
+            super().__init__()
+            self.requests = []
+
+        def fetch_daily_bars(self, symbol, start_date, end_date):
+            self.requests.append((symbol, start_date, end_date))
+            return super().fetch_daily_bars(symbol, start_date, end_date)
+
+    provider = RecordingProvider()
+    warehouse = Warehouse(tmp_path)
+    manager = SyncJobManager(
+        warehouse=warehouse,
+        provider=provider,
+        full_market_batch_size=2,
+        full_market_workers=1,
+    )
+
+    status = manager.start_full_market(
+        symbols=["000001", "000002"],
+        start_date="2026-06-08",
+        end_date="2026-06-12",
+        write_batch_rows=1,
+        daily_bar_ranges={
+            "000001": [("2026-06-10", "2026-06-11")],
+            "000002": [("2026-06-08", "2026-06-08"), ("2026-06-12", "2026-06-12")],
+        },
+    )
+
+    eventually = None
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        eventually = manager.get_job(status.job_id)
+        if eventually and eventually.status == "completed":
+            break
+        sleep(0.02)
+
+    assert eventually is not None
+    assert eventually.status == "completed"
+    assert eventually.total_symbols == 2
+    assert eventually.completed_symbols == 2
+    assert provider.requests == [
+        ("000001", "2026-06-10", "2026-06-11"),
+        ("000002", "2026-06-08", "2026-06-08"),
+        ("000002", "2026-06-12", "2026-06-12"),
+    ]
+    assert eventually.returned_rows == 3
+    assert eventually.imported_rows == 3
+
+
 def test_full_market_job_counts_retried_existing_rows_as_returned_not_imported(tmp_path):
     warehouse = Warehouse(tmp_path)
     warehouse.write_daily_bars(FakeProvider().fetch_daily_bars("000001", "2026-06-09", "2026-06-09"))

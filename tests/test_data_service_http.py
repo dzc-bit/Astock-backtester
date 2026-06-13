@@ -340,6 +340,187 @@ def test_service_prefers_local_warehouse_symbols_for_incremental_full_market_syn
         thread.join(timeout=5)
 
 
+def test_service_missing_only_full_market_sync_uses_warehouse_gaps(tmp_path):
+    class SlowProvider:
+        def list_symbols(self):
+            raise AssertionError("missing-only sync should use explicit universe without provider discovery")
+
+    class FakeManager:
+        def start_full_market(self, symbols, start_date, end_date, **kwargs):
+            from datetime import date
+
+            from astock_backtester.models import SyncJobStatus
+
+            assert symbols == ["000002"]
+            assert kwargs["write_batch_rows"] == 1
+            assert kwargs["daily_bar_ranges"] == {"000002": [("2026-06-08", "2026-06-08")]}
+            return SyncJobStatus(
+                job_id="job-missing",
+                mode="full_market_bootstrap",
+                status="running",
+                total_symbols=1,
+                completed_symbols=0,
+                failed_symbols=0,
+                imported_rows=0,
+                returned_rows=0,
+                start_date=date.fromisoformat(start_date),
+                end_date=date.fromisoformat(end_date),
+            )
+
+    server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
+    server.state.provider = SlowProvider()
+    server.state.sync_manager = FakeManager()
+    server.state.warehouse.write_daily_bars(
+        pd.DataFrame(
+            {
+                "symbol": ["000001", "000001", "000002", "000003", "000003"],
+                "trade_date": ["2026-06-05", "2026-06-08", "2026-06-05", "2026-06-05", "2026-06-08"],
+                "open": [10.0, 10.1, 20.0, 30.0, 30.1],
+                "high": [10.5, 10.6, 20.5, 30.5, 30.6],
+                "low": [9.8, 9.9, 19.8, 29.8, 29.9],
+                "close": [10.2, 10.3, 20.2, 30.2, 30.3],
+                "volume": [1000, 1100, 1000, 1000, 1100],
+            }
+        )
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        response = _request_json(
+            "POST",
+            f"http://127.0.0.1:{port}/sync/full-market",
+            {
+                "symbols": ["000001", "000002", "000003"],
+                "start_date": "2026-06-05",
+                "end_date": "2026-06-08",
+                "missing_only": True,
+            },
+        )
+
+        assert response["job"]["status"] == "running"
+        assert response["job"]["total_symbols"] == 1
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_service_missing_only_full_market_sync_splits_sparse_daily_gaps(tmp_path):
+    class SlowProvider:
+        def list_symbols(self):
+            raise AssertionError("missing-only sync should use explicit universe without provider discovery")
+
+    class FakeManager:
+        def start_full_market(self, symbols, start_date, end_date, **kwargs):
+            from datetime import date
+
+            from astock_backtester.models import SyncJobStatus
+
+            assert symbols == ["000001", "000002"]
+            assert kwargs["write_batch_rows"] == 1
+            assert kwargs["daily_bar_ranges"] == {
+                "000001": [("2026-06-10", "2026-06-11")],
+                "000002": [("2026-06-08", "2026-06-08"), ("2026-06-10", "2026-06-12")],
+            }
+            return SyncJobStatus(
+                job_id="job-missing-ranges",
+                mode="full_market_bootstrap",
+                status="running",
+                total_symbols=2,
+                completed_symbols=0,
+                failed_symbols=0,
+                imported_rows=0,
+                returned_rows=0,
+                start_date=date.fromisoformat(start_date),
+                end_date=date.fromisoformat(end_date),
+            )
+
+    server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
+    server.state.provider = SlowProvider()
+    server.state.sync_manager = FakeManager()
+    server.state.warehouse.write_daily_bars(
+        pd.DataFrame(
+            {
+                "symbol": ["000001", "000001", "000001", "000002"],
+                "trade_date": ["2026-06-08", "2026-06-09", "2026-06-12", "2026-06-09"],
+                "open": [10.0, 10.1, 10.4, 20.1],
+                "high": [10.5, 10.6, 10.8, 20.6],
+                "low": [9.8, 9.9, 10.1, 19.9],
+                "close": [10.2, 10.3, 10.5, 20.3],
+                "volume": [1000, 1100, 1300, 1100],
+            }
+        )
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        response = _request_json(
+            "POST",
+            f"http://127.0.0.1:{port}/sync/full-market",
+            {
+                "symbols": ["000001", "000002"],
+                "start_date": "2026-06-08",
+                "end_date": "2026-06-12",
+                "missing_only": True,
+            },
+        )
+
+        assert response["job"]["status"] == "running"
+        assert response["job"]["total_symbols"] == 2
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_service_missing_only_full_market_sync_returns_completed_when_no_daily_gaps(tmp_path):
+    class SlowProvider:
+        def list_symbols(self):
+            raise AssertionError("missing-only sync should not discover providers when warehouse is complete")
+
+    class FakeManager:
+        def start_full_market(self, *args, **kwargs):
+            raise AssertionError("no sync job should start when missing-only selection is empty")
+
+    server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
+    server.state.provider = SlowProvider()
+    server.state.sync_manager = FakeManager()
+    server.state.warehouse.write_daily_bars(
+        pd.DataFrame(
+            {
+                "symbol": ["000001", "000001", "000002", "000002"],
+                "trade_date": ["2026-06-05", "2026-06-08", "2026-06-05", "2026-06-08"],
+                "open": [10.0, 10.1, 20.0, 20.1],
+                "high": [10.5, 10.6, 20.5, 20.6],
+                "low": [9.8, 9.9, 19.8, 19.9],
+                "close": [10.2, 10.3, 20.2, 20.3],
+                "volume": [1000, 1100, 1000, 1100],
+            }
+        )
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        response = _request_json(
+            "POST",
+            f"http://127.0.0.1:{port}/sync/full-market",
+            {
+                "symbols": ["000001", "000002"],
+                "start_date": "2026-06-05",
+                "end_date": "2026-06-08",
+                "missing_only": True,
+            },
+        )
+
+        assert response["job"]["status"] == "completed"
+        assert response["job"]["total_symbols"] == 0
+        assert response["job"]["imported_rows"] == 0
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
 def test_service_coverage_endpoint_reads_warehouse_when_cache_is_empty(tmp_path):
     server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
     server.state.warehouse.write_daily_bars(sample_daily_bars())

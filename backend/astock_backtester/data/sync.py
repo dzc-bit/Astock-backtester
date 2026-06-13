@@ -15,6 +15,9 @@ from astock_backtester.data.warehouse import Warehouse
 from astock_backtester.models import SyncJobStatus
 
 
+DailyBarRangeMap = dict[str, list[tuple[str, str]]]
+
+
 @dataclass
 class SyncJobManager:
     warehouse: Warehouse
@@ -59,7 +62,15 @@ class SyncJobManager:
         status.status = "completed_with_errors" if status.failed_symbols else "completed"
         return status
 
-    def start_full_market(self, symbols: list[str], start_date: str, end_date: str) -> SyncJobStatus:
+    def start_full_market(
+        self,
+        symbols: list[str],
+        start_date: str,
+        end_date: str,
+        *,
+        write_batch_rows: int | None = None,
+        daily_bar_ranges: DailyBarRangeMap | None = None,
+    ) -> SyncJobStatus:
         status = SyncJobStatus(
             job_id=str(uuid4()),
             mode="full_market_bootstrap",
@@ -71,7 +82,7 @@ class SyncJobManager:
         self._store(status)
         thread = Thread(
             target=self._run_full_market_job,
-            args=(status.job_id, list(symbols), start_date, end_date),
+            args=(status.job_id, list(symbols), start_date, end_date, write_batch_rows, daily_bar_ranges),
             daemon=True,
         )
         thread.start()
@@ -146,8 +157,17 @@ class SyncJobManager:
             self._store(current)
         return True
 
-    def _run_full_market_job(self, job_id: str, symbols: list[str], start_date: str, end_date: str) -> None:
+    def _run_full_market_job(
+        self,
+        job_id: str,
+        symbols: list[str],
+        start_date: str,
+        end_date: str,
+        write_batch_rows: int | None = None,
+        daily_bar_ranges: DailyBarRangeMap | None = None,
+    ) -> None:
         try:
+            flush_threshold = max(1, write_batch_rows or self.full_market_write_batch_rows)
             pending_frames: list[pd.DataFrame] = []
             pending_rows = 0
             for batch in _chunks(symbols, self.full_market_batch_size):
@@ -156,7 +176,12 @@ class SyncJobManager:
                 frames: list[pd.DataFrame] = []
                 with ThreadPoolExecutor(max_workers=max(1, self.full_market_workers)) as executor:
                     futures = {
-                        executor.submit(self.provider.fetch_daily_bars, symbol, start_date, end_date): symbol
+                        executor.submit(
+                            _fetch_daily_bar_ranges,
+                            self.provider,
+                            symbol,
+                            (daily_bar_ranges or {}).get(symbol, [(start_date, end_date)]),
+                        ): symbol
                         for symbol in batch
                     }
                     for future in as_completed(futures):
@@ -190,7 +215,7 @@ class SyncJobManager:
                 if frames:
                     pending_frames.extend(frames)
                     pending_rows += sum(int(len(frame)) for frame in frames)
-                    if pending_rows >= self.full_market_write_batch_rows:
+                    if pending_rows >= flush_threshold:
                         pending_rows = self._flush_full_market_frames(job_id, pending_frames)
                 if self._finish_cancelled(job_id, pending_frames):
                     return
@@ -299,6 +324,17 @@ class SyncJobManager:
                 {"symbol": symbol, "reason": message},
             ][-20:]
             self._jobs[job_id] = status
+
+
+def _fetch_daily_bar_ranges(provider: object, symbol: str, ranges: list[tuple[str, str]]) -> pd.DataFrame:
+    frames = [
+        frame
+        for range_start, range_end in ranges
+        if not (frame := provider.fetch_daily_bars(symbol, range_start, range_end)).empty
+    ]
+    if not frames:
+        return pd.DataFrame()
+    return pd.concat(frames, ignore_index=True)
 
 
 def _call_capital_flow_fetcher(

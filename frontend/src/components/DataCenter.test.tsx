@@ -211,9 +211,45 @@ describe("DataCenter", () => {
     await waitFor(() => expect(apiMocks.startFullMarketSync).toHaveBeenCalledWith(
       "http://127.0.0.1:9011",
       "2024-01-03",
-      "2026-06-05"
+      "2026-06-05",
+      undefined,
+      { missingOnly: true }
     ));
     expect(apiMocks.fetchDailyBars).not.toHaveBeenCalled();
+  });
+
+  it("starts no-symbol missing-data backfill in resumable missing-only mode", async () => {
+    const user = setupUser();
+
+    render(<DataCenter cacheDir=".astock-cache" coverage={coverage} onCoverageChange={vi.fn()} />);
+
+    await screen.findByText(/http:\/\/127\.0\.0\.1:9011/);
+    await user.click(screen.getByRole("button", { name: "补全缺失数据" }));
+
+    await waitFor(() => expect(apiMocks.startFullMarketSync).toHaveBeenCalledWith(
+      "http://127.0.0.1:9011",
+      "2024-01-03",
+      "2026-06-05",
+      undefined,
+      { missingOnly: true }
+    ));
+  });
+
+  it("keeps full-market download in normal full-universe mode", async () => {
+    const user = setupUser();
+
+    render(<DataCenter cacheDir=".astock-cache" coverage={coverage} onCoverageChange={vi.fn()} />);
+
+    await screen.findByText(/http:\/\/127\.0\.0\.1:9011/);
+    await user.click(screen.getByRole("button", { name: "下载全市场历史数据" }));
+
+    await waitFor(() => expect(apiMocks.startFullMarketSync).toHaveBeenCalledWith(
+      "http://127.0.0.1:9011",
+      "2024-01-03",
+      "2026-06-05",
+      undefined,
+      { missingOnly: false }
+    ));
   });
 
   it("keeps coverage rows tied to the last exact warehouse summary while syncing", async () => {
@@ -743,7 +779,7 @@ describe("DataCenter", () => {
     });
     await waitFor(() => expect(apiMocks.loadSyncJob).toHaveBeenCalledWith("http://127.0.0.1:9011", "job-1"));
     expect(await screen.findByText(/已处理 2\/2/)).toBeInTheDocument();
-    expect(screen.getAllByText(/导入 20 行/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/新增 20 行/).length).toBeGreaterThan(0);
   });
 
   it("uses local coverage end date and moves the date inputs after successful fetch coverage", async () => {

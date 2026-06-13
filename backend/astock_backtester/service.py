@@ -38,7 +38,7 @@ from astock_backtester.data.sync import SyncJobManager
 from astock_backtester.data.warehouse import Warehouse
 from astock_backtester.backtest_runner import run_configured_backtest
 from astock_backtester.condition_parser import validate_condition_text, validate_exit_condition_text
-from astock_backtester.models import BacktestSettings, ClsFinanceResponse, StrategyConfig
+from astock_backtester.models import BacktestSettings, ClsFinanceResponse, StrategyConfig, SyncJobStatus
 from astock_backtester.recommended_strategies import recommended_strategies
 
 
@@ -369,21 +369,41 @@ class DataServiceHandler(BaseHTTPRequestHandler):
                 )
                 return
             if self.path == "/sync/full-market":
-                symbols = payload.get("symbols") or self._full_market_sync_symbols()
+                missing_only = payload.get("missing_only") is True
+                start_date = payload.get("start_date", "2015-01-01")
+                end_date = payload["end_date"]
+                symbols = payload.get("symbols") or self._full_market_sync_symbols(missing_only=missing_only)
+                daily_bar_ranges = None
+                if missing_only:
+                    daily_bar_ranges = self._missing_daily_bar_ranges(symbols, start_date, end_date)
+                    symbols = sorted(daily_bar_ranges)
                 if not symbols:
-                    raise ValueError("No symbols available for full-market sync.")
+                    job = SyncJobStatus(
+                        job_id=str(uuid4()),
+                        mode="full_market_bootstrap",
+                        status="completed",
+                        total_symbols=0,
+                        start_date=pd.Timestamp(start_date).date(),
+                        end_date=pd.Timestamp(end_date).date(),
+                    )
+                    self._send_json({"job": job.model_dump(mode="json")})
+                    return
                 start_method = getattr(self.server.state.sync_manager, "start_full_market", None)
                 if callable(start_method):
+                    start_kwargs = {"write_batch_rows": 1} if missing_only else {}
+                    if daily_bar_ranges:
+                        start_kwargs["daily_bar_ranges"] = daily_bar_ranges
                     job = start_method(
                         symbols=symbols,
-                        start_date=payload.get("start_date", "2015-01-01"),
-                        end_date=payload["end_date"],
+                        start_date=start_date,
+                        end_date=end_date,
+                        **start_kwargs,
                     )
                 else:
                     job = self.server.state.sync_manager.run_full_market(
                         symbols=symbols,
-                        start_date=payload.get("start_date", "2015-01-01"),
-                        end_date=payload["end_date"],
+                        start_date=start_date,
+                        end_date=end_date,
                     )
                 self.server.state.log(
                     "info",
@@ -570,7 +590,25 @@ class DataServiceHandler(BaseHTTPRequestHandler):
             coverage = self.server.state.cache.coverage()
         return [item.model_dump(mode="json") for item in coverage]
 
-    def _full_market_sync_symbols(self) -> list[str]:
+    def _missing_daily_bar_symbols(self, symbols: list[str], start_date: str, end_date: str) -> list[str]:
+        list_missing = getattr(self.server.state.warehouse, "list_symbols_missing_daily_bars", None)
+        if callable(list_missing):
+            return [str(symbol) for symbol in list_missing(symbols, start_date, end_date) if str(symbol).strip()]
+        return symbols
+
+    def _missing_daily_bar_ranges(self, symbols: list[str], start_date: str, end_date: str) -> dict[str, list[tuple[str, str]]]:
+        list_ranges = getattr(self.server.state.warehouse, "list_missing_daily_bar_ranges", None)
+        if not callable(list_ranges):
+            return {symbol: [(start_date, end_date)] for symbol in self._missing_daily_bar_symbols(symbols, start_date, end_date)}
+        ranges: dict[str, list[tuple[str, str]]] = {}
+        for symbol, range_start, range_end in list_ranges(symbols, start_date, end_date):
+            symbol_text = str(symbol).strip()
+            if not symbol_text:
+                continue
+            ranges.setdefault(symbol_text, []).append((str(range_start), str(range_end)))
+        return ranges
+
+    def _full_market_sync_symbols(self, *, missing_only: bool = False) -> list[str]:
         list_local_symbols = getattr(self.server.state.warehouse, "list_daily_symbols", None)
         if callable(list_local_symbols):
             local_symbols = [str(symbol) for symbol in list_local_symbols() if str(symbol).strip()]

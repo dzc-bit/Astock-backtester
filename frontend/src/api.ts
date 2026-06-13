@@ -838,7 +838,8 @@ export async function startFullMarketSync(
   baseUrl: string,
   startDate: string,
   endDate: string,
-  symbols?: string[]
+  symbols?: string[],
+  options: { missingOnly?: boolean } = {}
 ): Promise<{ job: SyncJobStatus }> {
   if (!isTauriRuntime()) {
     const totalSymbols = symbols?.length ?? 2;
@@ -850,7 +851,9 @@ export async function startFullMarketSync(
         total_symbols: totalSymbols,
         completed_symbols: totalSymbols,
         failed_symbols: 0,
+        processed_symbols: totalSymbols,
         imported_rows: totalSymbols * 10,
+        returned_rows: totalSymbols * 10,
         current_symbol: null,
         start_date: startDate,
         end_date: endDate,
@@ -864,7 +867,8 @@ export async function startFullMarketSync(
     {
       symbols,
       start_date: startDate,
-      end_date: endDate
+      end_date: endDate,
+      missing_only: options.missingOnly === true
     },
     { timeoutMs: LONG_RUNNING_SERVICE_TIMEOUT_MS }
   );

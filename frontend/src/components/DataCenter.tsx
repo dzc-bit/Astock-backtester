@@ -30,6 +30,8 @@ type PendingSyncFollowUp = {
   endDate: string;
 } | null;
 
+type SyncIntent = "missing" | "full" | "capital-flow";
+
 function formatLocalDate(date: Date): string {
   const year = date.getFullYear();
   const month = `${date.getMonth() + 1}`.padStart(2, "0");
@@ -107,18 +109,29 @@ function isSyncRunning(job: SyncJobStatus | null): boolean {
   return job?.status === "running" || job?.status === "cancelling";
 }
 
-function syncRunningMessage(job: SyncJobStatus): string {
+function syncRunningMessage(job: SyncJobStatus, intent?: SyncIntent): string {
   if (job.status === "cancelling") {
     return "正在停止任务，已导入的数据会保留";
   }
-  return `${job.mode === "capital_flow_backfill" ? "正在补齐全市场资金流" : "正在下载全市场历史数据"}，已处理 ${job.processed_symbols ?? job.completed_symbols}/${job.total_symbols}`;
+  if (job.mode === "capital_flow_backfill") {
+    return `正在补齐全市场资金流，已处理 ${job.processed_symbols ?? job.completed_symbols}/${job.total_symbols}`;
+  }
+  const label = intent === "missing" ? "正在续补剩余缺失数据" : "正在下载全市场历史数据";
+  return `${label}，已处理 ${job.processed_symbols ?? job.completed_symbols}/${job.total_symbols}`;
 }
 
-function syncFinishedMessage(job: SyncJobStatus): string {
+function syncFinishedMessage(job: SyncJobStatus, intent?: SyncIntent): string {
   if (job.status === "cancelled") {
-    return job.mode === "capital_flow_backfill" ? "资金流补齐已停止" : "全市场下载已停止";
+    if (job.mode === "capital_flow_backfill") {
+      return "资金流补齐已停止";
+    }
+    return intent === "missing" ? "缺失数据补全已停止，可再次点击继续补剩余缺口" : "全市场下载已停止";
   }
-  return `${job.mode === "capital_flow_backfill" ? "资金流补齐完成" : "全市场下载完成"}，导入 ${job.imported_rows} 行`;
+  if (job.mode === "capital_flow_backfill") {
+    return `资金流补齐完成，导入 ${job.imported_rows} 行`;
+  }
+  const label = intent === "missing" ? "缺失数据补全完成" : "全市场下载完成";
+  return `${label}，新增 ${job.imported_rows} 行`;
 }
 
 function fieldText(value: unknown): string | null {
@@ -168,6 +181,7 @@ export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceRead
   const [busyAction, setBusyAction] = useState<BusyAction>(null);
   const [syncBaseCoverage, setSyncBaseCoverage] = useState<DatasetCoverage[] | null>(null);
   const [pendingSyncFollowUp, setPendingSyncFollowUp] = useState<PendingSyncFollowUp>(null);
+  const [syncIntent, setSyncIntent] = useState<SyncIntent | null>(null);
   const syncRunning = isSyncRunning(syncJob);
   const syncImportedRows = syncRunning && syncJob ? syncJob.imported_rows : 0;
   const busy = busyAction !== null || syncRunning;
@@ -267,7 +281,8 @@ export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceRead
     onCoverageChange(result.coverage);
     if (result.job) {
       setSyncJob(result.job);
-      setMessage(isSyncRunning(result.job) ? syncRunningMessage(result.job) : syncFinishedMessage(result.job));
+      setSyncIntent("capital-flow");
+      setMessage(isSyncRunning(result.job) ? syncRunningMessage(result.job, "capital-flow") : syncFinishedMessage(result.job, "capital-flow"));
       if (!isSyncRunning(result.job)) {
         await refreshAfterOperation(activeService, selectedSymbols, selectedStartDate, selectedEndDate);
         setSyncBaseCoverage(null);
@@ -323,8 +338,8 @@ export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceRead
           setSyncJob(result.job);
           setMessage(
             isSyncRunning(result.job)
-              ? syncRunningMessage(result.job)
-              : syncFinishedMessage(result.job)
+              ? syncRunningMessage(result.job, syncIntent ?? undefined)
+              : syncFinishedMessage(result.job, syncIntent ?? undefined)
           );
           if (!isSyncRunning(result.job)) {
             const range = await refreshAfterOperation(service);
@@ -357,7 +372,7 @@ export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceRead
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [service, syncJob?.job_id, syncJob?.status, pendingSyncFollowUp]);
+  }, [service, syncJob?.job_id, syncJob?.status, syncIntent, pendingSyncFollowUp]);
 
   const handleRefreshDetails = async () => {
     if (!service) {
@@ -503,7 +518,15 @@ export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceRead
     setSyncBaseCoverage(coverage);
     setMessage(action === "fetch" ? "正在补全全市场缺失数据" : "正在下载全市场历史数据");
     try {
-      const result = await startFullMarketSync(service.base_url, startDate, endDate);
+      const intent: SyncIntent = action === "fetch" ? "missing" : "full";
+      setSyncIntent(intent);
+      const result = await startFullMarketSync(
+        service.base_url,
+        startDate,
+        endDate,
+        undefined,
+        { missingOnly: action === "fetch" }
+      );
       setSyncJob(result.job);
       setPendingSyncFollowUp(
         action === "fetch" && result.job.mode === "full_market_bootstrap"
@@ -511,9 +534,9 @@ export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceRead
           : null
       );
       if (result.job.status === "running") {
-        setMessage(syncRunningMessage(result.job));
+        setMessage(syncRunningMessage(result.job, intent));
       } else {
-        setMessage(syncFinishedMessage(result.job));
+        setMessage(syncFinishedMessage(result.job, intent));
         const range = await refreshAfterOperation(service);
         setSyncBaseCoverage(null);
         if (action === "fetch" && result.job.status !== "cancelled") {
@@ -524,6 +547,7 @@ export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceRead
     } catch (error) {
       setSyncBaseCoverage(null);
       setPendingSyncFollowUp(null);
+      setSyncIntent(null);
       setMessage(error instanceof Error ? error.message : "全市场下载失败");
       await refreshLogs(service);
     } finally {
@@ -539,7 +563,11 @@ export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceRead
     try {
       const result = await cancelSyncJob(service.base_url, syncJob.job_id);
       setSyncJob(result.job);
-      setMessage(isSyncRunning(result.job) ? syncRunningMessage(result.job) : syncFinishedMessage(result.job));
+      setMessage(
+        isSyncRunning(result.job)
+          ? syncRunningMessage(result.job, syncIntent ?? undefined)
+          : syncFinishedMessage(result.job, syncIntent ?? undefined)
+      );
       if (!isSyncRunning(result.job)) {
         await refreshAfterOperation(service);
         setSyncBaseCoverage(null);

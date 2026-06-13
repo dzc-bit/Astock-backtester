@@ -9,6 +9,7 @@ import pandas as pd
 import pyarrow.parquet as pq
 
 from astock_backtester.data.importer import normalize_daily_bars
+from astock_backtester.data.trading_calendar import a_share_trade_dates
 from astock_backtester.models import DatasetCoverage
 
 
@@ -185,6 +186,84 @@ class Warehouse:
                 continue
             symbols.update(str(symbol) for symbol in frame["symbol"].dropna().astype(str).unique())
         return sorted(symbol for symbol in symbols if symbol)
+
+    def list_symbols_missing_daily_bars(
+        self,
+        symbols: Sequence[str],
+        start_date: str,
+        end_date: str,
+    ) -> list[str]:
+        selected = sorted({str(symbol).strip() for symbol in symbols if str(symbol).strip()})
+        if not selected:
+            return []
+        expected_dates = a_share_trade_dates(start_date, end_date)
+        if not expected_dates:
+            return []
+
+        present_dates_by_symbol = self._present_ohlc_trade_dates_by_symbol(selected, start_date, end_date)
+        return [
+            symbol
+            for symbol in selected
+            if not expected_dates.issubset(present_dates_by_symbol.get(symbol, set()))
+        ]
+
+    def list_missing_daily_bar_ranges(
+        self,
+        symbols: Sequence[str],
+        start_date: str,
+        end_date: str,
+    ) -> list[tuple[str, str, str]]:
+        selected = sorted({str(symbol).strip() for symbol in symbols if str(symbol).strip()})
+        if not selected:
+            return []
+        expected_dates = a_share_trade_dates(start_date, end_date)
+        if not expected_dates:
+            return []
+
+        present_dates_by_symbol = self._present_ohlc_trade_dates_by_symbol(selected, start_date, end_date)
+        ranges: list[tuple[str, str, str]] = []
+        for symbol in selected:
+            missing_dates = sorted(expected_dates - present_dates_by_symbol.get(symbol, set()))
+            ranges.extend(
+                (symbol, range_start.strftime("%Y-%m-%d"), range_end.strftime("%Y-%m-%d"))
+                for range_start, range_end in _contiguous_trade_date_ranges(missing_dates)
+            )
+        return ranges
+
+    def _present_ohlc_trade_dates_by_symbol(
+        self,
+        symbols: Sequence[str],
+        start_date: str,
+        end_date: str,
+    ) -> dict[str, set[pd.Timestamp]]:
+        selected = {str(symbol).strip() for symbol in symbols if str(symbol).strip()}
+        if not selected:
+            return {}
+        frames = [
+            frame
+            for path in self._partition_paths_for_range(start_date, end_date)
+            if not (frame := self._read_projected_daily_partition(path, ["symbol", "trade_date", *OHLC_COLUMNS])).empty
+        ]
+        if not frames:
+            return {}
+        frame = pd.concat(frames, ignore_index=True)
+        frame = frame[frame["symbol"].astype(str).isin(selected)]
+        frame = frame[
+            (frame["trade_date"] >= pd.Timestamp(start_date))
+            & (frame["trade_date"] <= pd.Timestamp(end_date))
+        ]
+        frame = _require_ohlc_rows(frame)
+        if frame.empty:
+            return {}
+        frame["trade_date"] = pd.to_datetime(frame["trade_date"], errors="coerce").dt.normalize()
+        frame = frame.dropna(subset=["trade_date"])
+        if frame.empty:
+            return {}
+        return (
+            frame.groupby(frame["symbol"].astype(str))["trade_date"]
+            .apply(lambda values: {pd.Timestamp(value).normalize() for value in values})
+            .to_dict()
+        )
 
     def list_symbols_missing_capital_flow(self, start_date: str | None = None, end_date: str | None = None) -> list[str]:
         paths = self._partition_paths_for_range(start_date, end_date)
@@ -606,6 +685,25 @@ def _frame_date_range(frame: pd.DataFrame) -> tuple[date | None, date | None]:
     if dates.empty:
         return None, None
     return dates.min().date(), dates.max().date()
+
+
+def _contiguous_trade_date_ranges(dates: Sequence[pd.Timestamp]) -> list[tuple[pd.Timestamp, pd.Timestamp]]:
+    if not dates:
+        return []
+    sorted_dates = [pd.Timestamp(value).normalize() for value in sorted(dates)]
+    ranges: list[tuple[pd.Timestamp, pd.Timestamp]] = []
+    start = sorted_dates[0]
+    previous = sorted_dates[0]
+    for current in sorted_dates[1:]:
+        expected_next_dates = a_share_trade_dates(previous + pd.Timedelta(days=1), current)
+        if current in expected_next_dates and len(expected_next_dates) == 1:
+            previous = current
+            continue
+        ranges.append((start, previous))
+        start = current
+        previous = current
+    ranges.append((start, previous))
+    return ranges
 
 
 def _count_changed_rows(incoming: pd.DataFrame, current: pd.DataFrame) -> int:
