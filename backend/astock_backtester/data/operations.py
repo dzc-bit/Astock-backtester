@@ -98,6 +98,7 @@ def build_daily_bars_coverage(
     requested_end_date = pd.Timestamp(end_date) if end_date else None
     bars = pd.DataFrame()
     used_warehouse = False
+    warehouse_read_failed = False
     if warehouse is not None and not symbols and start_date is None and end_date is None:
         latest_coverage = _latest_daily_bars_coverage(warehouse)
         if latest_coverage.items:
@@ -109,7 +110,8 @@ def build_daily_bars_coverage(
         except Exception:
             bars = pd.DataFrame()
             used_warehouse = False
-    if bars.empty:
+            warehouse_read_failed = True
+    if bars.empty and (warehouse is None or warehouse_read_failed):
         bars = cache.read_daily_bars()
     if bars.empty:
         return DailyBarsCoverageResponse(items=[])
@@ -343,6 +345,7 @@ def fetch_capital_flow_into_cache(
     failures: list[dict[str, Any]] = []
 
     skipped_symbols = _symbols_with_complete_capital_flow(frame, requested_symbols, start_date, end_date)
+    _migrate_existing_daily_bars_to_warehouse(frame, warehouse, skipped_symbols, start_date, end_date)
     fetch_symbols = sorted(symbol for symbol in requested_symbols if symbol not in set(skipped_symbols))
     if not fetch_symbols:
         coverage = _safe_coverage(cache, warehouse) if refresh_coverage else []
@@ -610,6 +613,27 @@ def _capital_flow_incomplete_failures(
 
 def _diagnostics_include_not_needed(diagnostics: Sequence[dict[str, Any]]) -> bool:
     return any(isinstance(item, dict) and item.get("code") == "capital_flow_backfill_not_needed" for item in diagnostics)
+
+
+def _migrate_existing_daily_bars_to_warehouse(
+    frame: pd.DataFrame,
+    warehouse: Warehouse | None,
+    symbols: Sequence[str],
+    start_date: str,
+    end_date: str,
+) -> None:
+    if warehouse is None or frame.empty or not symbols:
+        return
+    selected = {str(symbol) for symbol in symbols}
+    migrate_frame = frame.copy()
+    migrate_frame["symbol"] = migrate_frame["symbol"].astype(str)
+    migrate_frame["trade_date"] = pd.to_datetime(migrate_frame["trade_date"], errors="coerce")
+    migrate_frame = migrate_frame.loc[migrate_frame["symbol"].isin(selected)]
+    migrate_frame = migrate_frame.loc[migrate_frame["trade_date"] >= pd.Timestamp(start_date)]
+    migrate_frame = migrate_frame.loc[migrate_frame["trade_date"] <= pd.Timestamp(end_date)]
+    if migrate_frame.empty:
+        return
+    warehouse.write_daily_bars(migrate_frame)
 
 
 def _read_existing_daily_bars(
@@ -994,9 +1018,7 @@ def _count_merged_main_net_inflow(before: pd.DataFrame, after: pd.DataFrame, *, 
 def _safe_coverage(cache: LocalCache, warehouse: Warehouse | None) -> list[DatasetCoverage]:
     if warehouse is not None:
         try:
-            coverage = warehouse.coverage()
-            if any(item.symbols > 0 for item in coverage):
-                return coverage
+            return warehouse.coverage()
         except Exception:
             pass
     try:

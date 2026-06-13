@@ -868,16 +868,39 @@ class RealtimeMarketProvider:
         if self.allow_eastmoney_breadth_fallback:
             fetchers.append(("东方财富轻量 spot 兜底", lambda: self._fetch_eastmoney_breadth(diagnostics)))
         for label, fetcher in fetchers:
-            try:
-                breadth = fetcher()
-            except Exception as exc:
-                diagnostics.append(f"{label}红绿家数读取失败：{exc}")
-                continue
+            breadth = self._call_breadth_fetcher_with_budget(label, fetcher, diagnostics)
             if breadth is None:
                 continue
             if self._breadth_is_complete(breadth, local_symbol_count, diagnostics):
                 return breadth
         return None
+
+    def _call_breadth_fetcher_with_budget(
+        self,
+        label: str,
+        fetcher: Callable[[], MarketBreadth | None],
+        diagnostics: list[str],
+    ) -> MarketBreadth | None:
+        if self.breadth_time_budget is None:
+            try:
+                return fetcher()
+            except Exception as exc:
+                diagnostics.append(f"{label}红绿家数读取失败：{exc}")
+                return None
+        per_source_timeout = min(self.timeout, max(0.01, self.breadth_time_budget / 4))
+        executor = ThreadPoolExecutor(max_workers=1)
+        future = executor.submit(fetcher)
+        try:
+            return future.result(timeout=per_source_timeout)
+        except TimeoutError:
+            future.cancel()
+            diagnostics.append(f"{label}红绿家数读取超时：{per_source_timeout:g}秒，继续尝试后续来源。")
+            return None
+        except Exception as exc:
+            diagnostics.append(f"{label}红绿家数读取失败：{exc}")
+            return None
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
 
     def _fetch_cls_breadth(self) -> MarketBreadth | None:
         payload = self._fetch_cls_home_payload()

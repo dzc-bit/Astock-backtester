@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 from typing import Callable
 
 import pandas as pd
@@ -254,6 +255,12 @@ def _max_numeric_prefix(row: pd.Series, prefix: str) -> float:
     return max(values, default=0.0)
 
 
+def _compressed_positive(value: float, scale: float) -> float:
+    if value <= 0 or scale <= 0:
+        return 0.0
+    return math.log1p(value / scale)
+
+
 def _stable_symbol_tiebreaker(row: pd.Series) -> float:
     key = f"{row.get('trade_date', '')}-{row.get('symbol', '')}".encode("utf-8")
     digest = hashlib.blake2b(key, digest_size=8).digest()
@@ -343,15 +350,26 @@ def _blocked_trade(
 
 
 def _candidate_rank(row: pd.Series) -> tuple[float, float, float, float, float, float, float]:
+    flow_score = _compressed_positive(_numeric_value(row, "main_net_inflow"), 1_000_000.0)
+    liquidity_score = _compressed_positive(_numeric_value(row, "volume"), 10_000.0)
+    market_cap_score = _compressed_positive(_numeric_value(row, "float_market_cap"), 1_000_000_000.0)
+    turnover_score = _numeric_value(row, "turnover_rate")
+    volume_ratio_score = min(_max_numeric_prefix(row, "volume_ratio_"), 3.0)
+    return_score = min(max(_max_numeric_prefix(row, "return_"), -0.3), 0.3)
     return (
-        _max_numeric_prefix(row, "volume_ratio_"),
-        _max_numeric_prefix(row, "return_"),
-        _numeric_value(row, "turnover_rate"),
-        _numeric_value(row, "volume"),
-        _numeric_value(row, "main_net_inflow"),
-        _numeric_value(row, "float_market_cap"),
+        flow_score,
+        liquidity_score,
+        market_cap_score,
+        turnover_score,
+        volume_ratio_score,
+        return_score,
         _stable_symbol_tiebreaker(row),
     )
+
+
+def _candidate_rank_score(row: pd.Series) -> float:
+    rank = _candidate_rank(row)
+    return float(sum(rank[:-1]))
 
 
 def _build_daily_strategy_matches(
@@ -368,7 +386,7 @@ def _build_daily_strategy_matches(
             close=float(row["close"]),
             change_pct=_optional_float(row, "change_pct"),
             reasons=list(reasons),
-            rank_score=_candidate_rank(row)[0],
+            rank_score=_candidate_rank_score(row),
         )
         for row, reasons in candidates
     ]
@@ -432,13 +450,38 @@ def _build_metrics(
     )
 
 
-def _mark_to_market(open_positions: list[Trade], rows_by_symbol: dict[str, object]) -> float:
+def _mark_to_market(
+    open_positions: list[Trade],
+    rows_by_symbol: dict[str, object],
+    last_close_by_symbol: dict[str, float] | None = None,
+) -> float:
     market_value = 0.0
     for position in open_positions:
         row = rows_by_symbol.get(position.symbol)
         if row is not None:
             market_value += float(row.close) * position.shares
+            continue
+        if last_close_by_symbol is not None and position.symbol in last_close_by_symbol:
+            market_value += last_close_by_symbol[position.symbol] * position.shares
     return market_value
+
+
+def _completed_holding_days(buy_date, signal_date: pd.Timestamp, trade_dates: list[pd.Timestamp]) -> int:
+    buy_day = pd.Timestamp(buy_date).date()
+    signal_day = pd.Timestamp(signal_date).date()
+    return sum(buy_day < item.date() <= signal_day for item in trade_dates)
+
+
+def _exit_signal(
+    position: Trade,
+    current: pd.Series,
+    settings: BacktestSettings,
+) -> tuple[list[str], float | None]:
+    if settings.stop_loss_pct is not None and (current["low"] / position.buy_price - 1) <= settings.stop_loss_pct:
+        return [f"止损触发：{settings.stop_loss_pct:.2%}"], position.buy_price * (1 + settings.stop_loss_pct)
+    if settings.take_profit_pct is not None and (current["high"] / position.buy_price - 1) >= settings.take_profit_pct:
+        return [f"止盈触发：{settings.take_profit_pct:.2%}"], position.buy_price * (1 + settings.take_profit_pct)
+    return [], None
 
 
 def _planned_entry_amount(
@@ -483,11 +526,14 @@ def run_backtest(
     equity_curve: list[EquityPoint] = []
     latest_strategy_matches: DailyStrategyMatches | None = None
     peak_equity = settings.initial_cash
+    last_close_by_symbol: dict[str, float] = {}
 
     total_trade_days = len(trade_dates)
     for day_index, signal_date in enumerate(trade_dates, start=1):
         today = rows_by_date.get(signal_date, data.iloc[0:0])
         today_by_symbol = rows_by_date_symbol.get(signal_date, {})
+        for row in today.itertuples(index=False):
+            last_close_by_symbol[str(row.symbol)] = float(row.close)
         if on_event is not None:
             on_event(
                 {
@@ -507,23 +553,24 @@ def run_backtest(
             if pd.Timestamp(signal_date).date() <= position.buy_date:
                 still_open.append(position)
                 continue
-            held_days = sum(position.buy_date <= item.date() <= pd.Timestamp(signal_date).date() for item in trade_dates)
+            held_days = _completed_holding_days(position.buy_date, signal_date, trade_dates)
             current_tuple = today_by_symbol.get(position.symbol)
             if current_tuple is None:
                 still_open.append(position)
                 continue
             current = pd.Series(current_tuple._asdict())
             exit_reasons: list[str] = []
+            trigger_price: float | None = None
             if held_days >= settings.fixed_holding_days:
                 exit_reasons.append(f"fixed holding days reached: {settings.fixed_holding_days}")
-            if settings.take_profit_pct is not None and (current["high"] / position.buy_price - 1) >= settings.take_profit_pct:
-                exit_reasons.append(f"止盈触发：{settings.take_profit_pct:.2%}")
-            if settings.stop_loss_pct is not None and (current["low"] / position.buy_price - 1) <= settings.stop_loss_pct:
-                exit_reasons.append(f"止损触发：{settings.stop_loss_pct:.2%}")
-            for node in strategy.exit_rules:
-                result = evaluate_condition(node, current, data)
-                if result.passed:
-                    exit_reasons.append(result.reason)
+            else:
+                trigger_reasons, trigger_price = _exit_signal(position, current, settings)
+                exit_reasons.extend(trigger_reasons)
+                if not trigger_reasons:
+                    for node in strategy.exit_rules:
+                        result = evaluate_condition(node, current, data)
+                        if result.passed:
+                            exit_reasons.append(result.reason)
             if exit_reasons:
                 if settings.limit_down_blocks_sell and _is_open_near_limit(current, "down"):
                     position.blocked_reason = f"卖出日开盘接近跌停，暂不卖出：{position.symbol}"
@@ -531,7 +578,7 @@ def run_backtest(
                     if on_event is not None:
                         on_event({"type": "trade_blocked", "trade": position})
                     continue
-                raw_sell_price = float(current["open"])
+                raw_sell_price = trigger_price if trigger_price is not None else float(current["open"])
                 sell_price = _sell_execution_price(raw_sell_price, settings)
                 proceeds = sell_price * position.shares * (1 - settings.fee_rate - settings.stamp_tax_rate)
                 cash += proceeds
@@ -571,7 +618,7 @@ def run_backtest(
                     ),
                 }
             )
-        market_value = _mark_to_market(open_positions, today_by_symbol)
+        market_value = _mark_to_market(open_positions, today_by_symbol, last_close_by_symbol)
         equity = cash + market_value
         peak_equity = max(peak_equity, equity)
         drawdown = (equity / peak_equity) - 1 if peak_equity else 0.0
@@ -586,7 +633,7 @@ def run_backtest(
         )
 
         if next_date is not None and len(open_positions) < settings.max_positions:
-            current_market_value = _mark_to_market(open_positions, today_by_symbol)
+            current_market_value = _mark_to_market(open_positions, today_by_symbol, last_close_by_symbol)
             current_equity = cash + current_market_value
             for row, reasons in candidates[: settings.max_daily_buys]:
                 if len(open_positions) >= settings.max_positions:
@@ -635,10 +682,11 @@ def run_backtest(
                     on_event({"type": "trade_opened", "trade": opened_trade})
 
     final_equity = equity_curve[-1].equity if equity_curve else settings.initial_cash
+    result_trades = [*trades, *open_positions]
     return BacktestResult(
         metrics=_build_metrics(settings.initial_cash, final_equity, trades, equity_curve),
         equity_curve=equity_curve,
-        trades=trades,
+        trades=result_trades,
         preflight_issues=issues,
         latest_strategy_matches=latest_strategy_matches,
     )

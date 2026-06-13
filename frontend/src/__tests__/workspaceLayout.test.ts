@@ -21,6 +21,14 @@ describe("workspace desktop layout", () => {
     expect(styles).toMatch(/\.index-quote\s*\{\s*grid-column:\s*auto;\s*\}/s);
   });
 
+  it("aligns the CLS finance panel width with the realtime market panel", () => {
+    const marketColumns = styles.match(/\.market-news-layout\s*\{(?<body>[^}]*)\}/s)?.groups?.body ?? "";
+    const insightColumns = styles.match(/\.market-insight-layout\s*\{(?<body>[^}]*)\}/s)?.groups?.body ?? "";
+
+    expect(marketColumns).toMatch(/grid-template-columns:\s*minmax\(620px,\s*1\.45fr\)\s*minmax\(360px,\s*0\.9fr\);/s);
+    expect(insightColumns).toMatch(/grid-template-columns:\s*minmax\(620px,\s*1\.45fr\)\s*minmax\(360px,\s*0\.9fr\);/s);
+  });
+
   it("keeps the trades table inside the results overview height with its own scroll", () => {
     expect(styles).toMatch(/\.results-trades-grid\s*>\s*\.surface\s*\{[^}]*min-height:\s*0;/s);
     expect(styles).toMatch(/\.trades-surface\s*\{[^}]*min-height:\s*0;[^}]*overflow:\s*hidden;/s);

@@ -186,7 +186,7 @@ def test_service_coverage_endpoint_returns_symbol_items(tmp_path):
 
 def test_service_coverage_endpoint_filters_requested_symbols_and_dates(tmp_path):
     server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
-    server.state.cache.write_daily_bars(sample_daily_bars())
+    server.state.warehouse.write_daily_bars(sample_daily_bars())
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -370,6 +370,66 @@ def test_service_coverage_endpoint_reads_warehouse_when_cache_is_empty(tmp_path)
 
         assert [item["symbol"] for item in response["items"]] == ["AAA"]
         assert response["items"][0]["rows"] >= 1
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_service_run_backtest_stream_uses_latest_warehouse_not_legacy_cache(tmp_path, basic_strategy, basic_settings):
+    old_cache_frame = sample_daily_bars()
+    latest_frame = old_cache_frame.copy()
+    latest_frame["trade_date"] = latest_frame["trade_date"] + pd.Timedelta(days=884)
+    latest_frame["listing_days"] = latest_frame["listing_days"] + 884
+    latest_frame["float_market_cap"] = 2_000_000_000.0
+
+    server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
+    server.state.cache.write_daily_bars(old_cache_frame)
+    server.state.warehouse.write_daily_bars(latest_frame)
+    settings = basic_settings.model_copy(
+        update={
+            "start_date": pd.Timestamp("2026-06-04").date(),
+            "end_date": pd.Timestamp("2026-06-10").date(),
+            "min_listing_days": 0,
+        }
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        events = _request_ndjson(
+            f"http://127.0.0.1:{port}/run/backtest/stream",
+            {
+                "strategy": json.loads(basic_strategy.model_dump_json()),
+                "settings": json.loads(settings.model_dump_json()),
+            },
+        )
+
+        result = next(event["result"] for event in events if event["type"] == "result")
+        latest_matches = result["latest_strategy_matches"]
+        assert latest_matches["signal_date"] == "2026-06-10"
+        assert latest_matches["trade_date"] == "2026-06-10"
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_service_run_backtest_stream_does_not_fallback_to_legacy_cache_when_warehouse_empty(tmp_path, basic_strategy, basic_settings):
+    server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
+    server.state.cache.write_daily_bars(sample_daily_bars())
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        events = _request_ndjson(
+            f"http://127.0.0.1:{port}/run/backtest/stream",
+            {
+                "strategy": json.loads(basic_strategy.model_dump_json()),
+                "settings": json.loads(basic_settings.model_dump_json()),
+            },
+        )
+
+        assert events[-1]["type"] == "error"
+        assert "主仓" in events[-1]["message"]
     finally:
         server.shutdown()
         thread.join(timeout=5)
@@ -620,7 +680,7 @@ def test_service_fetch_capital_flow_empty_symbols_starts_backfill_job(tmp_path):
 
 def test_service_streams_backtest_trade_events_before_final_result(tmp_path, basic_strategy, basic_settings):
     server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
-    server.state.cache.write_daily_bars(sample_daily_bars())
+    server.state.warehouse.write_daily_bars(sample_daily_bars())
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -1517,6 +1577,8 @@ def test_realtime_provider_times_out_slow_akshare_sector_before_eastmoney_backup
     provider._fetch_sina_sectors = lambda: []
 
     def slow_akshare_rows(board_type):
+        if board_type == "industry":
+            return []
         time.sleep(0.2)
         return [{"f12": "BK1036", "f14": "akshare-sector-name", "f3": 9.9}]
 

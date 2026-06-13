@@ -218,9 +218,7 @@ class DataServiceHandler(BaseHTTPRequestHandler):
             require_ohlc=True,
         )
         if frame.empty:
-            frame = _require_ohlc_rows(self.server.state.cache.read_daily_bars())
-        if frame.empty:
-            raise ValueError("No cached daily bars found. Import or fetch data before running a configured backtest.")
+            raise ValueError("主仓没有可回测的日线数据。请先在数据中心下载或补全数据。")
         return frame
 
     def _run_backtest_stream(self, payload: dict[str, Any]) -> None:
