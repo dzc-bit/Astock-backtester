@@ -29,7 +29,7 @@ git branch --show-current
 https://github.com/dzc-bit/Astock-backtester.git
 ```
 
-保护已有未提交修改。不要覆盖无关文件，不要清理、删除、迁移 `D:\New project 6\运行产物`。当前版本按用户要求维护为 `1.2.3`；除非用户明确要求，不要再改版本号。
+保护已有未提交修改。不要覆盖无关文件，不要清理、删除、迁移 `D:\New project 6\运行产物`。当前版本按用户要求维护为 `1.2.4`；除非用户明确要求，不要再改版本号。
 
 截至 2026-06-13，当前目标修复版需要覆盖安装到桌面端目录：
 
@@ -80,6 +80,7 @@ D:\New project 6\运行产物\桌面软件\A股策略回测工作台
 | 同花顺早盘 | `GET /market/zaopan` |
 | user 模式候选 | `/run/backtest/stream` 最终 `result.latest_strategy_matches.matches` |
 | 资金流补齐 | `POST /fetch/daily-bars`、`POST /fetch/capital-flow` |
+| 数据中心精确摘要 | `GET /coverage/summary` |
 
 复盘正文不能塞 user 候选；新闻不能替代行情评价；实时行情失败不能拿本地历史数据伪装成 live。
 
@@ -168,9 +169,9 @@ docs/capital-flow-crawler-report.md
 
 `/coverage/daily-bars` 必须使用 A 股交易日历。不要用普通工作日直接判断缺失交易日。
 
-数据中心的“补全缺失数据”默认是全市场补齐：股票代码为空时走 `/sync/full-market`；只有用户显式输入股票代码时，才走指定股票 `/fetch/daily-bars`。全市场同步运行中，覆盖表的日线 `missing_rows` 要随本次 `imported_rows` 做可视化下降，不能一直静态显示旧缺口。
+数据中心的“补全缺失数据”默认是全市场补齐：股票代码为空时走 `/sync/full-market`；只有用户显式输入股票代码时，才走指定股票 `/fetch/daily-bars`。全市场同步运行中不要用 `imported_rows` 假扣覆盖表缺口；`imported_rows` 只是本次真实新增或变更行。任务完成后用 `GET /coverage/summary` 刷新主仓精确覆盖，随后自动走 `/fetch/capital-flow` 补齐主仓内缺失的资金流。
 
-默认无股票参数的 `/coverage/daily-bars` 不能全量扫描多年历史明细，否则会拖慢数据中心；应走最近分区/轻量摘要。指定股票或指定日期范围时，才需要逐股精确缺口明细。
+默认无股票参数的 `/coverage/daily-bars` 不能全量扫描多年历史明细，否则会拖慢数据中心；应走最近分区/轻量摘要。指定股票或指定日期范围时，才需要逐股精确缺口明细。数据中心覆盖表的最终真值来自 `/coverage/summary`，不能拿 `/health` 的轻量摘要或旧缓存覆盖主仓精确结果。
 
 春节、清明、劳动节、国庆等合法休市日不能进入 `missing_trade_dates`。
 
@@ -197,7 +198,7 @@ POST /run/backtest/stream
 最后一个 NDJSON 事件 result.latest_strategy_matches.matches
 ```
 
-不要把 user 候选塞进同花顺复盘正文。
+不要把 user 候选塞进同花顺复盘正文。旧的非流式 `/run/backtest` 已废弃并应返回 404；不要恢复这个接口。
 
 如果实时失败并回退本地最近交易日，前端必须标注：
 
@@ -210,6 +211,7 @@ POST /run/backtest/stream
 
 - `GET /ping`
 - `GET /health`
+- `GET /coverage/summary`
 - `POST /coverage/daily-bars`
 - `GET /realtime/market-snapshot`
 - `GET /market/commentary`
@@ -329,7 +331,7 @@ git branch --show-current
 
 ### 范围和目标漂移
 
-- 用户一旦明确说“不要回退”“只完成目标”，就不要再查 release 或执行回退流程。当前目标版本是 1.2.3；继续做 1.2.2 回退会偏离目标。
+- 用户一旦明确说“不要回退”“只完成目标”，就不要再查 release 或执行回退流程。当前目标版本是 1.2.4；继续做 1.2.2/1.2.3 回退会偏离目标。
 - “不要动项目内容”在本仓通常表示不要改源码、测试、业务逻辑、构建脚本或运行数据。若用户只要求写 `AGENT必读.md`，就只编辑这一个文件。
 - `项目说明书.md` 是本地开发说明且被 `.gitignore` 忽略；`AGENT必读.md` 是 agent 接手入口。不要把两者职责混在一起。
 
@@ -352,7 +354,7 @@ git branch --show-current
 - `npm run tauri -- build --ci` 会先执行 `beforeBuildCommand`，再次跑 `npm run build` 和 `npm run build:data-service`。如果前面已经手动构建过，这是重复但符合 Tauri 打包流程；耗时不能误判为失败。
 - 初次 Tauri 打包失败点是 `cargo metadata` 找不到全局 `cargo`。正确处理是在本次命令环境注入 `.tools\rustup-home\toolchains\stable-x86_64-pc-windows-msvc\bin`，并设置 `CARGO_HOME` / `RUSTUP_HOME` 到项目 `.tools`，不要修改系统 PATH。
 - 第二个失败点是 NSIS 工具下载超时：Tauri 期望 `src-tauri\target\.tauri\NSIS`，不会直接使用 `.tools\nsis-3.12`。后续 agent 如果看到 `failed to bundle project timeout: global` 或卡在 `Downloading ... nsis-3.11.zip`，先按上一节预置 NSIS 缓存和 `nsis_tauri_utils.dll`，再重跑打包。
-- 同版本覆盖安装不需要改版本号。当前规则仍是用户未明确要求时保持 `1.2.3`，用本次签名安装包覆盖安装，然后用 hash 和接口探针证明安装目录已更新。
+- 版本号只有用户明确要求才更新；当前规则是统一维护 `1.2.4`，用本次签名安装包覆盖安装，然后用 hash 和接口探针证明安装目录已更新。
 - NSIS 静默安装可用：
 
 ```powershell
@@ -360,7 +362,7 @@ $installer = Get-ChildItem 'D:\New project 6\src-tauri\target\release\bundle\nsi
 Start-Process -FilePath $installer.FullName -ArgumentList @('/S', '/D=D:\New project 6\运行产物\桌面软件\A股策略回测工作台') -Wait -PassThru
 ```
 
-- 探针不要把所有接口和多年全市场回测塞进一个脚本。先测 `/ping`、`/health`、`/coverage/daily-bars`，确认主仓最新日期；再单独测 `/realtime/market-snapshot`、`/market/commentary`、`/market/fupan`、`/market/zaopan`；最后只跑靠近主仓最新交易日的小窗口 `/run/backtest/stream`，验证 `result.latest_strategy_matches.signal_date/trade_date` 等于最新本地交易日。
+- 探针不要把所有接口和多年全市场回测塞进一个脚本。先测 `/ping`、`/health`、`/coverage/summary`、`/coverage/daily-bars`，确认主仓最新日期；再单独测 `/realtime/market-snapshot`、`/market/commentary`、`/market/fupan`、`/market/zaopan`；最后只跑靠近主仓最新交易日的小窗口 `/run/backtest/stream`，验证 `result.latest_strategy_matches.signal_date/trade_date` 等于最新本地交易日。
 - 用 Python 启动安装目录 sidecar 探针时，`stdout/stderr` 建议设为 `subprocess.DEVNULL`。这次捕获管道后 `communicate()` 收尾曾阻塞，导致探针进程残留；每轮探针结束都要 `terminate/kill`，最终再用 `Get-Process` 查净。
 - 清理 `src-tauri/bin` 前必须先完成工作区 sidecar 与安装目录 sidecar 的 SHA256 比对；清理后工作区 sidecar 不存在，不能再补做 hash 对比。
 
@@ -376,6 +378,9 @@ Start-Process -FilePath $installer.FullName -ArgumentList @('/S', '/D=D:\New pro
 - `/coverage/daily-bars` 默认无参数时不能全量读多年日线，否则本地服务会超时；默认路径应使用最近分区/轻量摘要。只有指定股票或日期范围时才读精确逐股缺口。
 - `/health` 已走轻量 `health_coverage()`，但 `_safe_coverage()` 仍可能需要精确覆盖统计。不要为了性能把所有 coverage 调用都粗暴替换成轻量摘要，否则会影响资金流独立行和精确缺口测试。
 - 最新日期补齐是否有效要看真实探针：`/sync/full-market` 是否能快速起任务、是否使用本地股票池、`start_date/end_date` 是否到最新交易日，并且要能取消 job。
+- 1.2.4 起，数据中心覆盖表缺口只信 `/coverage/summary` 的主仓精确结果；前端不能按 `imported_rows` 估算扣减缺口。`/fetch/capital-flow` 空股票列表只补主仓中 OHLC 完整且资金流缺失的股票。
+- `Warehouse.write_daily_bars()` 返回真实新增/变更行数；重复补全同一批数据应返回 0，并跳过无意义 parquet 重写。同一批或历史分区里的重复 `(symbol, trade_date)` 要压缩成一行，避免重试造成冗余。
+- `/identity` 临时诊断接口已废弃；sidecar 身份、进程和 hash 校验统一走 `/health`。后续不要恢复 `/identity`。
 
 ### 回测候选和 NDJSON
 

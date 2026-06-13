@@ -140,31 +140,16 @@ def test_service_ping_is_lightweight(tmp_path):
         thread.join(timeout=5)
 
 
-def test_service_identity_is_lightweight_and_reports_process_identity(tmp_path):
-    class SlowWarehouse:
-        def coverage(self):
-            time.sleep(0.2)
-            return []
-
+def test_service_rejects_deprecated_identity_endpoint(tmp_path):
     server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
-    server.state.warehouse = SlowWarehouse()
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
         port = server.server_address[1]
-        started = time.perf_counter()
         response = _request_json("GET", f"http://127.0.0.1:{port}/identity")
-        elapsed = time.perf_counter() - started
 
-        assert elapsed < 0.2
-        assert response["ok"] is True
-        assert response["port"] == port
-        assert response["cache_path"] == str(tmp_path.resolve())
-        assert response["process_id"] == os.getpid()
-        assert isinstance(response["executable_path"], str)
-        assert isinstance(response["executable_sha256"], str)
-        assert len(response["executable_sha256"]) == 64
-        assert "coverage" not in response
+        assert response["code"] == "not_found"
+        assert response["message"] == "/identity"
     finally:
         server.shutdown()
         thread.join(timeout=5)

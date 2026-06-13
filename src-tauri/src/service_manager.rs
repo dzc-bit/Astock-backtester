@@ -64,12 +64,8 @@ pub fn build_service_args(port: u16, cache_dir: &str) -> Vec<String> {
     ]
 }
 
-pub fn health_request(port: u16) -> String {
-    format!("GET /ping HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n")
-}
-
 pub fn service_health_request(port: u16) -> String {
-    format!("GET /identity HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n")
+    format!("GET /health HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n")
 }
 
 fn canonical_or_original(path: &str) -> PathBuf {
@@ -609,8 +605,8 @@ impl DataServiceManager {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_service_args, cached_service_matches, choose_populated_cache_dir, health_request,
-        file_sha256, packaged_service_relative_path, read_service_lock, service_health_request,
+        build_service_args, cached_service_matches, choose_populated_cache_dir, file_sha256,
+        packaged_service_relative_path, read_service_lock, service_health_request,
         locked_service_expected_identity, require_recreated_service_lock, service_lock_path, should_use_packaged_service,
         stop_child_after_start_failure, try_create_service_lock, runtime_data_candidates_from,
         validate_service_health, workspace_cache_candidates_from_root, ServiceLockPayload,
@@ -628,16 +624,9 @@ mod tests {
     }
 
     #[test]
-    fn health_request_targets_lightweight_ping_endpoint() {
-        let raw = health_request(9123);
-        assert!(raw.contains("GET /ping HTTP/1.1"));
-        assert!(raw.contains("Host: 127.0.0.1:9123"));
-    }
-
-    #[test]
-    fn service_health_request_targets_identity_endpoint() {
+    fn service_health_request_targets_health_endpoint() {
         let raw = service_health_request(9123);
-        assert!(raw.contains("GET /identity HTTP/1.1"));
+        assert!(raw.contains("GET /health HTTP/1.1"));
         assert!(raw.contains("Host: 127.0.0.1:9123"));
     }
 

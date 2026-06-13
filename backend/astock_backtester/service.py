@@ -120,19 +120,6 @@ class DataServiceState:
         except OSError:
             return None
 
-    def identity_payload(self) -> dict[str, Any]:
-        return {
-            "ok": True,
-            "cache_path": str(self.cache.root.resolve()),
-            "port": self.port,
-            "process_id": self.process_id,
-            "executable_path": self.executable_path,
-            "executable_sha256": self.executable_sha256,
-            "started_at": self.started_at.isoformat(),
-            "instance_id": self.instance_id,
-        }
-
-
 def _retained_realtime_snapshot(provider: Any, exc: Exception):
     retained = getattr(provider, "_last_successful_snapshot", None)
     if retained is None:
@@ -277,9 +264,6 @@ class DataServiceHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         if self.path == "/ping":
             self._send_json({"ok": True})
-            return
-        if self.path == "/identity":
-            self._send_json(self.server.state.identity_payload())
             return
         if self.path == "/health":
             health = build_service_health(
