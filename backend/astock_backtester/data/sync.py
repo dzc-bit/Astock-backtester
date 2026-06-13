@@ -45,9 +45,9 @@ class SyncJobManager:
             try:
                 frame = self.provider.fetch_daily_bars(symbol, start_date, end_date)
                 if not frame.empty:
-                    self.warehouse.write_daily_bars(frame)
+                    imported_rows = _write_daily_bars_imported_rows(self.warehouse, frame)
                     status.returned_rows += int(len(frame))
-                    status.imported_rows += int(len(frame))
+                    status.imported_rows += imported_rows
                     status.completed_symbols += 1
                 else:
                     status.failed_symbols += 1
@@ -214,10 +214,10 @@ class SyncJobManager:
             return 0
         merged = pd.concat(frames, ignore_index=True)
         frames.clear()
-        self.warehouse.write_daily_bars(merged)
+        imported_rows = _write_daily_bars_imported_rows(self.warehouse, merged)
         current = self.get_job(job_id)
         if current:
-            self._mutate(job_id, imported_rows=current.imported_rows + int(len(merged)))
+            self._mutate(job_id, imported_rows=current.imported_rows + imported_rows)
         return 0
 
     def _run_capital_flow_job(self, job_id: str, symbols: list[str], start_date: str, end_date: str) -> None:
@@ -380,6 +380,13 @@ def _failure_message(item: dict[str, Any]) -> str:
 def _chunks(items: list[str], size: int) -> list[list[str]]:
     chunk_size = max(1, size)
     return [items[index : index + chunk_size] for index in range(0, len(items), chunk_size)]
+
+
+def _write_daily_bars_imported_rows(warehouse: Warehouse, frame: pd.DataFrame) -> int:
+    imported_rows = warehouse.write_daily_bars(frame)
+    if isinstance(imported_rows, int):
+        return imported_rows
+    return int(len(frame))
 
 
 def _failure_symbols(failures: list[dict[str, Any]]) -> set[str]:

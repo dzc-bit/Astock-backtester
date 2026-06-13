@@ -172,6 +172,24 @@ export async function loadDataServiceHealth(baseUrl: string): Promise<DataServic
   return serviceFetch<DataServiceHealth>(baseUrl, "/health", undefined, { timeoutMs: HEALTH_SERVICE_TIMEOUT_MS });
 }
 
+export async function loadCoverageSummary(baseUrl: string): Promise<{ coverage: DataServiceHealth["coverage"] }> {
+  if (!isTauriRuntime()) {
+    return {
+      coverage: [
+        { dataset: "daily_bars", symbols: 2, start_date: "2024-01-02", end_date: "2024-01-08", missing_rows: 0 },
+        { dataset: "capital_flow", symbols: 2, start_date: "2024-01-02", end_date: "2024-01-08", missing_rows: 0 },
+        { dataset: "market_cap", symbols: 2, start_date: "2024-01-02", end_date: "2024-01-08", missing_rows: 0 }
+      ]
+    };
+  }
+  return serviceFetch<{ coverage: DataServiceHealth["coverage"] }>(
+    baseUrl,
+    "/coverage/summary",
+    undefined,
+    { timeoutMs: HEALTH_SERVICE_TIMEOUT_MS }
+  );
+}
+
 export async function loadDataServiceLogs(baseUrl: string): Promise<{ items: Array<{ level: "info" | "warning" | "error"; message: string; timestamp?: string }> }> {
   if (!isTauriRuntime()) {
     return { items: [{ level: "info", message: "browser preview uses mock local service" }] };

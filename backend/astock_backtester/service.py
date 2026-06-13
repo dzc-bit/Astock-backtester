@@ -294,6 +294,9 @@ class DataServiceHandler(BaseHTTPRequestHandler):
             )
             self._send_json(health.model_dump(mode="json"))
             return
+        if self.path == "/coverage/summary":
+            self._send_json({"coverage": self._coverage_summary()})
+            return
         if self.path == "/logs/recent":
             self._send_json({"items": list(self.server.state.logs)})
             return
@@ -438,9 +441,39 @@ class DataServiceHandler(BaseHTTPRequestHandler):
             if self.path == "/fetch/capital-flow":
                 symbols = payload.get("symbols") or []
                 if not symbols:
-                    symbols = self._capital_flow_backfill_symbols()
+                    symbols = self._capital_flow_backfill_symbols(
+                        payload.get("start_date"),
+                        payload.get("end_date"),
+                    )
                     if not symbols:
-                        raise ValueError("No symbols available for capital-flow backfill.")
+                        self._send_json(
+                            {
+                                "status": "ok",
+                                "imported_rows": 0,
+                                "returned_rows": 0,
+                                "requested_symbols": [],
+                                "fetched_symbols": [],
+                                "missing_symbols": [],
+                                "skipped_symbols": [],
+                                "coverage": self._coverage_summary(),
+                                "logs": [
+                                    {
+                                        "level": "info",
+                                        "message": "Capital-flow coverage already complete for requested rows",
+                                    }
+                                ],
+                                "diagnostics": [
+                                    {
+                                        "code": "capital_flow_backfill_not_needed",
+                                        "source": "capital_flow_crawler",
+                                        "selection": "warehouse_missing_capital_flow",
+                                        "requested_symbols": 0,
+                                    }
+                                ],
+                                "failures": [],
+                            }
+                        )
+                        return
                     job = self.server.state.sync_manager.start_capital_flow_backfill(
                         symbols=symbols,
                         start_date=payload["start_date"],
@@ -473,6 +506,7 @@ class DataServiceHandler(BaseHTTPRequestHandler):
                                 {
                                     "code": "capital_flow_backfill_job_started",
                                     "source": "capital_flow_crawler",
+                                    "selection": "warehouse_missing_capital_flow",
                                     "job_id": job.job_id,
                                     "requested_symbols": len(symbols),
                                 }
@@ -539,16 +573,18 @@ class DataServiceHandler(BaseHTTPRequestHandler):
     def _fetch_capital_flow_from_crawler(self, symbols: list[str], start_date: str, end_date: str) -> dict[str, Any]:
         return self.server.state._fetch_capital_flow(symbols, start_date, end_date)
 
-    def _capital_flow_backfill_symbols(self) -> list[str]:
-        symbols: set[str] = set()
+    def _capital_flow_backfill_symbols(self, start_date: str | None, end_date: str | None) -> list[str]:
+        list_missing = getattr(self.server.state.warehouse, "list_symbols_missing_capital_flow", None)
+        if callable(list_missing):
+            return [str(symbol) for symbol in list_missing(start_date, end_date) if str(symbol).strip()]
+        return []
+
+    def _coverage_summary(self) -> list[dict[str, Any]]:
         try:
-            symbols.update(str(symbol) for symbol in self.server.state.provider.list_symbols())
+            coverage = self.server.state.warehouse.coverage()
         except Exception:
-            pass
-        frame = self.server.state.warehouse.read_daily_bars()
-        if not frame.empty and "symbol" in frame:
-            symbols.update(str(symbol) for symbol in frame["symbol"].dropna().astype(str).unique())
-        return sorted(symbol for symbol in symbols if symbol)
+            coverage = self.server.state.cache.coverage()
+        return [item.model_dump(mode="json") for item in coverage]
 
     def _full_market_sync_symbols(self) -> list[str]:
         list_local_symbols = getattr(self.server.state.warehouse, "list_daily_symbols", None)

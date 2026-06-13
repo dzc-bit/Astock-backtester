@@ -78,27 +78,38 @@ class Warehouse:
             if start_year <= int(path.parent.name.split("year=", 1)[1]) <= end_year
         ]
 
-    def write_daily_bars(self, frame: pd.DataFrame) -> None:
-        normalized = normalize_daily_bars(frame)
+    def write_daily_bars(self, frame: pd.DataFrame) -> int:
+        normalized = _normalize_unique_daily_bars(frame)
         if normalized.empty:
-            return
+            return 0
         normalized["year"] = normalized["trade_date"].dt.year
+        total_changed_rows = 0
         for year, year_frame in normalized.groupby("year"):
             path = self._partition_path(int(year))
             path.parent.mkdir(parents=True, exist_ok=True)
             year_frame = year_frame.drop(columns=["year"])
+            incoming = year_frame.copy()
+            year_changed_rows = int(len(incoming.drop_duplicates(["symbol", "trade_date"])))
             if path.exists():
                 current = self._safe_read_parquet(path)
                 if not current.empty and {"symbol", "trade_date"}.issubset(current.columns):
+                    current_unique = _normalize_unique_daily_bars(current)
+                    current_needs_compaction = int(len(current_unique)) < int(len(current))
+                    year_changed_rows = _count_changed_rows(incoming, current_unique)
+                    if year_changed_rows == 0 and not current_needs_compaction:
+                        continue
                     year_frame = (
                         year_frame.set_index(["symbol", "trade_date"])
-                        .combine_first(current.set_index(["symbol", "trade_date"]))
+                        .combine_first(current_unique.set_index(["symbol", "trade_date"]))
                         .reset_index()
                     )
             year_frame = year_frame.sort_values(["symbol", "trade_date"]).reset_index(drop=True)
             year_frame.to_parquet(path, index=False)
-        with sqlite3.connect(self.sqlite_path) as conn:
-            conn.execute("INSERT OR REPLACE INTO datasets(dataset) VALUES('daily_bars')")
+            total_changed_rows += year_changed_rows
+        if total_changed_rows > 0:
+            with sqlite3.connect(self.sqlite_path) as conn:
+                conn.execute("INSERT OR REPLACE INTO datasets(dataset) VALUES('daily_bars')")
+        return total_changed_rows
 
     def read_daily_bars(
         self,
@@ -174,6 +185,99 @@ class Warehouse:
                 continue
             symbols.update(str(symbol) for symbol in frame["symbol"].dropna().astype(str).unique())
         return sorted(symbol for symbol in symbols if symbol)
+
+    def list_symbols_missing_capital_flow(self, start_date: str | None = None, end_date: str | None = None) -> list[str]:
+        paths = self._partition_paths_for_range(start_date, end_date)
+        if not paths:
+            return []
+
+        start_ts = pd.Timestamp(start_date) if start_date else None
+        end_ts = pd.Timestamp(end_date) if end_date else None
+        global_daily_start: pd.Timestamp | None = None
+        first_daily_date_by_symbol: dict[str, pd.Timestamp] = {}
+        flow_start_by_symbol: dict[str, pd.Timestamp] = {}
+        wanted_columns = ["symbol", "trade_date", *OHLC_COLUMNS, "main_net_inflow"]
+
+        for path in sorted(self.daily_bars_root.glob("year=*/daily_bars.parquet")):
+            frame = self._read_projected_daily_partition(path, wanted_columns)
+            if frame.empty:
+                continue
+            ohlc_complete = _require_ohlc_rows(frame)
+            if not ohlc_complete.empty:
+                daily_start = pd.Timestamp(ohlc_complete["trade_date"].min())
+                global_daily_start = daily_start if global_daily_start is None else min(global_daily_start, daily_start)
+                daily_starts = (
+                    ohlc_complete.groupby(ohlc_complete["symbol"].astype(str))["trade_date"]
+                    .min()
+                    .to_dict()
+                )
+                for symbol, trade_date in daily_starts.items():
+                    timestamp = pd.Timestamp(trade_date)
+                    current = first_daily_date_by_symbol.get(symbol)
+                    if current is None or timestamp < current:
+                        first_daily_date_by_symbol[symbol] = timestamp
+            if "main_net_inflow" not in frame:
+                continue
+            capital_flow_frame = frame.loc[frame["main_net_inflow"].notna()]
+            if capital_flow_frame.empty:
+                continue
+            flow_starts = (
+                capital_flow_frame.groupby(capital_flow_frame["symbol"].astype(str))["trade_date"]
+                .min()
+                .to_dict()
+            )
+            for symbol, trade_date in flow_starts.items():
+                timestamp = pd.Timestamp(trade_date)
+                current = flow_start_by_symbol.get(symbol)
+                if current is None or timestamp < current:
+                    flow_start_by_symbol[symbol] = timestamp
+
+        source_start_symbols = {
+            symbol
+            for symbol, flow_start in flow_start_by_symbol.items()
+            if _uses_symbol_capital_flow_source_start(
+                symbol,
+                flow_start,
+                first_daily_date_by_symbol.get(symbol),
+                global_daily_start,
+            )
+        }
+        missing_symbols: set[str] = set()
+        for path in paths:
+            frame = self._read_projected_daily_partition(path, wanted_columns)
+            if frame.empty:
+                continue
+            if start_ts is not None:
+                frame = frame.loc[frame["trade_date"] >= start_ts]
+            if end_ts is not None:
+                frame = frame.loc[frame["trade_date"] <= end_ts]
+            if frame.empty:
+                continue
+            ohlc_complete = _require_ohlc_rows(frame)
+            if ohlc_complete.empty:
+                continue
+            if "main_net_inflow" in ohlc_complete:
+                missing_flow = ohlc_complete.loc[ohlc_complete["main_net_inflow"].isna(), ["symbol", "trade_date"]]
+            else:
+                missing_flow = ohlc_complete[["symbol", "trade_date"]]
+            if missing_flow.empty:
+                continue
+            missing_flow = missing_flow.assign(symbol=missing_flow["symbol"].astype(str))
+            missing_flow = missing_flow.loc[
+                ~missing_flow["trade_date"].isin(KNOWN_CAPITAL_FLOW_SOURCE_GAP_DATES)
+            ]
+            if missing_flow.empty:
+                continue
+            if source_start_symbols:
+                mapped_flow_start = missing_flow["symbol"].map(flow_start_by_symbol)
+                before_source_start = (
+                    missing_flow["symbol"].isin(source_start_symbols)
+                    & mapped_flow_start.notna()
+                    & (missing_flow["trade_date"] < mapped_flow_start)
+                )
+                missing_flow = missing_flow.loc[~before_source_start]
+            missing_symbols.update(symbol for symbol in missing_flow["symbol"].dropna().astype(str).unique() if symbol)
+        return sorted(missing_symbols)
 
     def health_coverage(self) -> list[DatasetCoverage]:
         paths = sorted(self.daily_bars_root.glob("year=*/daily_bars.parquet"))
@@ -470,6 +574,22 @@ class Warehouse:
         except Exception:
             return pd.DataFrame()
 
+    def _read_projected_daily_partition(self, path: Path, columns: Sequence[str]) -> pd.DataFrame:
+        try:
+            available_columns = set(pq.ParquetFile(path).schema_arrow.names)
+        except Exception:
+            return pd.DataFrame()
+        selected_columns = [column for column in columns if column in available_columns]
+        if "symbol" not in selected_columns or "trade_date" not in selected_columns:
+            return pd.DataFrame()
+        frame = self._safe_read_parquet(path, columns=selected_columns)
+        if frame.empty:
+            return frame
+        frame = frame.copy()
+        frame["symbol"] = frame["symbol"].astype(str)
+        frame["trade_date"] = pd.to_datetime(frame["trade_date"], errors="coerce")
+        return frame.dropna(subset=["trade_date"])
+
 
 def _require_ohlc_rows(frame: pd.DataFrame) -> pd.DataFrame:
     if frame.empty:
@@ -486,6 +606,58 @@ def _frame_date_range(frame: pd.DataFrame) -> tuple[date | None, date | None]:
     if dates.empty:
         return None, None
     return dates.min().date(), dates.max().date()
+
+
+def _count_changed_rows(incoming: pd.DataFrame, current: pd.DataFrame) -> int:
+    if incoming.empty:
+        return 0
+    incoming_normalized = _normalize_unique_daily_bars(incoming)
+    if current.empty or not {"symbol", "trade_date"}.issubset(current.columns):
+        return int(len(incoming_normalized))
+    current_normalized = _normalize_unique_daily_bars(current)
+    incoming_indexed = incoming_normalized.set_index(["symbol", "trade_date"]).sort_index()
+    current_indexed = current_normalized.set_index(["symbol", "trade_date"]).sort_index()
+    changed = 0
+    for index, incoming_row in incoming_indexed.iterrows():
+        if index not in current_indexed.index:
+            changed += 1
+            continue
+        current_row = current_indexed.loc[index]
+        for column in incoming_indexed.columns:
+            if column not in current_indexed.columns:
+                if not pd.isna(incoming_row[column]):
+                    changed += 1
+                    break
+                continue
+            incoming_value = incoming_row[column]
+            final_value = current_row[column] if pd.isna(incoming_value) else incoming_value
+            if not _values_equal(final_value, current_row[column]):
+                changed += 1
+                break
+    return changed
+
+
+def _normalize_unique_daily_bars(frame: pd.DataFrame) -> pd.DataFrame:
+    order_column = "__warehouse_incoming_order"
+    while order_column in frame.columns:
+        order_column = f"_{order_column}"
+    ordered = frame.copy()
+    ordered[order_column] = range(len(ordered))
+    normalized = normalize_daily_bars(ordered)
+    return (
+        normalized.sort_values(["symbol", "trade_date", order_column])
+        .drop_duplicates(["symbol", "trade_date"], keep="last")
+        .drop(columns=[order_column])
+        .reset_index(drop=True)
+    )
+
+
+def _values_equal(left: object, right: object) -> bool:
+    left_missing = bool(pd.isna(left))
+    right_missing = bool(pd.isna(right))
+    if left_missing or right_missing:
+        return left_missing and right_missing
+    return bool(left == right)
 
 
 def _parquet_trade_date_range(parquet: pq.ParquetFile) -> tuple[date | None, date | None]:

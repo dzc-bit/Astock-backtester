@@ -210,13 +210,14 @@ def import_daily_bars_into_cache(
     source: str,
     warehouse: Warehouse | None = None,
 ) -> DataOperationResult:
+    imported_rows = int(len(frame))
     cache.write_daily_bars(frame)
     if warehouse is not None:
-        warehouse.write_daily_bars(frame)
+        imported_rows = warehouse.write_daily_bars(frame)
     coverage = _safe_coverage(cache, warehouse)
     return DataOperationResult(
         status="ok",
-        imported_rows=int(len(frame)),
+        imported_rows=imported_rows,
         coverage=coverage,
         logs=[ServiceLogEntry(level="info", message=f"Imported daily bars from {source}")],
     )
@@ -268,10 +269,12 @@ def fetch_daily_bars_into_cache(
             )
     if frame.empty:
         fetched_symbols: list[str] = []
+        imported_rows = 0
     else:
         cache.write_daily_bars(frame)
+        imported_rows = int(len(frame))
         if warehouse is not None:
-            warehouse.write_daily_bars(frame)
+            imported_rows = warehouse.write_daily_bars(frame)
         fetched_symbols = sorted(frame["symbol"].astype(str).unique().tolist())
     daily_shortfall_diagnostics, daily_shortfall_failures, daily_shortfall_symbols = _daily_bar_shortfall_diagnostics(
         frame,
@@ -318,7 +321,7 @@ def fetch_daily_bars_into_cache(
     coverage = _safe_coverage(cache, warehouse)
     return DataOperationResult(
         status="partial" if missing_symbols or failures else "ok",
-        imported_rows=int(len(frame)),
+        imported_rows=imported_rows,
         requested_symbols=requested_symbols,
         fetched_symbols=fetched_symbols,
         missing_symbols=missing_symbols,

@@ -610,7 +610,7 @@ def test_service_fetch_capital_flow_backfills_existing_rows_and_reports_failures
         thread.join(timeout=5)
 
 
-def test_service_fetch_capital_flow_empty_symbols_starts_backfill_job(tmp_path):
+def test_service_fetch_capital_flow_empty_symbols_starts_backfill_job_for_missing_warehouse_symbols(tmp_path):
     class FakeProvider:
         def list_symbols(self):
             return ["000002", "000003"]
@@ -646,14 +646,14 @@ def test_service_fetch_capital_flow_empty_symbols_starts_backfill_job(tmp_path):
     server.state.warehouse.write_daily_bars(
         pd.DataFrame(
             {
-                "symbol": ["000001", "000002"],
-                "trade_date": pd.to_datetime(["2026-05-26", "2026-05-26"]),
-                "open": [10.0, 20.0],
-                "high": [10.5, 20.5],
-                "low": [9.8, 19.8],
-                "close": [10.2, 20.2],
-                "volume": [1000, 2000],
-                "main_net_inflow": [float("nan"), float("nan")],
+                "symbol": ["000001", "000002", "000003"],
+                "trade_date": pd.to_datetime(["2026-05-26", "2026-05-26", "2026-05-26"]),
+                "open": [10.0, 20.0, 30.0],
+                "high": [10.5, 20.5, 30.5],
+                "low": [9.8, 19.8, 29.8],
+                "close": [10.2, 20.2, 30.2],
+                "volume": [1000, 2000, 3000],
+                "main_net_inflow": [float("nan"), 2_000_000.0, 3_000_000.0],
             }
         )
     )
@@ -669,10 +669,87 @@ def test_service_fetch_capital_flow_empty_symbols_starts_backfill_job(tmp_path):
             {"symbols": [], "start_date": "2026-05-26", "end_date": "2026-05-29"},
         )
 
-        assert manager.calls == [(["000001", "000002", "000003"], "2026-05-26", "2026-05-29")]
+        assert manager.calls == [(["000001"], "2026-05-26", "2026-05-29")]
         assert response["job"]["mode"] == "capital_flow_backfill"
         assert response["job"]["status"] == "running"
         assert response["diagnostics"][0]["code"] == "capital_flow_backfill_job_started"
+        assert response["diagnostics"][0]["selection"] == "warehouse_missing_capital_flow"
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_service_fetch_capital_flow_empty_symbols_returns_not_needed_when_no_missing_rows(tmp_path):
+    class FakeProvider:
+        def list_symbols(self):
+            raise AssertionError("provider list should not be used when warehouse has no capital-flow gaps")
+
+    class FakeSyncManager:
+        def start_capital_flow_backfill(self, symbols, start_date, end_date):
+            raise AssertionError("capital-flow job should not start without warehouse gaps")
+
+    server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
+    server.state.provider = FakeProvider()
+    server.state.sync_manager = FakeSyncManager()
+    server.state.warehouse.write_daily_bars(
+        pd.DataFrame(
+            {
+                "symbol": ["000001", "000002"],
+                "trade_date": pd.to_datetime(["2026-05-26", "2026-05-26"]),
+                "open": [10.0, 20.0],
+                "high": [10.5, 20.5],
+                "low": [9.8, 19.8],
+                "close": [10.2, 20.2],
+                "volume": [1000, 2000],
+                "main_net_inflow": [1_000_000.0, 2_000_000.0],
+            }
+        )
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        response = _request_json(
+            "POST",
+            f"http://127.0.0.1:{port}/fetch/capital-flow",
+            {"symbols": [], "start_date": "2026-05-26", "end_date": "2026-05-29"},
+        )
+
+        assert response["status"] == "ok"
+        assert "job" not in response
+        assert response["requested_symbols"] == []
+        assert response["diagnostics"][0]["code"] == "capital_flow_backfill_not_needed"
+        assert response["diagnostics"][0]["selection"] == "warehouse_missing_capital_flow"
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_service_coverage_summary_returns_exact_warehouse_coverage(tmp_path):
+    server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
+    server.state.warehouse.write_daily_bars(
+        pd.DataFrame(
+            {
+                "symbol": ["000001", "000001", "000002"],
+                "trade_date": pd.to_datetime(["2026-06-05", "2026-06-08", "2026-06-05"]),
+                "open": [10.0, 10.1, 20.0],
+                "high": [10.5, 10.6, 20.5],
+                "low": [9.8, 9.9, 19.8],
+                "close": [10.2, 10.3, 20.2],
+                "volume": [1000, 1100, 2000],
+                "main_net_inflow": [1_000_000.0, float("nan"), float("nan")],
+            }
+        )
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        response = _request_json("GET", f"http://127.0.0.1:{port}/coverage/summary")
+
+        datasets = {item["dataset"]: item for item in response["coverage"]}
+        assert datasets["daily_bars"]["missing_rows"] == 1
+        assert datasets["capital_flow"]["missing_rows"] == 2
     finally:
         server.shutdown()
         thread.join(timeout=5)

@@ -140,6 +140,31 @@ def test_full_market_job_uses_large_write_batches_for_daily_incremental_import(t
     assert warehouse.write_batches == [251]
 
 
+def test_full_market_job_counts_retried_existing_rows_as_returned_not_imported(tmp_path):
+    warehouse = Warehouse(tmp_path)
+    warehouse.write_daily_bars(FakeProvider().fetch_daily_bars("000001", "2026-06-09", "2026-06-09"))
+    manager = SyncJobManager(warehouse=warehouse, provider=FakeProvider())
+
+    status = manager.start_full_market(
+        symbols=["000001"],
+        start_date="2026-06-09",
+        end_date="2026-06-09",
+    )
+
+    eventually = None
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        eventually = manager.get_job(status.job_id)
+        if eventually and eventually.status == "completed":
+            break
+        sleep(0.02)
+
+    assert eventually is not None
+    assert eventually.status == "completed"
+    assert eventually.returned_rows == 1
+    assert eventually.imported_rows == 0
+
+
 def test_full_market_job_flushes_pending_rows_when_cancelled_before_next_batch(tmp_path):
     class CancelBeforeSecondBatch(SyncJobManager):
         def __post_init__(self):
