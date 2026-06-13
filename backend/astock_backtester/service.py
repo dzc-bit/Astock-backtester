@@ -47,7 +47,7 @@ class DataServiceState:
         self.cache = LocalCache(cache_dir)
         self.warehouse = Warehouse(cache_dir)
         self.akshare_provider = AkshareProvider()
-        self.provider = CompositeProvider([ADataProvider(), self.akshare_provider, HttpAStockProvider()])
+        self.provider = CompositeProvider([ADataProvider(), HttpAStockProvider(), self.akshare_provider])
         self.capital_flow_crawler = CapitalFlowCrawler()
         self.sync_manager = SyncJobManager(
             warehouse=self.warehouse,
@@ -119,19 +119,6 @@ class DataServiceState:
             return digest.hexdigest()
         except OSError:
             return None
-
-    def identity_payload(self) -> dict[str, Any]:
-        return {
-            "ok": True,
-            "cache_path": str(self.cache.root.resolve()),
-            "port": self.port,
-            "process_id": self.process_id,
-            "executable_path": self.executable_path,
-            "executable_sha256": self.executable_sha256,
-            "started_at": self.started_at.isoformat(),
-            "instance_id": self.instance_id,
-        }
-
 
 def _retained_realtime_snapshot(provider: Any, exc: Exception):
     retained = getattr(provider, "_last_successful_snapshot", None)
@@ -218,9 +205,7 @@ class DataServiceHandler(BaseHTTPRequestHandler):
             require_ohlc=True,
         )
         if frame.empty:
-            frame = _require_ohlc_rows(self.server.state.cache.read_daily_bars())
-        if frame.empty:
-            raise ValueError("No cached daily bars found. Import or fetch data before running a configured backtest.")
+            raise ValueError("主仓没有可回测的日线数据。请先在数据中心下载或补全数据。")
         return frame
 
     def _run_backtest_stream(self, payload: dict[str, Any]) -> None:
@@ -280,9 +265,6 @@ class DataServiceHandler(BaseHTTPRequestHandler):
         if self.path == "/ping":
             self._send_json({"ok": True})
             return
-        if self.path == "/identity":
-            self._send_json(self.server.state.identity_payload())
-            return
         if self.path == "/health":
             health = build_service_health(
                 self.server.state.cache,
@@ -295,6 +277,9 @@ class DataServiceHandler(BaseHTTPRequestHandler):
                 instance_id=self.server.state.instance_id,
             )
             self._send_json(health.model_dump(mode="json"))
+            return
+        if self.path == "/coverage/summary":
+            self._send_json({"coverage": self._coverage_summary()})
             return
         if self.path == "/logs/recent":
             self._send_json({"items": list(self.server.state.logs)})
@@ -384,7 +369,7 @@ class DataServiceHandler(BaseHTTPRequestHandler):
                 )
                 return
             if self.path == "/sync/full-market":
-                symbols = payload.get("symbols") or self.server.state.provider.list_symbols()
+                symbols = payload.get("symbols") or self._full_market_sync_symbols()
                 if not symbols:
                     raise ValueError("No symbols available for full-market sync.")
                 start_method = getattr(self.server.state.sync_manager, "start_full_market", None)
@@ -440,9 +425,39 @@ class DataServiceHandler(BaseHTTPRequestHandler):
             if self.path == "/fetch/capital-flow":
                 symbols = payload.get("symbols") or []
                 if not symbols:
-                    symbols = self._capital_flow_backfill_symbols()
+                    symbols = self._capital_flow_backfill_symbols(
+                        payload.get("start_date"),
+                        payload.get("end_date"),
+                    )
                     if not symbols:
-                        raise ValueError("No symbols available for capital-flow backfill.")
+                        self._send_json(
+                            {
+                                "status": "ok",
+                                "imported_rows": 0,
+                                "returned_rows": 0,
+                                "requested_symbols": [],
+                                "fetched_symbols": [],
+                                "missing_symbols": [],
+                                "skipped_symbols": [],
+                                "coverage": self._coverage_summary(),
+                                "logs": [
+                                    {
+                                        "level": "info",
+                                        "message": "Capital-flow coverage already complete for requested rows",
+                                    }
+                                ],
+                                "diagnostics": [
+                                    {
+                                        "code": "capital_flow_backfill_not_needed",
+                                        "source": "capital_flow_crawler",
+                                        "selection": "warehouse_missing_capital_flow",
+                                        "requested_symbols": 0,
+                                    }
+                                ],
+                                "failures": [],
+                            }
+                        )
+                        return
                     job = self.server.state.sync_manager.start_capital_flow_backfill(
                         symbols=symbols,
                         start_date=payload["start_date"],
@@ -475,6 +490,7 @@ class DataServiceHandler(BaseHTTPRequestHandler):
                                 {
                                     "code": "capital_flow_backfill_job_started",
                                     "source": "capital_flow_crawler",
+                                    "selection": "warehouse_missing_capital_flow",
                                     "job_id": job.job_id,
                                     "requested_symbols": len(symbols),
                                 }
@@ -541,16 +557,26 @@ class DataServiceHandler(BaseHTTPRequestHandler):
     def _fetch_capital_flow_from_crawler(self, symbols: list[str], start_date: str, end_date: str) -> dict[str, Any]:
         return self.server.state._fetch_capital_flow(symbols, start_date, end_date)
 
-    def _capital_flow_backfill_symbols(self) -> list[str]:
-        symbols: set[str] = set()
+    def _capital_flow_backfill_symbols(self, start_date: str | None, end_date: str | None) -> list[str]:
+        list_missing = getattr(self.server.state.warehouse, "list_symbols_missing_capital_flow", None)
+        if callable(list_missing):
+            return [str(symbol) for symbol in list_missing(start_date, end_date) if str(symbol).strip()]
+        return []
+
+    def _coverage_summary(self) -> list[dict[str, Any]]:
         try:
-            symbols.update(str(symbol) for symbol in self.server.state.provider.list_symbols())
+            coverage = self.server.state.warehouse.coverage()
         except Exception:
-            pass
-        frame = self.server.state.warehouse.read_daily_bars()
-        if not frame.empty and "symbol" in frame:
-            symbols.update(str(symbol) for symbol in frame["symbol"].dropna().astype(str).unique())
-        return sorted(symbol for symbol in symbols if symbol)
+            coverage = self.server.state.cache.coverage()
+        return [item.model_dump(mode="json") for item in coverage]
+
+    def _full_market_sync_symbols(self) -> list[str]:
+        list_local_symbols = getattr(self.server.state.warehouse, "list_daily_symbols", None)
+        if callable(list_local_symbols):
+            local_symbols = [str(symbol) for symbol in list_local_symbols() if str(symbol).strip()]
+            if local_symbols:
+                return local_symbols
+        return [str(symbol) for symbol in self.server.state.provider.list_symbols() if str(symbol).strip()]
 
 
 def create_server(host: str, port: int, cache_dir: str | Path) -> DataServiceServer:

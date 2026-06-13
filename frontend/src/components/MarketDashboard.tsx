@@ -43,6 +43,82 @@ function movementClass(value: number | null | undefined): "up-text" | "down-text
   return value > 0 ? "up-text" : "down-text";
 }
 
+function sourceLabel(source: string | null | undefined): string | null {
+  if (!source) {
+    return null;
+  }
+  return (
+    {
+      "cls-quote-index": "财联社指数",
+      "ashare-sina": "Ashare/Sina",
+      "cls-quote-breadth": "财联社涨跌分布",
+      "ths-market-summary": "同花顺市场总览",
+      "sina-a-share-live": "新浪实时个股",
+      "tencent-a-share-live": "腾讯实时个股",
+      "akshare-a-share-live": "AKShare 实时个股",
+      "heavy-market-crawler": "重型公开行情爬虫",
+      "browser-market-provider": "浏览器公开行情爬虫",
+      "eastmoney-a-share-spot": "东方财富轻量 spot",
+      "cls-hot-plate": "财联社热门板块",
+      "ths-hot-reason": "同花顺热点归因",
+      "ths-concept-section": "同花顺概念题材",
+      "ths-industry-html": "同花顺行业板块",
+      "sina-sector": "新浪行业板块",
+      "akshare-sector": "AKShare 概念板块",
+      "akshare-industry-sector": "AKShare 行业板块",
+      "eastmoney-sector": "东方财富概念板块",
+      "eastmoney-industry-sector": "东方财富行业板块",
+      "local-latest": "本地最近交易日",
+      "local-market-group": "本地板块聚合",
+      "local-yesterday-group": "本地昨日板块"
+    }[source] ?? source
+  );
+}
+
+function uniqueLabels(values: Array<string | null | undefined>): string[] {
+  const labels: string[] = [];
+  for (const value of values) {
+    const label = sourceLabel(value);
+    if (label && !labels.includes(label)) {
+      labels.push(label);
+    }
+  }
+  return labels;
+}
+
+function successfulSourceSummary(snapshot: RealtimeMarketSnapshot | null): string {
+  if (!snapshot) {
+    return "--";
+  }
+  const parts: string[] = [];
+  const indexSources = uniqueLabels(snapshot.indexes.map((quote) => quote.source));
+  if (indexSources.length > 0) {
+    parts.push(`指数 ${indexSources.join("/")}`);
+  }
+  const breadthSource = sourceLabel(snapshot.breadth?.source);
+  if (breadthSource) {
+    parts.push(`红绿 ${breadthSource}`);
+  }
+  const sectorSources = uniqueLabels(snapshot.strong_sectors.map((sector) => sector.source));
+  if (sectorSources.length > 0) {
+    parts.push(`板块 ${sectorSources.join("/")}`);
+  }
+  const yesterdaySources = uniqueLabels((snapshot.yesterday_strong_sectors ?? []).map((sector) => sector.source));
+  if (yesterdaySources.length > 0) {
+    parts.push(`昨日 ${yesterdaySources.join("/")}`);
+  }
+  return parts.length > 0 ? parts.join("；") : sourceLabel(snapshot.source) ?? "--";
+}
+
+function firstFailedAttempt(snapshot: RealtimeMarketSnapshot | null): string | null {
+  const diagnostics = snapshot?.diagnostics ?? [];
+  return (
+    diagnostics.find((message) =>
+      /失败|不可用|无效|不完整|未取得|返回空|超时|failed|timeout|no valid rows|unavailable|invalid/i.test(message)
+    ) ?? null
+  );
+}
+
 function refreshStatusLabel(meta: MarketRefreshMeta | undefined, isLoading: boolean): string {
   if (isLoading || meta?.status === "refreshing") {
     return "刷新中";
@@ -61,6 +137,8 @@ export function MarketDashboard({ snapshot, isLoading = false, refreshMeta }: Pr
   const statusLabel = snapshot?.status === "live" ? "实时" : snapshot?.status === "stale" ? "本地兜底" : "待连接";
   const refreshLabel = refreshStatusLabel(refreshMeta, isLoading);
   const phase = refreshMeta?.phase ?? snapshot?.market_phase;
+  const sourceSummary = successfulSourceSummary(snapshot);
+  const failedAttempt = firstFailedAttempt(snapshot);
 
   return (
     <section className="surface market-dashboard" aria-label="今日实时行情">
@@ -147,8 +225,8 @@ export function MarketDashboard({ snapshot, isLoading = false, refreshMeta }: Pr
       </div>
 
       <p className="market-footnote">
-        来源 {snapshot?.source ?? "--"} / 更新 {formatTime(snapshot?.updated_at)} / {snapshot?.message ?? "正在等待实时行情"}
-        {snapshot?.diagnostics?.length ? ` / ${snapshot.diagnostics[0]}` : ""}
+        成功来源 {sourceSummary} / 更新 {formatTime(snapshot?.updated_at)} / {snapshot?.message ?? "正在等待实时行情"}
+        {failedAttempt ? ` / 尝试未成功 ${failedAttempt}` : ""}
       </p>
     </section>
   );

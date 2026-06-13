@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { importDailyBars, loadClsFinance, loadDataServiceHealth } from "./api";
+import { importDailyBars, loadClsFinance, loadDataServiceHealth, startFullMarketSync } from "./api";
 
 describe("service fetch timeouts", () => {
   beforeEach(() => {
@@ -140,6 +140,56 @@ describe("service fetch timeouts", () => {
         source_url: "https://www.cls.cn/finance",
         anchors: expect.arrayContaining([expect.objectContaining({ name: "PCB" })]),
         up_pool: expect.arrayContaining([expect.objectContaining({ symbol: "601869" })])
+      })
+    });
+  });
+
+  it("keeps full-market sync startup alive while backend resolves the local stock pool", async () => {
+    let resolveFetch: ((response: Response) => void) | undefined;
+    let requestSignal: AbortSignal | undefined;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((_url: string, init?: RequestInit) => {
+        requestSignal = init?.signal as AbortSignal | undefined;
+        return new Promise<Response>((resolve, reject) => {
+          resolveFetch = resolve;
+          requestSignal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")));
+        });
+      })
+    );
+
+    const settled = startFullMarketSync("http://127.0.0.1:9010", "2026-06-09", "2026-06-10").then(
+      (value) => ({ ok: true as const, value }),
+      (error) => ({ ok: false as const, error })
+    );
+
+    await vi.advanceTimersByTimeAsync(12000);
+    expect(requestSignal?.aborted).toBe(false);
+
+    resolveFetch?.(
+      new Response(
+        JSON.stringify({
+          job: {
+            job_id: "sync-1",
+            mode: "full_market_bootstrap",
+            status: "running",
+            total_symbols: 2,
+            completed_symbols: 0,
+            failed_symbols: 0,
+            imported_rows: 0,
+            start_date: "2026-06-09",
+            end_date: "2026-06-10",
+            errors: []
+          }
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      )
+    );
+
+    await expect(settled).resolves.toEqual({
+      ok: true,
+      value: expect.objectContaining({
+        job: expect.objectContaining({ job_id: "sync-1", status: "running" })
       })
     });
   });

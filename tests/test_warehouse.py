@@ -86,6 +86,95 @@ def test_warehouse_merges_rows_by_symbol_and_trade_date(tmp_path):
     assert result.loc[0, "float_market_cap"] == 1500000000.0
 
 
+def test_warehouse_write_daily_bars_reports_only_changed_rows(tmp_path):
+    warehouse = Warehouse(tmp_path)
+
+    assert warehouse.write_daily_bars(_bars()) == 3
+    assert warehouse.write_daily_bars(_bars()) == 0
+    changed = warehouse.write_daily_bars(
+        pd.DataFrame(
+            {
+                "symbol": ["600519"],
+                "trade_date": ["2016-01-04"],
+                "open": [12.0],
+                "high": [12.5],
+                "low": [11.8],
+                "close": [12.2],
+                "volume": [2200],
+                "amount": [26840.0],
+                "float_market_cap": [1500000000.0],
+                "total_market_cap": [1600000000.0],
+            }
+        )
+    )
+
+    result = warehouse.read_daily_bars(symbols=["600519"], start_date="2016-01-04", end_date="2016-01-04")
+
+    assert changed == 1
+    assert len(result) == 1
+    assert result.loc[0, "close"] == 12.2
+
+
+def test_warehouse_write_daily_bars_deduplicates_incoming_rows(tmp_path):
+    warehouse = Warehouse(tmp_path)
+    frame = pd.DataFrame(
+        {
+            "symbol": ["600519", "600519"],
+            "trade_date": ["2026-06-09", "2026-06-09"],
+            "open": [10.0, 10.1],
+            "high": [10.5, 10.6],
+            "low": [9.8, 9.9],
+            "close": [10.2, 10.3],
+            "volume": [1000, 1100],
+            "amount": [10200.0, 11330.0],
+        }
+    )
+
+    assert warehouse.write_daily_bars(frame) == 1
+    assert warehouse.write_daily_bars(frame) == 0
+    result = warehouse.read_daily_bars(symbols=["600519"], start_date="2026-06-09", end_date="2026-06-09")
+
+    assert len(result) == 1
+    assert result.loc[0, "close"] == 10.3
+
+
+def test_warehouse_write_daily_bars_compacts_legacy_duplicate_partition_rows(tmp_path):
+    warehouse = Warehouse(tmp_path)
+    legacy_frame = pd.DataFrame(
+        {
+            "symbol": ["600519", "600519"],
+            "trade_date": pd.to_datetime(["2026-06-09", "2026-06-09"]),
+            "open": [10.0, 10.1],
+            "high": [10.5, 10.6],
+            "low": [9.8, 9.9],
+            "close": [10.2, 10.3],
+            "volume": [1000, 1100],
+        }
+    )
+    path = tmp_path / "warehouse" / "daily_bars" / "year=2026" / "daily_bars.parquet"
+    path.parent.mkdir(parents=True)
+    legacy_frame.to_parquet(path, index=False)
+
+    imported_rows = warehouse.write_daily_bars(
+        pd.DataFrame(
+            {
+                "symbol": ["600519"],
+                "trade_date": ["2026-06-09"],
+                "open": [10.1],
+                "high": [10.6],
+                "low": [9.9],
+                "close": [10.3],
+                "volume": [1100],
+            }
+        )
+    )
+    result = warehouse.read_daily_bars(symbols=["600519"], start_date="2026-06-09", end_date="2026-06-09")
+
+    assert imported_rows == 0
+    assert len(result) == 1
+    assert result.loc[0, "close"] == 10.3
+
+
 def test_warehouse_coverage_reports_daily_and_market_cap(tmp_path):
     warehouse = Warehouse(tmp_path)
     warehouse.write_daily_bars(_bars())
@@ -116,6 +205,29 @@ def test_warehouse_coverage_uses_partition_stats_without_full_read(tmp_path, mon
     assert coverage["market_cap"].missing_rows == 0
     assert coverage["capital_flow"].symbols == 0
     assert coverage["capital_flow"].missing_rows == 3
+
+
+def test_warehouse_coverage_counts_latest_daily_rows_missing_from_known_symbols(tmp_path):
+    warehouse = Warehouse(tmp_path)
+    warehouse.write_daily_bars(
+        pd.DataFrame(
+            {
+                "symbol": ["000001", "000002", "000003", "000001"],
+                "trade_date": ["2026-06-05", "2026-06-05", "2026-06-05", "2026-06-08"],
+                "open": [10.0, 10.0, 10.0, 10.2],
+                "high": [10.5, 10.5, 10.5, 10.4],
+                "low": [9.8, 9.8, 9.8, 10.0],
+                "close": [10.2, 10.2, 10.2, 10.3],
+                "volume": [1000, 1000, 1000, 1200],
+            }
+        )
+    )
+
+    coverage = {item.dataset: item for item in warehouse.coverage()}
+
+    assert coverage["daily_bars"].symbols == 3
+    assert coverage["daily_bars"].end_date.isoformat() == "2026-06-08"
+    assert coverage["daily_bars"].missing_rows == 2
 
 
 def test_warehouse_separates_capital_flow_only_rows_from_daily_bar_coverage(tmp_path):
@@ -257,6 +369,74 @@ def test_warehouse_coverage_ignores_short_listing_lag_but_counts_later_capital_f
     assert coverage["capital_flow"].missing_rows == 2
 
 
+def test_warehouse_lists_symbols_missing_capital_flow_without_complete_or_source_gap_rows(tmp_path):
+    warehouse = Warehouse(tmp_path)
+    warehouse.write_daily_bars(
+        pd.DataFrame(
+            {
+                "symbol": [
+                    "000001",
+                    "000001",
+                    "000002",
+                    "000002",
+                    "000003",
+                    "000004",
+                    "000005",
+                ],
+                "trade_date": [
+                    "2026-06-05",
+                    "2026-06-08",
+                    "2026-06-05",
+                    "2026-06-08",
+                    "2019-04-04",
+                    "2026-06-05",
+                    "2026-06-05",
+                ],
+                "open": [10.0, 10.1, 20.0, 20.1, 8.0, float("nan"), 6.0],
+                "high": [10.5, 10.6, 20.5, 20.6, 8.5, float("nan"), 6.5],
+                "low": [9.8, 9.9, 19.8, 19.9, 7.8, float("nan"), 5.8],
+                "close": [10.2, 10.3, 20.2, 20.3, 8.2, float("nan"), 6.2],
+                "volume": [1000, 1100, 2000, 2100, 800, 0, 600],
+                "main_net_inflow": [
+                    1_000_000.0,
+                    float("nan"),
+                    2_000_000.0,
+                    2_100_000.0,
+                    float("nan"),
+                    float("nan"),
+                    float("nan"),
+                ],
+            }
+        )
+    )
+
+    symbols = warehouse.list_symbols_missing_capital_flow("2019-04-01", "2026-06-08")
+
+    assert symbols == ["000001", "000005"]
+
+
+def test_warehouse_list_symbols_missing_capital_flow_respects_date_range(tmp_path):
+    warehouse = Warehouse(tmp_path)
+    warehouse.write_daily_bars(
+        pd.DataFrame(
+            {
+                "symbol": ["000001", "000001", "000002"],
+                "trade_date": ["2026-06-05", "2026-06-08", "2026-06-05"],
+                "open": [10.0, 10.1, 20.0],
+                "high": [10.5, 10.6, 20.5],
+                "low": [9.8, 9.9, 19.8],
+                "close": [10.2, 10.3, 20.2],
+                "volume": [1000, 1100, 2000],
+                "main_net_inflow": [1_000_000.0, float("nan"), float("nan")],
+            }
+        )
+    )
+
+    symbols = warehouse.list_symbols_missing_capital_flow("2026-06-05", "2026-06-05")
+
+    assert symbols == ["000002"]
+
+
 def test_warehouse_reads_latest_daily_bars_from_recent_partitions(tmp_path):
     warehouse = Warehouse(tmp_path)
     warehouse.write_daily_bars(_bars())
@@ -328,3 +508,21 @@ def test_warehouse_overwrites_corrupt_partition_when_new_rows_arrive(tmp_path):
 
     assert loaded["trade_date"].dt.strftime("%Y-%m-%d").tolist() == ["2026-05-26"]
     assert loaded.loc[0, "close"] == 10.2
+
+
+def test_warehouse_lists_daily_symbols_with_column_projection(tmp_path, monkeypatch):
+    warehouse = Warehouse(tmp_path)
+    warehouse.write_daily_bars(_bars())
+
+    original_read_parquet = warehouse._safe_read_parquet
+    requested_columns = []
+
+    def read_with_column_probe(path, columns=None):
+        requested_columns.append(columns)
+        return original_read_parquet(path, columns=columns)
+
+    monkeypatch.setattr(warehouse, "_safe_read_parquet", read_with_column_probe)
+
+    assert warehouse.list_daily_symbols() == ["000001", "600519"]
+    assert requested_columns
+    assert all(columns == ["symbol"] for columns in requested_columns)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import time
 
 import pandas as pd
 
@@ -14,8 +15,10 @@ from astock_backtester.data.operations import (
     import_daily_bars_into_cache,
 )
 from astock_backtester.data.realtime import (
+    RealtimeMarketProvider,
     _aggregate_ths_hot_topics,
 )
+from astock_backtester.models import DatasetCoverage, MarketBreadth
 from astock_backtester.data.warehouse import Warehouse
 
 
@@ -115,6 +118,99 @@ def test_coverage_reports_missing_ranges_and_optional_field_gaps(tmp_path):
     assert [day.isoformat() for day in aaa.missing_trade_dates] == ["2024-01-03"]
     assert [day.isoformat() for day in aaa.missing_capital_flow_dates] == ["2024-01-04"]
     assert [day.isoformat() for day in aaa.missing_market_cap_dates] == ["2024-01-04"]
+
+
+def test_full_market_coverage_uses_lightweight_warehouse_summary(tmp_path):
+    cache = LocalCache(tmp_path)
+
+    class BlockingWarehouse:
+        def health_coverage(self):
+            return [
+                DatasetCoverage(
+                    dataset="daily_bars",
+                    symbols=2,
+                    start_date=pd.Timestamp("2024-01-02").date(),
+                    end_date=pd.Timestamp("2024-01-03").date(),
+                    missing_rows=0,
+                )
+            ]
+
+        def read_latest_daily_bars(self, days=1):
+            return pd.DataFrame(
+                {
+                    "symbol": ["AAA", "BBB"],
+                    "trade_date": pd.to_datetime(["2024-01-03", "2024-01-03"]),
+                    "open": [10.0, 20.0],
+                    "high": [10.5, 20.5],
+                    "low": [9.5, 19.5],
+                    "close": [10.2, 20.1],
+                }
+            )
+
+        def read_daily_bars(self, *args, **kwargs):
+            raise AssertionError("default full-market coverage must not scan all daily bars")
+
+    details = build_daily_bars_coverage(cache, BlockingWarehouse())
+
+    assert [item.symbol for item in details.items] == ["AAA", "BBB"]
+    assert [item.end_date.isoformat() for item in details.items] == ["2024-01-03", "2024-01-03"]
+
+
+def test_realtime_breadth_respects_outer_time_budget(tmp_path):
+    provider = RealtimeMarketProvider(Warehouse(tmp_path), breadth_time_budget=0.01)
+
+    def slow_breadth():
+        import time
+
+        time.sleep(1)
+        return MarketBreadth(up=4000, down=1000, flat=100, total=5100, source="slow")
+
+    provider._fetch_cls_breadth = slow_breadth
+    provider._fetch_ths_market_summary_breadth = slow_breadth
+    provider._fetch_sina_breadth = slow_breadth
+
+    diagnostics: list[str] = []
+    start = time.perf_counter()
+    result = provider._call_live_breadth(diagnostics)
+    elapsed = time.perf_counter() - start
+
+    assert result is None
+    assert elapsed < 0.5
+    assert any("timeout" in item.lower() or "超时" in item for item in diagnostics)
+
+
+def test_realtime_breadth_continues_to_fallback_when_cls_times_out(tmp_path):
+    provider = RealtimeMarketProvider(Warehouse(tmp_path), breadth_time_budget=0.2)
+    provider._latest_local_symbol_count = lambda: 5100
+    provider._coverage_symbol_count = lambda: 0
+    calls: list[str] = []
+
+    def slow_cls_breadth():
+        calls.append("cls")
+        time.sleep(1)
+        return MarketBreadth(up=3500, down=1400, flat=120, total=5020, source="cls-quote-breadth")
+
+    def ths_breadth():
+        calls.append("ths")
+        return MarketBreadth(up=3300, down=1500, flat=220, total=5020, source="ths-market-summary")
+
+    provider._fetch_cls_breadth = slow_cls_breadth
+    provider._fetch_ths_market_summary_breadth = ths_breadth
+    provider._fetch_sina_breadth = lambda: None
+    provider._fetch_tencent_breadth = lambda diagnostics: None
+    provider._fetch_akshare_breadth = lambda diagnostics: None
+    provider._fetch_heavy_breadth = lambda diagnostics: None
+
+    diagnostics: list[str] = []
+    start = time.perf_counter()
+    result = provider._call_live_breadth(diagnostics)
+    elapsed = time.perf_counter() - start
+
+    assert result is not None
+    assert result.source == "ths-market-summary"
+    assert calls == ["cls", "ths"]
+    assert elapsed < 0.5
+    assert any("财联社涨跌分布" in item and ("timeout" in item.lower() or "超时" in item) for item in diagnostics)
 
 
 def test_coverage_filters_symbols_dates_and_ignores_weekends(tmp_path):
@@ -287,6 +383,49 @@ def test_fetch_result_reports_partial_success(tmp_path):
     assert result.missing_symbols == ["BBB"]
     assert result.imported_rows == 2
     assert any(entry.level == "warning" and "BBB" in entry.message for entry in result.logs)
+
+
+def test_fetch_daily_bars_reports_partial_when_rows_stop_before_requested_latest_trade_date(tmp_path):
+    cache = LocalCache(tmp_path)
+    warehouse = Warehouse(tmp_path)
+
+    def fake_fetcher(symbols: list[str], start_date: str, end_date: str) -> pd.DataFrame:
+        assert symbols == ["AAA"]
+        assert start_date == "2026-06-03"
+        assert end_date == "2026-06-05"
+        return _bars(
+            [
+                ("AAA", "2026-06-03", 10.0, 11.0, 9.0, 10.5, 1000, 0.1, 9_000_000_000.0, 1_500_000.0, False, False, 90),
+            ]
+        )
+
+    result = fetch_daily_bars_into_cache(
+        cache=cache,
+        warehouse=warehouse,
+        fetcher=fake_fetcher,
+        symbols=["AAA"],
+        start_date="2026-06-03",
+        end_date="2026-06-05",
+    )
+
+    assert result.status == "partial"
+    assert result.imported_rows == 1
+    assert result.fetched_symbols == ["AAA"]
+    assert result.missing_symbols == ["AAA"]
+    assert result.failures == [
+        {
+            "symbol": "AAA",
+            "code": "date_coverage_shortfall",
+            "error": "daily bars only reached 2026-06-03; requested latest trade date is 2026-06-05",
+        }
+    ]
+    assert any(
+        item["code"] == "date_coverage_shortfall"
+        and item["symbol"] == "AAA"
+        and item["latest_trade_date"] == "2026-06-03"
+        and item["requested_latest_trade_date"] == "2026-06-05"
+        for item in result.diagnostics
+    )
 
 
 def test_fetch_daily_bars_uses_capital_flow_crawler_as_primary_inflow_source(tmp_path):
@@ -879,6 +1018,34 @@ def test_health_prefers_warehouse_coverage_when_available(tmp_path):
     assert datasets["capital_flow"].missing_rows == 1
 
 
+def test_health_uses_lightweight_warehouse_coverage(tmp_path):
+    cache = LocalCache(tmp_path)
+    warehouse = Warehouse(tmp_path)
+    warehouse.write_daily_bars(
+        _bars(
+            [
+                ("AAA", "2024-01-02", 10.0, 11.0, 9.0, 10.5, 1000, 0.1, 9_000_000_000.0, float("nan"), False, False, 90),
+                ("BBB", "2024-01-03", 10.5, 11.5, 10.0, 11.0, 1200, 0.1, float("nan"), 1_500_000.0, False, False, 91),
+            ]
+        )
+    )
+
+    def fail_full_coverage():
+        raise AssertionError("health should not run full warehouse coverage")
+
+    warehouse.coverage = fail_full_coverage  # type: ignore[method-assign]
+
+    health = build_service_health(cache=cache, warehouse=warehouse, port=8765)
+    datasets = {item.dataset: item for item in health.coverage}
+
+    assert health.ok is True
+    assert datasets["daily_bars"].symbols == 2
+    assert datasets["daily_bars"].start_date.isoformat() == "2024-01-02"
+    assert datasets["daily_bars"].end_date.isoformat() == "2024-01-03"
+    assert datasets["market_cap"].symbols == 1
+    assert datasets["capital_flow"].symbols == 1
+
+
 def test_health_falls_back_to_cache_when_warehouse_coverage_fails(tmp_path):
     class BrokenWarehouse:
         def coverage(self):
@@ -927,14 +1094,72 @@ def test_daily_bars_coverage_falls_back_to_cache_when_warehouse_read_fails(tmp_p
     assert details.items[0].end_date.isoformat() == "2026-06-05"
 
 
-def test_coverage_prefers_warehouse_rows_when_available(tmp_path):
+def test_operation_coverage_does_not_fallback_to_legacy_cache_when_warehouse_is_empty(tmp_path):
     cache = LocalCache(tmp_path)
     warehouse = Warehouse(tmp_path)
-    warehouse.write_daily_bars(
+    cache.write_daily_bars(
         _bars(
             [
                 ("AAA", "2024-01-02", 10.0, 11.0, 9.0, 10.5, 1000, 0.1, 9_000_000_000.0, 1_500_000.0, False, False, 90),
-                ("AAA", "2024-01-03", 10.5, 11.5, 10.0, 11.0, 1200, 0.1, 9_100_000_000.0, 1_600_000.0, False, False, 91),
+            ]
+        )
+    )
+
+    result = fetch_daily_bars_into_cache(
+        cache=cache,
+        warehouse=warehouse,
+        fetcher=lambda symbols, start_date, end_date: pd.DataFrame(),
+        symbols=["BBB"],
+        start_date="2026-06-11",
+        end_date="2026-06-12",
+    )
+
+    assert result.coverage == [
+        DatasetCoverage(dataset="daily_bars", symbols=0, start_date=None, end_date=None),
+        DatasetCoverage(dataset="market_cap", symbols=0, start_date=None, end_date=None),
+        DatasetCoverage(dataset="capital_flow", symbols=0, start_date=None, end_date=None),
+    ]
+
+
+def test_coverage_prefers_warehouse_rows_when_available(tmp_path):
+    cache = LocalCache(tmp_path)
+    warehouse = Warehouse(tmp_path)
+    cache.write_daily_bars(
+        _bars(
+            [
+                ("AAA", "2024-01-02", 10.0, 11.0, 9.0, 10.5, 1000, 0.1, 9_000_000_000.0, 1_500_000.0, False, False, 90),
+            ]
+        )
+    )
+    warehouse.write_daily_bars(
+        _bars(
+            [
+                ("AAA", "2026-06-11", 10.5, 11.5, 10.0, 11.0, 1200, 0.1, 9_100_000_000.0, 1_600_000.0, False, False, 91),
+                ("AAA", "2026-06-12", 11.0, 11.8, 10.8, 11.4, 1300, 0.1, 9_200_000_000.0, 1_700_000.0, False, False, 92),
+            ]
+        )
+    )
+
+    details = build_daily_bars_coverage(
+        cache=cache,
+        warehouse=warehouse,
+        symbols=["AAA"],
+        start_date="2026-06-11",
+        end_date="2026-06-12",
+    )
+
+    assert [item.symbol for item in details.items] == ["AAA"]
+    assert details.items[0].rows == 2
+    assert details.items[0].end_date.isoformat() == "2026-06-12"
+
+
+def test_coverage_does_not_report_legacy_cache_when_main_warehouse_is_empty(tmp_path):
+    cache = LocalCache(tmp_path)
+    warehouse = Warehouse(tmp_path)
+    cache.write_daily_bars(
+        _bars(
+            [
+                ("AAA", "2024-01-02", 10.0, 11.0, 9.0, 10.5, 1000, 0.1, 9_000_000_000.0, 1_500_000.0, False, False, 90),
             ]
         )
     )
@@ -944,11 +1169,46 @@ def test_coverage_prefers_warehouse_rows_when_available(tmp_path):
         warehouse=warehouse,
         symbols=["AAA"],
         start_date="2024-01-02",
-        end_date="2024-01-03",
+        end_date="2024-01-02",
     )
 
-    assert [item.symbol for item in details.items] == ["AAA"]
-    assert details.items[0].rows == 2
+    assert details.items == []
+
+
+def test_capital_flow_complete_legacy_cache_is_migrated_to_main_warehouse(tmp_path):
+    cache = LocalCache(tmp_path)
+    warehouse = Warehouse(tmp_path)
+    cache.write_daily_bars(
+        _bars(
+            [
+                ("AAA", "2026-06-11", 10.0, 11.0, 9.0, 10.5, 1000, 0.1, 9_000_000_000.0, 1_500_000.0, False, False, 90),
+                ("AAA", "2026-06-12", 10.5, 11.5, 10.0, 11.0, 1200, 0.1, 9_100_000_000.0, 1_600_000.0, False, False, 91),
+            ]
+        )
+    )
+
+    calls = []
+
+    def fail_if_called(symbols: list[str], start_date: str, end_date: str) -> dict:
+        calls.append((symbols, start_date, end_date))
+        raise AssertionError("complete legacy cache should be migrated, not refetched")
+
+    result = fetch_capital_flow_into_cache(
+        cache=cache,
+        warehouse=warehouse,
+        capital_flow_fetcher=fail_if_called,
+        symbols=["AAA"],
+        start_date="2026-06-11",
+        end_date="2026-06-12",
+    )
+
+    stored = warehouse.read_daily_bars(symbols=["AAA"], start_date="2026-06-11", end_date="2026-06-12")
+
+    assert calls == []
+    assert result.status == "ok"
+    assert result.skipped_symbols == ["AAA"]
+    assert stored["trade_date"].dt.strftime("%Y-%m-%d").tolist() == ["2026-06-11", "2026-06-12"]
+    assert stored["main_net_inflow"].tolist() == [1_500_000.0, 1_600_000.0]
 
 
 def test_import_syncs_warehouse_when_provided(tmp_path):

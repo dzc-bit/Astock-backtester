@@ -81,3 +81,33 @@ it("shows refresh fallback metadata while preserving the last successful snapsho
   expect(screen.getByText(/收盘后/)).toBeInTheDocument();
   expect(screen.getByText(/实时接口暂不可用/)).toBeInTheDocument();
 });
+
+it("separates successful realtime sources from failed attempted sources", () => {
+  render(
+    <MarketDashboard
+      snapshot={buildSnapshot({
+        status: "live",
+        source: "ashare-sina+cls-quote-breadth+cls-hot-plate",
+        indexes: [
+          {
+            symbol: "sh000001",
+            name: "上证指数",
+            last: 4010.03,
+            previous_close: 3959.34,
+            change: 50.69,
+            change_pct: 0.0128,
+            source: "ashare-sina",
+            updated_at: "2026-06-09T15:30:39+08:00"
+          }
+        ],
+        breadth: null,
+        strong_sectors: [],
+        diagnostics: ["cls-hot-plate strong-sector source returned no valid rows."]
+      })}
+    />
+  );
+
+  expect(screen.getByText(/成功来源 指数 Ashare\/Sina/)).toBeInTheDocument();
+  expect(screen.getByText(/尝试未成功 cls-hot-plate strong-sector source returned no valid rows\./)).toBeInTheDocument();
+  expect(screen.queryByText(/来源 ashare-sina\+cls-quote-breadth\+cls-hot-plate/)).not.toBeInTheDocument();
+});

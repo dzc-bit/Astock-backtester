@@ -6,6 +6,7 @@ import time as monotonic_time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta, timezone
+from threading import Lock
 from typing import Any, Callable, Iterable
 
 import pandas as pd
@@ -342,6 +343,14 @@ def _append_yesterday_sector_note(message: str, yesterday_sectors: list[SectorMo
     return f"{message} {YESTERDAY_SECTOR_TRACKING_NOTE}"
 
 
+def _unique_sources(values: Iterable[str | None]) -> list[str]:
+    sources: list[str] = []
+    for value in values:
+        if value and value not in sources:
+            sources.append(value)
+    return sources
+
+
 def _market_phase(now: datetime) -> str:
     local = now.astimezone(timezone(timedelta(hours=8)))
     if local.weekday() >= 5:
@@ -471,6 +480,8 @@ class RealtimeMarketProvider:
     _last_successful_snapshot: RealtimeMarketSnapshot | None = field(default=None, init=False, repr=False)
     _skip_local_topic_fetch_once: bool = field(default=False, init=False, repr=False)
     _heavy_market_provider: HeavyMarketCrawlerProvider | None = field(default=None, init=False, repr=False)
+    _cls_home_payload_cache: dict[str, Any] | None = field(default=None, init=False, repr=False)
+    _cls_home_payload_lock: Lock = field(default_factory=Lock, init=False, repr=False)
 
     def market_snapshot(self) -> RealtimeMarketSnapshot:
         for event in self.market_snapshot_events():
@@ -493,6 +504,7 @@ class RealtimeMarketProvider:
         self._ths_industry_rows_cache = None
         self._last_live_sector_rows = []
         self._skip_local_topic_fetch_once = False
+        self._cls_home_payload_cache = None
 
         indexes: list[MarketIndexQuote] = []
         live_breadth: MarketBreadth | None = None
@@ -584,7 +596,7 @@ class RealtimeMarketProvider:
             diagnostics.append("实时强势题材接口暂不可用，已回退到本地最近交易日题材聚合。")
         source_parts: list[str] = []
         if indexes:
-            source_parts.append("ashare-sina")
+            source_parts.extend(_unique_sources(quote.source for quote in indexes))
         if live_breadth:
             source_parts.append(live_breadth.source)
         elif local_snapshot.breadth:
@@ -599,7 +611,11 @@ class RealtimeMarketProvider:
         if not indexes:
             message = local_snapshot.message
         else:
-            message = self._build_live_message(live_breadth, live_sectors)
+            message = self._build_live_message(
+                live_breadth,
+                live_sectors,
+                index_source=indexes[0].source if indexes else None,
+            )
         message = _append_yesterday_sector_note(message, yesterday_sectors)
         snapshot = RealtimeMarketSnapshot(
             status=status,
@@ -639,6 +655,20 @@ class RealtimeMarketProvider:
         yield {"type": "result", "snapshot": snapshot}
 
     def _call_live_breadth(self, diagnostics: list[str]) -> MarketBreadth | None:
+        if self.breadth_time_budget is not None:
+            executor = ThreadPoolExecutor(max_workers=1)
+            future = executor.submit(self._call_live_breadth_unbounded, diagnostics)
+            try:
+                return future.result(timeout=self.breadth_time_budget)
+            except TimeoutError:
+                future.cancel()
+                diagnostics.append(f"realtime breadth source timeout after {self.breadth_time_budget:g}s.")
+                return None
+            finally:
+                executor.shutdown(wait=False, cancel_futures=True)
+        return self._call_live_breadth_unbounded(diagnostics)
+
+    def _call_live_breadth_unbounded(self, diagnostics: list[str]) -> MarketBreadth | None:
         try:
             return self._fetch_live_breadth(diagnostics)
         except TypeError:
@@ -694,11 +724,14 @@ class RealtimeMarketProvider:
         return quotes
 
     def _fetch_cls_home_payload(self) -> dict[str, Any]:
-        return cls_request_json(
-            self.requester,
-            CLS_QUOTE_HOME_URL,
-            timeout=min(self.timeout, 2.5),
-        )
+        with self._cls_home_payload_lock:
+            if self._cls_home_payload_cache is None:
+                self._cls_home_payload_cache = cls_request_json(
+                    self.requester,
+                    CLS_QUOTE_HOME_URL,
+                    timeout=min(self.timeout, 2.5),
+                )
+            return self._cls_home_payload_cache
 
     def _fetch_cls_indexes(self) -> list[MarketIndexQuote]:
         try:
@@ -835,16 +868,39 @@ class RealtimeMarketProvider:
         if self.allow_eastmoney_breadth_fallback:
             fetchers.append(("东方财富轻量 spot 兜底", lambda: self._fetch_eastmoney_breadth(diagnostics)))
         for label, fetcher in fetchers:
-            try:
-                breadth = fetcher()
-            except Exception as exc:
-                diagnostics.append(f"{label}红绿家数读取失败：{exc}")
-                continue
+            breadth = self._call_breadth_fetcher_with_budget(label, fetcher, diagnostics)
             if breadth is None:
                 continue
             if self._breadth_is_complete(breadth, local_symbol_count, diagnostics):
                 return breadth
         return None
+
+    def _call_breadth_fetcher_with_budget(
+        self,
+        label: str,
+        fetcher: Callable[[], MarketBreadth | None],
+        diagnostics: list[str],
+    ) -> MarketBreadth | None:
+        if self.breadth_time_budget is None:
+            try:
+                return fetcher()
+            except Exception as exc:
+                diagnostics.append(f"{label}红绿家数读取失败：{exc}")
+                return None
+        per_source_timeout = min(self.timeout, max(0.01, self.breadth_time_budget / 4))
+        executor = ThreadPoolExecutor(max_workers=1)
+        future = executor.submit(fetcher)
+        try:
+            return future.result(timeout=per_source_timeout)
+        except TimeoutError:
+            future.cancel()
+            diagnostics.append(f"{label}红绿家数读取超时：{per_source_timeout:g}秒，继续尝试后续来源。")
+            return None
+        except Exception as exc:
+            diagnostics.append(f"{label}红绿家数读取失败：{exc}")
+            return None
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
 
     def _fetch_cls_breadth(self) -> MarketBreadth | None:
         payload = self._fetch_cls_home_payload()
@@ -1502,7 +1558,8 @@ class RealtimeMarketProvider:
 
     def _coverage_symbol_count(self) -> int:
         try:
-            coverage = self.warehouse.coverage()
+            health_coverage = getattr(self.warehouse, "health_coverage", None)
+            coverage = health_coverage() if callable(health_coverage) else self.warehouse.coverage()
         except Exception:
             return 0
         for item in coverage:
@@ -1514,8 +1571,14 @@ class RealtimeMarketProvider:
         self,
         live_breadth: MarketBreadth | None,
         live_sectors: list[SectorMover],
+        index_source: str | None = "ashare-sina",
     ) -> str:
+        index_label = {
+            "cls-quote-index": "财联社指数",
+            "ashare-sina": "Ashare/Sina",
+        }.get(index_source, "实时接口")
         breadth_label = {
+            "cls-quote-breadth": "财联社涨跌分布",
             "ths-market-summary": "同花顺市场总览",
             "sina-a-share-live": "新浪实时个股",
             "tencent-a-share-live": "腾讯实时个股",
@@ -1525,6 +1588,7 @@ class RealtimeMarketProvider:
             "eastmoney-a-share-spot": "东方财富轻量 spot 备选",
         }.get(live_breadth.source if live_breadth else None)
         sector_label = {
+            "cls-hot-plate": "财联社热门板块",
             "ths-hot-reason": "同花顺热点归因",
             "ths-concept-section": "同花顺概念题材板块",
             "ths-industry-html": "同花顺行业板块总览",
@@ -1536,12 +1600,12 @@ class RealtimeMarketProvider:
         }.get(live_sectors[0].source if live_sectors else None)
 
         if sector_label and breadth_label:
-            return f"实时指数来自 Ashare/Sina，强势题材来自{sector_label}，红绿家数来自{breadth_label}。"
+            return f"实时指数来自{index_label}，强势题材来自{sector_label}，红绿家数来自{breadth_label}。"
         if sector_label:
-            return f"实时指数来自 Ashare/Sina，强势题材来自{sector_label}，红绿家数暂不可用，未展示全市场宽度。"
+            return f"实时指数来自{index_label}，强势题材来自{sector_label}，红绿家数暂不可用，未展示全市场宽度。"
         if breadth_label:
-            return f"实时指数来自 Ashare/Sina，红绿家数来自{breadth_label}，强势题材暂不可用。"
-        return "实时指数来自 Ashare/Sina，红绿家数与强势题材暂不可用，已保留可用的最近数据。"
+            return f"实时指数来自{index_label}，红绿家数来自{breadth_label}，强势题材暂不可用。"
+        return f"实时指数来自{index_label}，红绿家数与强势题材暂不可用，已保留可用的最近数据。"
 
     def _snapshot_from_local(self, now: datetime) -> RealtimeMarketSnapshot:
         try:
