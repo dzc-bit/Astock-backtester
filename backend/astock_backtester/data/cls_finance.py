@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
+import subprocess
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
+from pathlib import Path
 from typing import Any, Callable
 
 import requests
@@ -39,7 +42,8 @@ THS_MARKET_DEGREE_SOURCE = "ths-market-summary"
 THS_MARKET_DEGREE_LABEL = "同花顺大盘评级"
 CLS_MARKET_DEGREE_SOURCE = "cls-finance-emotion"
 CLS_MARKET_DEGREE_LABEL = "财联社市场热度"
-THS_MARKET_BOARD_URL = "https://q.10jqka.com.cn/index/index/board"
+THS_MARKET_BOARD_URL = "http://q.10jqka.com.cn/index/index/board"
+THS_CHAMELEON_URL = "https://s.thsi.cn/js/chameleon/chameleon.1.7.min.1781803.js"
 THS_MARKET_INDEXFLASH_URLS = (
     "http://q.10jqka.com.cn/api.php?t=indexflash&",
     "https://q.10jqka.com.cn/api.php?t=indexflash&",
@@ -65,6 +69,7 @@ THS_MARKET_DEGREE_RE = re.compile(
 class ClsFinanceProvider:
     requester: Callable[..., requests.Response] = requests.get
     timeout: float = 5.0
+    browser_cookie_getter: Callable[[], str | None] | None = None
 
     def current_board(self) -> ClsFinanceResponse:
         diagnostics: list[str] = []
@@ -243,12 +248,25 @@ class ClsFinanceProvider:
 
     def _read_ths_market_degree(self, diagnostics: list[str]) -> float | None:
         errors: list[str] = []
+        browser_cookie: str | None = None
+        browser_cookie_read = False
         for url in THS_MARKET_DEGREE_URLS:
+            headers = dict(THS_MARKET_SCORE_HEADERS)
+            if url in THS_MARKET_INDEXFLASH_URLS:
+                if not browser_cookie_read:
+                    browser_cookie_read = True
+                    try:
+                        getter = self.browser_cookie_getter or _read_ths_browser_cookie
+                        browser_cookie = getter()
+                    except Exception as exc:
+                        errors.append(f"同花顺浏览器校验读取失败：{exc}")
+                if browser_cookie:
+                    headers["Cookie"] = browser_cookie
             try:
                 response = self.requester(
                     url,
                     timeout=min(self.timeout, 3.0),
-                    headers=THS_MARKET_SCORE_HEADERS,
+                    headers=headers,
                 )
                 response.raise_for_status()
             except Exception as exc:
@@ -343,3 +361,63 @@ def _normalize_ths_market_degree(value: object) -> float | None:
     if parsed <= 100:
         return parsed / 10
     return None
+
+
+def _read_ths_browser_cookie() -> str | None:
+    node = _resolve_node_executable()
+    if node is None:
+        return None
+    script = _ths_browser_cookie_script()
+    try:
+        completed = subprocess.run(
+            [node, "-e", script],
+            cwd=_project_root(),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=8,
+        )
+    except Exception:
+        return None
+    cookie = completed.stdout.strip()
+    if completed.returncode != 0 or "v=" not in cookie:
+        return None
+    return cookie
+
+
+def _resolve_node_executable() -> str | None:
+    project_node = _project_root() / ".tools" / "node-v20.18.1-win-x64" / "node.exe"
+    if project_node.exists():
+        return str(project_node)
+    return shutil.which("node")
+
+
+def _project_root() -> Path:
+    return Path(__file__).resolve().parents[3]
+
+
+def _ths_browser_cookie_script() -> str:
+    return f"""
+const {{ JSDOM, VirtualConsole }} = require("jsdom");
+
+(async () => {{
+  const virtualConsole = new VirtualConsole();
+  virtualConsole.on("error", () => {{}});
+  virtualConsole.on("warn", () => {{}});
+  const dom = new JSDOM(
+    "<!doctype html><html><head><script src=\\"{THS_CHAMELEON_URL}\\"></script></head><body></body></html>",
+    {{
+      url: "{THS_MARKET_BOARD_URL}",
+      resources: "usable",
+      runScripts: "dangerously",
+      pretendToBeVisual: true,
+      virtualConsole,
+      userAgent: "Mozilla/5.0"
+    }}
+  );
+  await new Promise((resolve) => setTimeout(resolve, 3000));
+  const cookie = dom.window.document.cookie || "";
+  dom.window.close();
+  process.stdout.write(cookie);
+}})().catch(() => process.exit(1));
+"""

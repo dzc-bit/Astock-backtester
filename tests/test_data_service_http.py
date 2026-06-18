@@ -2925,6 +2925,60 @@ def test_service_market_finance_prefers_ths_market_degree_for_score_card(tmp_pat
         thread.join(timeout=5)
 
 
+def test_service_market_finance_uses_browser_cookie_for_ths_indexflash(tmp_path):
+    class FakeResponse:
+        encoding = "utf-8"
+
+        def __init__(self, payload=None, text=""):
+            self._payload = payload or {}
+            self.text = text
+
+        def raise_for_status(self):
+            return
+
+        def json(self):
+            return self._payload
+
+    seen_cookies = []
+
+    def requester(url, **kwargs):
+        if "quote/index/tline" in url:
+            return FakeResponse({"code": 200, "data": []})
+        if "v3/transaction/anchor" in url:
+            return FakeResponse({"errno": 0, "data": []})
+        if "quote/index/basic" in url:
+            return FakeResponse({"code": 200, "data": {}})
+        if "v2/quote/a/stock/emotion" in url:
+            return FakeResponse({"code": 200, "data": {}})
+        if "quote/index/up_down_analysis" in url:
+            return FakeResponse({"code": 200, "data": []})
+        if "q.10jqka.com.cn/index/index/board" in url:
+            return FakeResponse(text="<html><body>board</body></html>")
+        if "q.10jqka.com.cn/api.php?t=indexflash" in url:
+            cookie = kwargs.get("headers", {}).get("Cookie") or ""
+            seen_cookies.append(cookie)
+            if cookie == "v=browser-cookie":
+                return FakeResponse(text='{"dppj_data": 7.8}')
+            raise AssertionError(f"missing cookie on indexflash request: {cookie!r}")
+        raise AssertionError(f"unexpected url: {url}")
+
+    server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
+    server.state.finance_provider.requester = requester
+    server.state.finance_provider.browser_cookie_getter = lambda: "v=browser-cookie"
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        response = _request_json("GET", f"http://127.0.0.1:{port}/market/finance")
+
+        assert response["emotion"]["market_degree"] == 7.8
+        assert response["emotion"]["market_degree_source"] == "ths-market-summary"
+        assert seen_cookies == ["v=browser-cookie"]
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
 def test_service_market_finance_returns_empty_board_when_provider_raises(tmp_path):
     class BrokenFinanceProvider:
         def current_board(self):
