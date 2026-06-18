@@ -111,6 +111,26 @@ it("renders explicit fallback chips when CLS anchors and limit-up samples are em
   expect(screen.getAllByText("暂无明确要点").length).toBeGreaterThanOrEqual(1);
 });
 
+it("labels the score card as Tonghuashun market rating when the score comes from q.10jqka.com", () => {
+  const finance = {
+    ...buildFinance(),
+    emotion: {
+      ...buildFinance().emotion,
+      market_degree: 7.3,
+      market_degree_source: "ths-market-summary",
+      market_degree_label: "同花顺大盘评级"
+    }
+  };
+
+  render(<ClsFinancePanel finance={finance} />);
+
+  expect(screen.getAllByText("大盘评分").length).toBeGreaterThanOrEqual(1);
+  expect(screen.getByText("7.3")).toBeInTheDocument();
+  expect(screen.getByText("3 个分时点 / 同花顺大盘评级")).toBeInTheDocument();
+  expect(screen.getByText("同花顺大盘评级 7.3，涨停 130 家，开板 25 家。")).toBeInTheDocument();
+  expect(screen.getByText("3 个分时点 / 同花顺大盘评级").closest("article")).toHaveClass("positive");
+});
+
 it("opens the limit-up pool in a scrollable dialog on demand", async () => {
   const user = userEvent.setup();
   render(<ClsFinancePanel finance={buildFinance()} />);

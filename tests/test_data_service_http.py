@@ -2843,6 +2843,8 @@ def test_service_market_finance_returns_cls_market_board_payload(tmp_path):
                     ],
                 }
             )
+        if "q.10jqka.com.cn/index/index/board/all/" in url:
+            return FakeResponse(text="<html><body></body></html>")
         raise AssertionError(f"unexpected url: {url}")
 
     server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
@@ -2862,6 +2864,62 @@ def test_service_market_finance_returns_cls_market_board_payload(tmp_path):
         assert response["emotion"]["breadth"]["up"] == 3322
         assert response["up_pool"][0]["symbol"] == "601869"
         assert response["up_pool"][0]["plates"][0]["name"] == "光纤光缆"
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_service_market_finance_prefers_ths_market_degree_for_score_card(tmp_path):
+    class FakeResponse:
+        encoding = "utf-8"
+
+        def __init__(self, payload=None, text=""):
+            self._payload = payload or {}
+            self.text = text
+
+        def raise_for_status(self):
+            return
+
+        def json(self):
+            return self._payload
+
+    def requester(url, **kwargs):
+        if "quote/index/tline" in url:
+            return FakeResponse({"code": 200, "data": []})
+        if "v3/transaction/anchor" in url:
+            return FakeResponse({"errno": 0, "data": []})
+        if "quote/index/basic" in url:
+            return FakeResponse({"code": 200, "data": {}})
+        if "v2/quote/a/stock/emotion" in url:
+            return FakeResponse(
+                {
+                    "code": 200,
+                    "data": {
+                        "market_degree": "56",
+                        "up_ratio_num": "130",
+                        "up_open_num": "25",
+                    },
+                }
+            )
+        if "quote/index/up_down_analysis" in url:
+            return FakeResponse({"code": 200, "data": []})
+        if "q.10jqka.com.cn/api.php?t=indexflash" in url:
+            return FakeResponse(text='{"dppj_data": 7.3}')
+        raise AssertionError(f"unexpected url: {url}")
+
+    server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
+    server.state.finance_provider.requester = requester
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        response = _request_json("GET", f"http://127.0.0.1:{port}/market/finance")
+
+        assert response["emotion"]["market_degree"] == 7.3
+        assert response["emotion"]["market_degree_source"] == "ths-market-summary"
+        assert response["emotion"]["market_degree_label"] == "同花顺大盘评级"
+        assert response["emotion"]["up_limit"] == 130
+        assert any("同花顺大盘评分" in item for item in response["diagnostics"])
     finally:
         server.shutdown()
         thread.join(timeout=5)

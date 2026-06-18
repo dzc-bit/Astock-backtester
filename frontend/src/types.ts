@@ -220,6 +220,8 @@ export type ClsFinancePoolItem = {
 
 export type ClsFinanceEmotion = {
   market_degree?: number | null;
+  market_degree_source?: string | null;
+  market_degree_label?: string | null;
   shsz_balance?: string | null;
   shsz_balance_change?: string | null;
   breadth?: MarketBreadth | null;

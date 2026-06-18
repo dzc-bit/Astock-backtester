@@ -138,6 +138,57 @@ def test_full_market_job_uses_large_write_batches_for_daily_incremental_import(t
     assert warehouse.write_batches == [251]
 
 
+def test_async_full_market_job_flushes_successful_rows_after_a_batch_failure(tmp_path):
+    class BlockingProvider(FakeProvider):
+        def __init__(self):
+            super().__init__(fail_symbols={"000002"})
+            self.third_started = Event()
+            self.release_third = Event()
+
+        def fetch_daily_bars(self, symbol, start_date, end_date):
+            if symbol == "000003":
+                self.third_started.set()
+                self.release_third.wait(timeout=5)
+            return super().fetch_daily_bars(symbol, start_date, end_date)
+
+    provider = BlockingProvider()
+    warehouse = Warehouse(tmp_path)
+    manager = SyncJobManager(
+        warehouse=warehouse,
+        provider=provider,
+        full_market_batch_size=2,
+        full_market_workers=1,
+        full_market_write_batch_rows=25_000,
+    )
+
+    status = manager.start_full_market(
+        symbols=["000001", "000002", "000003"],
+        start_date="2026-06-09",
+        end_date="2026-06-09",
+    )
+
+    assert provider.third_started.wait(timeout=5)
+    running = manager.get_job(status.job_id)
+    assert running is not None
+    assert running.status == "running"
+    assert running.completed_symbols == 1
+    assert running.failed_symbols == 1
+    assert sorted(warehouse.read_daily_bars()["symbol"].tolist()) == ["000001"]
+
+    provider.release_third.set()
+    eventually = None
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        eventually = manager.get_job(status.job_id)
+        if eventually and eventually.status == "completed":
+            break
+        sleep(0.02)
+
+    assert eventually is not None
+    assert eventually.status == "completed_with_errors"
+    assert sorted(warehouse.read_daily_bars()["symbol"].tolist()) == ["000001", "000003"]
+
+
 def test_capital_flow_job_reports_completed_with_errors_when_rows_import_with_failures(tmp_path):
     cache = LocalCache(tmp_path)
     warehouse = Warehouse(tmp_path)

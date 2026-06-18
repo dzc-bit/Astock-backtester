@@ -151,6 +151,7 @@ class SyncJobManager:
                 if self._finish_cancelled(job_id):
                     return
                 frames: list[pd.DataFrame] = []
+                batch_failed = False
                 with ThreadPoolExecutor(max_workers=max(1, self.full_market_workers)) as executor:
                     futures = {
                         executor.submit(self.provider.fetch_daily_bars, symbol, start_date, end_date): symbol
@@ -165,12 +166,14 @@ class SyncJobManager:
                         try:
                             frame = future.result()
                         except Exception as exc:
+                            batch_failed = True
                             current = self.get_job(job_id)
                             if current:
                                 self._mutate(job_id, failed_symbols=current.failed_symbols + 1)
                             self._append_error(job_id, f"{symbol}: {exc}")
                             continue
                         if frame.empty:
+                            batch_failed = True
                             current = self.get_job(job_id)
                             if current:
                                 self._mutate(job_id, failed_symbols=current.failed_symbols + 1)
@@ -183,7 +186,7 @@ class SyncJobManager:
                 if frames:
                     pending_frames.extend(frames)
                     pending_rows += sum(int(len(frame)) for frame in frames)
-                    if pending_rows >= self.full_market_write_batch_rows:
+                    if batch_failed or pending_rows >= self.full_market_write_batch_rows:
                         pending_rows = self._flush_full_market_frames(job_id, pending_frames)
                 if self._finish_cancelled(job_id):
                     if pending_frames:

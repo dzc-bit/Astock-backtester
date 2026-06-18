@@ -1,6 +1,6 @@
 import { Activity, Eye, Flame, Gauge, RadioTower, Sparkles, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import type { ClsFinancePoolItem, ClsFinanceResponse } from "../types";
+import type { ClsFinanceEmotion, ClsFinancePoolItem, ClsFinanceResponse } from "../types";
 
 type Props = {
   finance: ClsFinanceResponse | null;
@@ -63,6 +63,40 @@ function marketMoodLabel(value: number | null | undefined): string {
   return "热度偏弱";
 }
 
+function isTonghuashunMarketDegree(emotion: ClsFinanceEmotion | null): boolean {
+  return emotion?.market_degree_source === "ths-market-summary";
+}
+
+function marketDegreeStatTitle(emotion: ClsFinanceEmotion | null): string {
+  return isTonghuashunMarketDegree(emotion) ? "大盘评分" : "市场热度";
+}
+
+function marketDegreeCardTitle(emotion: ClsFinanceEmotion | null): string {
+  return isTonghuashunMarketDegree(emotion) ? "大盘评分" : "盘面热度";
+}
+
+function marketDegreeMeta(emotion: ClsFinanceEmotion | null): string {
+  if (isTonghuashunMarketDegree(emotion)) {
+    return emotion?.market_degree_label ?? "同花顺大盘评级";
+  }
+  return marketMoodLabel(emotion?.market_degree);
+}
+
+function marketDegreeSummaryLabel(emotion: ClsFinanceEmotion | null): string {
+  if (isTonghuashunMarketDegree(emotion)) {
+    return emotion?.market_degree_label ?? "同花顺大盘评级";
+  }
+  return "财联社市场热度";
+}
+
+function marketDegreeSentiment(emotion: ClsFinanceEmotion | null): "positive" | "neutral" {
+  const value = emotion?.market_degree;
+  if (value == null) {
+    return "neutral";
+  }
+  return value >= (isTonghuashunMarketDegree(emotion) ? 5 : 50) ? "positive" : "neutral";
+}
+
 function buildBriefingCards(finance: ClsFinanceResponse) {
   const emotion = finance.emotion ?? null;
   const anchorNames = finance.anchors.map((anchor) => anchor.name);
@@ -72,10 +106,10 @@ function buildBriefingCards(finance: ClsFinanceResponse) {
   const anchorDownCount = finance.anchors.filter((anchor) => anchor.direction === "down").length;
   return [
     {
-      title: "盘面热度",
-      sentiment: (emotion?.market_degree ?? 0) >= 50 ? "positive" : "neutral",
-      meta: `${finance.tline.length} 个分时点 / ${marketMoodLabel(emotion?.market_degree)}`,
-      summary: `财联社市场热度 ${emotion?.market_degree != null ? emotion.market_degree.toFixed(1) : "--"}，涨停 ${emotion?.up_limit ?? "--"} 家，开板 ${emotion?.open_limit ?? "--"} 家。`,
+      title: marketDegreeCardTitle(emotion),
+      sentiment: marketDegreeSentiment(emotion),
+      meta: `${finance.tline.length} 个分时点 / ${marketDegreeMeta(emotion)}`,
+      summary: `${marketDegreeSummaryLabel(emotion)} ${emotion?.market_degree != null ? emotion.market_degree.toFixed(1) : "--"}，涨停 ${emotion?.up_limit ?? "--"} 家，开板 ${emotion?.open_limit ?? "--"} 家。`,
       headlines: [
         breadth ? `上涨 ${breadth.up} / 下跌 ${breadth.down}` : "暂无完整涨跌分布",
         emotion?.performance ? `指数表现 ${emotion.performance}` : "等待指数表现"
@@ -250,10 +284,10 @@ export function ClsFinancePanel({ finance, isLoading = false }: Props) {
           </div>
 
           <div className="cls-finance-side">
-            <div className="cls-finance-stats" aria-label="财联社市场热度">
+            <div className="cls-finance-stats" aria-label={marketDegreeSummaryLabel(emotion)}>
               <article>
                 <Gauge size={16} aria-hidden="true" />
-                <span>市场热度</span>
+                <span>{marketDegreeStatTitle(emotion)}</span>
                 <strong>{emotion?.market_degree != null ? emotion.market_degree.toFixed(1) : "--"}</strong>
               </article>
               <article>

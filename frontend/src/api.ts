@@ -840,11 +840,16 @@ export async function startFullMarketSync(
       }
     };
   }
-  return serviceFetch<{ job: SyncJobStatus }>(baseUrl, "/sync/full-market", {
-    symbols,
-    start_date: startDate,
-    end_date: endDate
-  });
+  return serviceFetch<{ job: SyncJobStatus }>(
+    baseUrl,
+    "/sync/full-market",
+    {
+      symbols,
+      start_date: startDate,
+      end_date: endDate
+    },
+    { timeoutMs: LONG_RUNNING_SERVICE_TIMEOUT_MS }
+  );
 }
 
 export async function loadSyncJob(baseUrl: string, jobId: string): Promise<{ job: SyncJobStatus }> {

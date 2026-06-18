@@ -386,6 +386,9 @@ export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceRead
         setSyncBaseCoverage(coverage);
         setSyncJob(result.job);
         setMessage(isSyncRunning(result.job) ? syncRunningMessage(result.job) : syncFinishedMessage(result.job));
+        if (isSyncRunning(result.job)) {
+          return;
+        }
       }
       await refreshAfterOperation(service, symbols, startDate, endDate);
     } catch (error) {

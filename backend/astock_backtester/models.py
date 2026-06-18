@@ -310,6 +310,8 @@ class ClsFinancePoolItem(BaseModel):
 
 class ClsFinanceEmotion(BaseModel):
     market_degree: float | None = None
+    market_degree_source: str | None = None
+    market_degree_label: str | None = None
     shsz_balance: str | None = None
     shsz_balance_change: str | None = None
     breadth: MarketBreadth | None = None

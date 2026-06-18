@@ -300,6 +300,49 @@ describe("DataCenter", () => {
     expect(within(rows[2]).getByText("35")).toBeInTheDocument();
   });
 
+  it("does not refresh health immediately after starting an async capital-flow backfill", async () => {
+    const user = setupUser();
+    apiMocks.fetchCapitalFlow.mockResolvedValue({
+      status: "ok",
+      imported_rows: 0,
+      returned_rows: 0,
+      requested_symbols: [],
+      fetched_symbols: [],
+      missing_symbols: [],
+      skipped_symbols: [],
+      coverage,
+      logs: [{ level: "info", message: "Capital-flow backfill started for all symbols" }],
+      diagnostics: [{ code: "capital_flow_backfill_job_started", source: "capital_flow_crawler" }],
+      failures: [],
+      job: {
+        job_id: "flow-job-running",
+        mode: "capital_flow_backfill",
+        status: "running",
+        total_symbols: 10,
+        completed_symbols: 0,
+        failed_symbols: 0,
+        processed_symbols: 0,
+        skipped_symbols: 0,
+        imported_rows: 0,
+        returned_rows: 0,
+        current_symbol: "000001",
+        start_date: "2026-06-01",
+        end_date: "2026-06-05",
+        errors: []
+      }
+    });
+
+    render(<DataCenter cacheDir=".astock-cache" coverage={coverage} onCoverageChange={vi.fn()} />);
+
+    await screen.findByText(/http:\/\/127\.0\.0\.1:9011/);
+    apiMocks.loadDataServiceHealth.mockClear();
+    await user.click(screen.getByRole("button", { name: "补齐资金流" }));
+
+    await waitFor(() => expect(apiMocks.fetchCapitalFlow).toHaveBeenCalled());
+    expect(apiMocks.loadDataServiceHealth).not.toHaveBeenCalled();
+    expect(screen.getByRole("status", { name: "数据中心状态" })).toHaveTextContent("正在补齐全市场资金流");
+  });
+
   it("backfills capital flow through the service crawler boundary", async () => {
     const user = setupUser();
     const onCoverageChange = vi.fn();
@@ -459,7 +502,6 @@ describe("DataCenter", () => {
       }
     });
     apiMocks.loadDataServiceHealth
-      .mockResolvedValueOnce({ ok: true, cache_path: "C:\\cache", port: 9011, coverage })
       .mockResolvedValueOnce({ ok: true, cache_path: "C:\\cache", port: 9011, coverage })
       .mockResolvedValueOnce({ ok: true, cache_path: "C:\\cache", port: 9011, coverage: refreshedCoverage });
 
