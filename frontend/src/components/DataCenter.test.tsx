@@ -117,6 +117,40 @@ describe("DataCenter", () => {
     expect(apiMocks.loadDailyBarsCoverage).not.toHaveBeenCalled();
   });
 
+  it("does not block service readiness while health coverage refresh continues in the background", async () => {
+    const refreshedCoverage = [
+      { dataset: "daily_bars", symbols: 5000, start_date: "2015-01-05", end_date: "2026-06-05", missing_rows: 0 }
+    ];
+    const onCoverageChange = vi.fn();
+    apiMocks.loadDataServiceHealth
+      .mockResolvedValueOnce({
+        ok: true,
+        cache_path: "C:\\cache",
+        port: 9011,
+        coverage,
+        coverage_refreshing: true
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        cache_path: "C:\\cache",
+        port: 9011,
+        coverage: refreshedCoverage,
+        coverage_refreshing: false
+      });
+
+    render(<DataCenter cacheDir=".astock-cache" coverage={[]} onCoverageChange={onCoverageChange} />);
+
+    expect(await screen.findByText(/http:\/\/127\.0\.0\.1:9011/)).toBeInTheDocument();
+    expect(onCoverageChange).toHaveBeenCalledWith(coverage);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1300);
+    });
+
+    await waitFor(() => expect(onCoverageChange).toHaveBeenLastCalledWith(refreshedCoverage));
+    expect(apiMocks.loadDataServiceHealth).toHaveBeenCalledTimes(2);
+  });
+
   it("shows recent service logs when a fetch fails", async () => {
     const user = setupUser();
     apiMocks.fetchDailyBars.mockRejectedValue(new Error("HTTP 400: request_failed - boom"));

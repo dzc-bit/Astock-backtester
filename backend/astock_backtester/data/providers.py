@@ -260,6 +260,7 @@ class CompositeProvider:
                 if "source" not in frame.columns:
                     frame["source"] = provider.name
                 return normalize_daily_bars(frame)
+            errors.append(f"{provider.name}: returned no daily rows")
         if errors:
             raise ProviderError("; ".join(errors))
         return pd.DataFrame()

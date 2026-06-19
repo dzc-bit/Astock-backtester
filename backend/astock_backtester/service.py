@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from threading import Event, Lock, Thread
 from typing import Any
 from uuid import uuid4
 
@@ -38,8 +39,11 @@ from astock_backtester.data.sync import SyncJobManager
 from astock_backtester.data.warehouse import Warehouse
 from astock_backtester.backtest_runner import run_configured_backtest
 from astock_backtester.condition_parser import validate_condition_text, validate_exit_condition_text
-from astock_backtester.models import BacktestSettings, ClsFinanceResponse, StrategyConfig
+from astock_backtester.models import BacktestSettings, ClsFinanceResponse, DatasetCoverage, ServiceHealth, StrategyConfig
 from astock_backtester.recommended_strategies import recommended_strategies
+
+
+HEALTH_COVERAGE_WAIT_SECONDS = 0.1
 
 
 class DataServiceState:
@@ -47,7 +51,7 @@ class DataServiceState:
         self.cache = LocalCache(cache_dir)
         self.warehouse = Warehouse(cache_dir)
         self.akshare_provider = AkshareProvider()
-        self.provider = CompositeProvider([ADataProvider(), self.akshare_provider, HttpAStockProvider()])
+        self.provider = CompositeProvider([HttpAStockProvider(), ADataProvider(), self.akshare_provider])
         self.capital_flow_crawler = CapitalFlowCrawler()
         self.sync_manager = SyncJobManager(
             warehouse=self.warehouse,
@@ -73,6 +77,9 @@ class DataServiceState:
         self.executable_path = str(Path(sys.executable).resolve())
         self.executable_sha256 = self._hash_executable(self.executable_path)
         self.logs: deque[dict[str, str]] = deque(maxlen=100)
+        self._coverage_lock = Lock()
+        self._coverage_refreshing = False
+        self._coverage_snapshot = self._empty_coverage()
         self.log("info", "local data service started")
 
     def log(self, level: str, message: str) -> None:
@@ -131,6 +138,61 @@ class DataServiceState:
             "started_at": self.started_at.isoformat(),
             "instance_id": self.instance_id,
         }
+
+    def coverage_snapshot(self) -> list[DatasetCoverage]:
+        with self._coverage_lock:
+            return [item.model_copy(deep=True) for item in self._coverage_snapshot]
+
+    def health_payload(self) -> ServiceHealth:
+        refresh_finished = self._start_coverage_refresh()
+        if refresh_finished is not None:
+            refresh_finished.wait(HEALTH_COVERAGE_WAIT_SECONDS)
+        with self._coverage_lock:
+            coverage_refreshing = self._coverage_refreshing
+        return ServiceHealth(
+            **self.identity_payload(),
+            coverage=self.coverage_snapshot(),
+            coverage_refreshing=coverage_refreshing,
+        )
+
+    def _start_coverage_refresh(self) -> Event | None:
+        with self._coverage_lock:
+            if self._coverage_refreshing:
+                return None
+            self._coverage_refreshing = True
+        finished = Event()
+
+        def refresh() -> None:
+            try:
+                coverage = self._read_coverage_snapshot()
+                with self._coverage_lock:
+                    self._coverage_snapshot = [item.model_copy(deep=True) for item in coverage]
+            finally:
+                with self._coverage_lock:
+                    self._coverage_refreshing = False
+                finished.set()
+
+        Thread(target=refresh, daemon=True).start()
+        return finished
+
+    def _read_coverage_snapshot(self) -> list[DatasetCoverage]:
+        try:
+            coverage = self.warehouse.coverage()
+            if any(item.symbols > 0 for item in coverage):
+                return coverage
+        except Exception:
+            pass
+        try:
+            return self.cache.coverage()
+        except Exception:
+            return self._empty_coverage()
+
+    def _empty_coverage(self) -> list[DatasetCoverage]:
+        return [
+            DatasetCoverage(dataset="daily_bars", symbols=0, start_date=None, end_date=None),
+            DatasetCoverage(dataset="capital_flow", symbols=0, start_date=None, end_date=None),
+            DatasetCoverage(dataset="market_cap", symbols=0, start_date=None, end_date=None),
+        ]
 
 
 def _retained_realtime_snapshot(provider: Any, exc: Exception):
@@ -284,16 +346,7 @@ class DataServiceHandler(BaseHTTPRequestHandler):
             self._send_json(self.server.state.identity_payload())
             return
         if self.path == "/health":
-            health = build_service_health(
-                self.server.state.cache,
-                self.server.state.warehouse,
-                port=self.server.state.port,
-                process_id=self.server.state.process_id,
-                executable_path=self.server.state.executable_path,
-                executable_sha256=self.server.state.executable_sha256,
-                started_at=self.server.state.started_at,
-                instance_id=self.server.state.instance_id,
-            )
+            health = self.server.state.health_payload()
             self._send_json(health.model_dump(mode="json"))
             return
         if self.path == "/logs/recent":
@@ -425,6 +478,7 @@ class DataServiceHandler(BaseHTTPRequestHandler):
                 )
                 for entry in result.logs:
                     self.server.state.log(entry.level, entry.message)
+                self.server.state._start_coverage_refresh()
                 self._send_json(result.model_dump(mode="json"))
                 return
             if self.path == "/fetch/daily-bars":
@@ -439,6 +493,7 @@ class DataServiceHandler(BaseHTTPRequestHandler):
                 )
                 for entry in result.logs:
                     self.server.state.log(entry.level, entry.message)
+                self.server.state._start_coverage_refresh()
                 self._send_json(result.model_dump(mode="json"))
                 return
             if self.path == "/fetch/capital-flow":
@@ -467,7 +522,7 @@ class DataServiceHandler(BaseHTTPRequestHandler):
                             "skipped_symbols": [],
                             "coverage": [
                                 item.model_dump(mode="json")
-                                for item in self.server.state.warehouse.coverage()
+                                for item in self.server.state.coverage_snapshot()
                             ],
                             "logs": [
                                 {
@@ -498,6 +553,7 @@ class DataServiceHandler(BaseHTTPRequestHandler):
                 )
                 for entry in result.logs:
                     self.server.state.log(entry.level, entry.message)
+                self.server.state._start_coverage_refresh()
                 self._send_json(result.model_dump(mode="json"))
                 return
             if self.path.startswith("/sync/jobs/") and self.path.endswith("/cancel"):

@@ -165,6 +165,7 @@ class ServiceHealth(BaseModel):
     started_at: datetime | None = None
     instance_id: str | None = None
     coverage: list[DatasetCoverage]
+    coverage_refreshing: bool = False
 
 
 class SyncJobStatus(BaseModel):

@@ -24,6 +24,7 @@ export type DataServiceHealth = {
   started_at?: string | null;
   instance_id?: string | null;
   coverage: DatasetCoverage[];
+  coverage_refreshing?: boolean;
 };
 
 export type DailyBarsCoverageItem = {

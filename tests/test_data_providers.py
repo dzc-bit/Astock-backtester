@@ -9,6 +9,7 @@ from astock_backtester.data.providers import (
     ADataProvider,
     AkshareProvider,
     CompositeProvider,
+    ProviderError,
     enrich_market_cap_from_share_history,
 )
 
@@ -124,6 +125,40 @@ def test_composite_provider_falls_back_when_primary_returns_empty():
     result = provider.fetch_daily_bars("000001", "2024-01-02", "2024-01-02")
 
     assert result.loc[0, "source"] == "fallback"
+
+
+def test_composite_provider_reports_empty_and_failed_attempts_when_all_sources_fail():
+    class EmptyProvider:
+        def __init__(self, name):
+            self.name = name
+
+        def fetch_daily_bars(self, symbol, start_date, end_date):
+            return pd.DataFrame()
+
+        def fetch_share_history(self, symbol):
+            return pd.DataFrame()
+
+    class FailingProvider:
+        name = "akshare"
+
+        def fetch_daily_bars(self, symbol, start_date, end_date):
+            raise RuntimeError("RemoteDisconnected")
+
+        def fetch_share_history(self, symbol):
+            return pd.DataFrame()
+
+    provider = CompositeProvider([EmptyProvider("http"), EmptyProvider("adata"), FailingProvider()])
+
+    try:
+        provider.fetch_daily_bars("000001", "2026-06-01", "2026-06-05")
+    except ProviderError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("expected ProviderError when all providers fail")
+
+    assert "http: returned no daily rows" in message
+    assert "adata: returned no daily rows" in message
+    assert "akshare: RemoteDisconnected" in message
 
 
 def test_adata_provider_lists_normalized_symbols():

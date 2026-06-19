@@ -22,6 +22,9 @@ type Props = {
 
 type BusyAction = "refresh" | "fetch" | "capital-flow" | "sample" | "file" | "sync" | null;
 
+const COVERAGE_REFRESH_RETRY_MS = 1200;
+const COVERAGE_REFRESH_MAX_ATTEMPTS = 4;
+
 function formatLocalDate(date: Date): string {
   const year = date.getFullYear();
   const month = `${date.getMonth() + 1}`.padStart(2, "0");
@@ -172,6 +175,7 @@ export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceRead
   const [message, setMessage] = useState("正在连接本地数据服务");
   const [busyAction, setBusyAction] = useState<BusyAction>(null);
   const [syncBaseCoverage, setSyncBaseCoverage] = useState<DatasetCoverage[] | null>(null);
+  const [coverageRefreshToken, setCoverageRefreshToken] = useState(0);
   const syncRunning = isSyncRunning(syncJob);
   const syncImportedRows = syncRunning && syncJob ? syncJob.imported_rows : 0;
   const busy = busyAction !== null || syncRunning;
@@ -234,7 +238,11 @@ export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceRead
     ]);
     onCoverageChange(health.coverage);
     setLogs(recentLogs.items);
-    return applyCoverageDateRange(health.coverage);
+    const range = applyCoverageDateRange(health.coverage);
+    if (health.coverage_refreshing) {
+      setCoverageRefreshToken((current) => current + 1);
+    }
+    return range;
   };
 
   const refreshAfterOperation = async (
@@ -279,6 +287,41 @@ export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceRead
       cancelled = true;
     };
   }, [cacheDir]);
+
+  useEffect(() => {
+    if (!service || coverageRefreshToken === 0) {
+      return;
+    }
+    let cancelled = false;
+    let attempts = 0;
+    let timer: number | undefined;
+    const pollCoverage = () => {
+      timer = window.setTimeout(() => {
+        attempts += 1;
+        void loadDataServiceHealth(service.base_url)
+          .then((health) => {
+            if (cancelled) {
+              return;
+            }
+            onCoverageChange(health.coverage);
+            applyCoverageDateRange(health.coverage);
+            if (health.coverage_refreshing && attempts < COVERAGE_REFRESH_MAX_ATTEMPTS) {
+              pollCoverage();
+            }
+          })
+          .catch(() => {
+            // Keep the connected service usable; the next manual refresh will retry coverage.
+          });
+      }, COVERAGE_REFRESH_RETRY_MS);
+    };
+    pollCoverage();
+    return () => {
+      cancelled = true;
+      if (timer !== undefined) {
+        window.clearTimeout(timer);
+      }
+    };
+  }, [service, coverageRefreshToken]);
 
   useEffect(() => {
     const activeSyncJob = syncJob;

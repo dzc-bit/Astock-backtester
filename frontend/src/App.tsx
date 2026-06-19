@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Activity, Database, Flame, ShieldAlert, TrendingUp } from "lucide-react";
+import { Activity, Database, Flame, Gauge, ShieldAlert } from "lucide-react";
 import {
   loadClsFinance,
   loadMarketBriefing,
@@ -65,6 +65,10 @@ function formatPercent(value: number | null | undefined): string {
 
 function formatCompact(value: number): string {
   return new Intl.NumberFormat("zh-CN", { notation: "compact", maximumFractionDigits: 1 }).format(value);
+}
+
+function formatMarketDegree(value: number | null | undefined): string {
+  return value == null ? "--" : value.toFixed(1);
 }
 
 function translateError(message: string): string {
@@ -538,7 +542,14 @@ export function App() {
   const liveHeatRatio = marketSnapshot?.breadth && marketSnapshot.breadth.total > 0
     ? marketSnapshot.breadth.up / marketSnapshot.breadth.total
     : null;
-  const hasCapitalFlow = coverage.some((item) => item.dataset === "capital_flow" && item.symbols > 0);
+  const marketDegree = clsFinance?.emotion?.market_degree;
+  const marketDegreeLabel = clsFinance?.emotion?.market_degree_label ?? "同花顺大盘评级";
+  const marketDegreeSource = clsFinance?.emotion?.market_degree_source;
+  const marketDegreeNote = marketDegree == null
+    ? isLoadingNews ? "正在读取同花顺大盘评分" : "同花顺评分暂不可用"
+    : marketDegreeSource === "ths-market-summary"
+      ? marketDegreeLabel
+      : `${marketDegreeLabel} / 非同花顺主源`;
   const issueCount = result?.preflight_issues.length ?? 0;
   const riskAlertCount = riskAlerts?.items.length ?? 0;
   const closedTrades = result?.metrics.trade_count ?? 0;
@@ -612,11 +623,11 @@ export function App() {
         </article>
         <article className="summary-card">
           <div>
-            <span>资金流向</span>
-            <strong>{hasCapitalFlow ? "已接入" : "待导入"}</strong>
+            <span>大盘评分</span>
+            <strong>{formatMarketDegree(marketDegree)}</strong>
           </div>
-          <TrendingUp size={24} aria-hidden="true" />
-          <small>{hasCapitalFlow ? "主力净流入可参与筛选" : "资金面条件会提示缺失风险"}</small>
+          <Gauge size={24} aria-hidden="true" />
+          <small>{marketDegreeNote}</small>
         </article>
         <article className="summary-card">
           <div>

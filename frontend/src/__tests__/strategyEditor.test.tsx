@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "../App";
@@ -391,7 +391,7 @@ describe("A 股回测工作台界面", () => {
     expect(screen.getByRole("heading", { name: "收益概览" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "交易明细" })).toBeInTheDocument();
     expect(screen.getAllByText("市场热度").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("资金流向").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("大盘评分").length).toBeGreaterThan(0);
     expect(screen.getAllByText("风险提示").length).toBeGreaterThan(0);
     expect(await screen.findByText("今日实时行情")).toBeInTheDocument();
     expect(await screen.findByText("上证指数")).toBeInTheDocument();
@@ -402,6 +402,36 @@ describe("A 股回测工作台界面", () => {
     expect(await screen.findByRole("heading", { name: "资讯与事件" })).toBeInTheDocument();
     expect(screen.getAllByText("政策利好推动科技板块走强").length).toBeGreaterThan(0);
     expect(await screen.findByText("日线行情")).toBeInTheDocument();
+  });
+
+  it("shows the Tonghuashun score in the overview band instead of a capital-flow card", async () => {
+    apiMocks.loadClsFinance.mockResolvedValueOnce({
+      updated_at: "2026-06-09T07:05:00Z",
+      source: "cls-finance",
+      source_url: "https://www.cls.cn/finance",
+      tline: [],
+      anchors: [],
+      emotion: {
+        market_degree: 7.3,
+        market_degree_source: "ths-market-summary",
+        market_degree_label: "同花顺大盘评级",
+        up_limit: 130,
+        open_limit: 25
+      },
+      up_pool: [],
+      diagnostics: ["同花顺大盘评分读取成功：7.3"]
+    });
+
+    render(<App />);
+
+    await screen.findByText("日线行情");
+    await screen.findAllByText("7.3");
+    const overview = screen.getByLabelText("工作台概览");
+    expect(within(overview).getByText("大盘评分")).toBeInTheDocument();
+    expect(within(overview).getByText("7.3")).toBeInTheDocument();
+    expect(within(overview).getByText("同花顺大盘评级")).toBeInTheDocument();
+    expect(within(overview).queryByText("资金流向")).not.toBeInTheDocument();
+    expect(within(overview).queryByText("待导入")).not.toBeInTheDocument();
   });
 
   afterEach(() => {

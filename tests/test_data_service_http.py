@@ -94,6 +94,14 @@ def test_service_health_and_logs(tmp_path):
         thread.join(timeout=5)
 
 
+def test_service_default_daily_provider_prefers_http_before_legacy_and_akshare(tmp_path):
+    server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
+
+    provider_names = [provider.name for provider in server.state.provider.providers]
+
+    assert provider_names == ["http", "adata", "akshare"]
+
+
 def test_service_health_returns_json_when_warehouse_coverage_fails(tmp_path):
     class BrokenWarehouse:
         def coverage(self):
@@ -154,6 +162,34 @@ def test_service_identity_is_lightweight_and_reports_process_identity(tmp_path):
         assert isinstance(response["executable_sha256"], str)
         assert len(response["executable_sha256"]) == 64
         assert "coverage" not in response
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_service_health_returns_cached_snapshot_while_coverage_refresh_is_slow(tmp_path):
+    class SlowWarehouse:
+        def coverage(self):
+            time.sleep(0.4)
+            return [
+                DatasetCoverage(dataset="daily_bars", symbols=99, start_date=None, end_date=None),
+                DatasetCoverage(dataset="market_cap", symbols=0, start_date=None, end_date=None),
+                DatasetCoverage(dataset="capital_flow", symbols=0, start_date=None, end_date=None),
+            ]
+
+    server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
+    server.state.warehouse = SlowWarehouse()
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        started = time.perf_counter()
+        health = _request_json("GET", f"http://127.0.0.1:{port}/health")
+        elapsed = time.perf_counter() - started
+
+        assert elapsed < 0.3
+        assert health["ok"] is True
+        assert health["coverage"][0]["dataset"] == "daily_bars"
     finally:
         server.shutdown()
         thread.join(timeout=5)
