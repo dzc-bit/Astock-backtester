@@ -508,6 +508,41 @@ def test_fetch_capital_flow_into_cache_marks_shortfall_diagnostics_as_partial(tm
     ]
 
 
+def test_fetch_capital_flow_into_cache_clips_requested_range_to_a_share_trade_dates(tmp_path):
+    cache = LocalCache(tmp_path)
+    warehouse = Warehouse(tmp_path)
+    warehouse.write_daily_bars(
+        _bars(
+            [
+                ("AAA", "2026-06-18", 10.0, 11.0, 9.0, 10.5, 1000, 0.1, 9_000_000_000.0, float("nan"), False, False, 90),
+            ]
+        )
+    )
+    calls = []
+
+    def fake_capital_flow_fetcher(symbols: list[str], start_date: str, end_date: str) -> dict:
+        calls.append((symbols, start_date, end_date))
+        return {
+            "rows": [{"symbol": "AAA", "trade_date": "2026-06-18", "main_net_inflow": 1_500_000.0}],
+            "failures": [],
+            "diagnostics": [],
+        }
+
+    result = fetch_capital_flow_into_cache(
+        cache=cache,
+        warehouse=warehouse,
+        capital_flow_fetcher=fake_capital_flow_fetcher,
+        symbols=["AAA"],
+        start_date="2026-06-18",
+        end_date="2026-06-19",
+    )
+
+    assert calls == [(["AAA"], "2026-06-18", "2026-06-18")]
+    assert result.status == "ok"
+    assert result.missing_symbols == []
+    assert result.failures == []
+
+
 def test_fetch_capital_flow_into_cache_allows_standalone_shortfall_without_daily_gap(tmp_path):
     cache = LocalCache(tmp_path)
     warehouse = Warehouse(tmp_path)

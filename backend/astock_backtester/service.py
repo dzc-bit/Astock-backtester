@@ -499,7 +499,7 @@ class DataServiceHandler(BaseHTTPRequestHandler):
             if self.path == "/fetch/capital-flow":
                 symbols = payload.get("symbols") or []
                 if not symbols:
-                    symbols = self._capital_flow_backfill_symbols()
+                    symbols = self._capital_flow_backfill_symbols(payload["start_date"], payload["end_date"])
                     if not symbols:
                         raise ValueError("No symbols available for capital-flow backfill.")
                     job = self.server.state.sync_manager.start_capital_flow_backfill(
@@ -601,7 +601,22 @@ class DataServiceHandler(BaseHTTPRequestHandler):
     def _fetch_capital_flow_from_crawler(self, symbols: list[str], start_date: str, end_date: str) -> dict[str, Any]:
         return self.server.state._fetch_capital_flow(symbols, start_date, end_date)
 
-    def _capital_flow_backfill_symbols(self) -> list[str]:
+    def _capital_flow_backfill_symbols(self, start_date: str | None = None, end_date: str | None = None) -> list[str]:
+        if start_date and end_date:
+            try:
+                frame = self.server.state.warehouse.read_daily_bars(
+                    start_date=start_date,
+                    end_date=end_date,
+                    require_ohlc=True,
+                )
+            except Exception:
+                frame = pd.DataFrame()
+            if not frame.empty and {"symbol", "main_net_inflow"}.issubset(frame.columns):
+                missing = frame.loc[frame["main_net_inflow"].isna(), "symbol"].dropna().astype(str)
+                symbols = sorted(symbol for symbol in missing.unique().tolist() if symbol)
+                if symbols:
+                    return symbols
+
         symbols: set[str] = set()
         try:
             symbols.update(str(symbol) for symbol in self.server.state.provider.list_symbols())

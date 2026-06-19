@@ -545,7 +545,7 @@ def test_service_fetch_capital_flow_backfills_existing_rows_and_reports_failures
         thread.join(timeout=5)
 
 
-def test_service_fetch_capital_flow_empty_symbols_starts_backfill_job(tmp_path):
+def test_service_fetch_capital_flow_empty_symbols_starts_backfill_job_for_local_missing_flow_only(tmp_path):
     class FakeProvider:
         def list_symbols(self):
             return ["000002", "000003"]
@@ -604,10 +604,56 @@ def test_service_fetch_capital_flow_empty_symbols_starts_backfill_job(tmp_path):
             {"symbols": [], "start_date": "2026-05-26", "end_date": "2026-05-29"},
         )
 
-        assert manager.calls == [(["000001", "000002", "000003"], "2026-05-26", "2026-05-29")]
+        assert manager.calls == [(["000001", "000002"], "2026-05-26", "2026-05-29")]
         assert response["job"]["mode"] == "capital_flow_backfill"
         assert response["job"]["status"] == "running"
         assert response["diagnostics"][0]["code"] == "capital_flow_backfill_job_started"
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_service_empty_capital_flow_backfill_falls_back_to_provider_symbols_without_local_rows(tmp_path):
+    class FakeProvider:
+        def list_symbols(self):
+            return ["000002", "000003"]
+
+    class FakeSyncManager:
+        def __init__(self):
+            self.calls = []
+
+        def start_capital_flow_backfill(self, symbols, start_date, end_date):
+            from datetime import date
+
+            from astock_backtester.models import SyncJobStatus
+
+            self.calls.append((symbols, start_date, end_date))
+            return SyncJobStatus(
+                job_id="flow-job",
+                mode="capital_flow_backfill",
+                status="running",
+                total_symbols=len(symbols),
+                current_symbol=symbols[0],
+                start_date=date.fromisoformat(start_date),
+                end_date=date.fromisoformat(end_date),
+            )
+
+    server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
+    manager = FakeSyncManager()
+    server.state.provider = FakeProvider()
+    server.state.sync_manager = manager
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        response = _request_json(
+            "POST",
+            f"http://127.0.0.1:{port}/fetch/capital-flow",
+            {"symbols": [], "start_date": "2026-05-26", "end_date": "2026-05-29"},
+        )
+
+        assert manager.calls == [(["000002", "000003"], "2026-05-26", "2026-05-29")]
+        assert response["job"]["total_symbols"] == 2
     finally:
         server.shutdown()
         thread.join(timeout=5)

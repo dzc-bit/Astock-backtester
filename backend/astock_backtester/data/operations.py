@@ -33,6 +33,13 @@ def _date_range(start_date: pd.Timestamp, end_date: pd.Timestamp) -> set[pd.Time
     return a_share_trade_dates(start_date, end_date)
 
 
+def effective_a_share_date_range(start_date: str, end_date: str) -> tuple[str, str] | None:
+    trade_dates = sorted(a_share_trade_dates(pd.Timestamp(start_date), pd.Timestamp(end_date)))
+    if not trade_dates:
+        return None
+    return trade_dates[0].date().isoformat(), trade_dates[-1].date().isoformat()
+
+
 def build_daily_bars_coverage(
     cache: LocalCache,
     warehouse: Warehouse | None = None,
@@ -125,9 +132,42 @@ def fetch_daily_bars_into_cache(
     capital_flow_fetcher: CapitalFlowFetcher | None = None,
 ) -> DataOperationResult:
     requested_symbols = [str(symbol) for symbol in symbols]
-    frame = fetcher(requested_symbols, start_date, end_date)
+    effective_range = effective_a_share_date_range(start_date, end_date)
+    if effective_range is None:
+        coverage = _safe_coverage(cache, warehouse)
+        return DataOperationResult(
+            status="ok",
+            imported_rows=0,
+            requested_symbols=requested_symbols,
+            fetched_symbols=[],
+            missing_symbols=[],
+            skipped_symbols=requested_symbols,
+            coverage=coverage,
+            logs=[ServiceLogEntry(level="info", message="Requested date range contains no A-share trading days")],
+            diagnostics=[
+                {
+                    "code": "no_a_share_trade_dates",
+                    "source": "trading_calendar",
+                    "start_date": start_date,
+                    "end_date": end_date,
+                }
+            ],
+        )
+    effective_start_date, effective_end_date = effective_range
+    frame = fetcher(requested_symbols, effective_start_date, effective_end_date)
     logs = [ServiceLogEntry(level="info", message=f"Fetched {len(frame)} daily bar rows")]
     diagnostics: list[dict[str, Any]] = []
+    if (effective_start_date, effective_end_date) != (start_date, end_date):
+        diagnostics.append(
+            {
+                "code": "a_share_trade_date_range_clipped",
+                "source": "trading_calendar",
+                "requested_start_date": start_date,
+                "requested_end_date": end_date,
+                "start_date": effective_start_date,
+                "end_date": effective_end_date,
+            }
+        )
     failures: list[dict[str, Any]] = []
     capital_flow_missing_symbols: list[str] = []
     if not frame.empty and capital_flow_fetcher is not None:
@@ -135,8 +175,8 @@ def fetch_daily_bars_into_cache(
             frame=frame,
             fetcher=capital_flow_fetcher,
             requested_symbols=requested_symbols,
-            start_date=start_date,
-            end_date=end_date,
+            start_date=effective_start_date,
+            end_date=effective_end_date,
             only_missing=False,
         )
         logs.extend(merge_logs)
@@ -148,8 +188,8 @@ def fetch_daily_bars_into_cache(
                     "code": "capital_flow_crawler_unfilled_main_net_inflow",
                     "source": "capital_flow_crawler",
                     "symbols": capital_flow_missing_symbols,
-                    "start_date": start_date,
-                    "end_date": end_date,
+                    "start_date": effective_start_date,
+                    "end_date": effective_end_date,
                     "message": "Capital-flow crawler did not fill main_net_inflow for all fetched daily-bar rows",
                 }
             )
@@ -215,12 +255,46 @@ def fetch_capital_flow_into_cache(
     refresh_coverage: bool = True,
 ) -> DataOperationResult:
     requested_symbols = [str(symbol) for symbol in symbols]
-    frame = _read_existing_daily_bars(cache, warehouse, requested_symbols, start_date, end_date)
+    effective_range = effective_a_share_date_range(start_date, end_date)
+    if effective_range is None:
+        coverage = _safe_coverage(cache, warehouse) if refresh_coverage else []
+        return DataOperationResult(
+            status="ok",
+            imported_rows=0,
+            returned_rows=0,
+            requested_symbols=requested_symbols,
+            fetched_symbols=[],
+            missing_symbols=[],
+            skipped_symbols=requested_symbols,
+            coverage=coverage,
+            logs=[ServiceLogEntry(level="info", message="Requested date range contains no A-share trading days")],
+            diagnostics=[
+                {
+                    "code": "no_a_share_trade_dates",
+                    "source": "trading_calendar",
+                    "start_date": start_date,
+                    "end_date": end_date,
+                }
+            ],
+        )
+    effective_start_date, effective_end_date = effective_range
+    frame = _read_existing_daily_bars(cache, warehouse, requested_symbols, effective_start_date, effective_end_date)
     logs: list[ServiceLogEntry] = []
     diagnostics: list[dict[str, Any]] = []
+    if (effective_start_date, effective_end_date) != (start_date, end_date):
+        diagnostics.append(
+            {
+                "code": "a_share_trade_date_range_clipped",
+                "source": "trading_calendar",
+                "requested_start_date": start_date,
+                "requested_end_date": end_date,
+                "start_date": effective_start_date,
+                "end_date": effective_end_date,
+            }
+        )
     failures: list[dict[str, Any]] = []
 
-    skipped_symbols = _symbols_with_complete_capital_flow(frame, requested_symbols, start_date, end_date)
+    skipped_symbols = _symbols_with_complete_capital_flow(frame, requested_symbols, effective_start_date, effective_end_date)
     fetch_symbols = sorted(symbol for symbol in requested_symbols if symbol not in set(skipped_symbols))
     if not fetch_symbols:
         coverage = _safe_coverage(cache, warehouse) if refresh_coverage else []
@@ -237,6 +311,7 @@ def fetch_capital_flow_into_cache(
                 ServiceLogEntry(level="info", message="Capital-flow coverage already complete for requested rows"),
             ],
             diagnostics=[
+                *diagnostics,
                 {
                     "code": "capital_flow_backfill_not_needed",
                     "source": "capital_flow_crawler",
@@ -249,8 +324,8 @@ def fetch_capital_flow_into_cache(
     rows, fetch_logs, fetch_diagnostics, failures = _fetch_capital_flow_rows(
         fetcher=capital_flow_fetcher,
         requested_symbols=fetch_symbols,
-        start_date=start_date,
-        end_date=end_date,
+        start_date=effective_start_date,
+        end_date=effective_end_date,
     )
     logs.extend(fetch_logs)
     diagnostics.extend(fetch_diagnostics)
@@ -292,8 +367,8 @@ def fetch_capital_flow_into_cache(
     standalone_frame = _standalone_daily_bars_from_capital_flow_rows(
         rows,
         fetch_symbols,
-        start_date=start_date,
-        end_date=end_date,
+        start_date=effective_start_date,
+        end_date=effective_end_date,
         existing_frame=frame,
     )
     standalone_rows = int(len(standalone_frame))

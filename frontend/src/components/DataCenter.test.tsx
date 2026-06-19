@@ -754,6 +754,23 @@ describe("DataCenter", () => {
     expect(await screen.findByText("Fetched 5 recent daily bar rows")).toBeInTheDocument();
   });
 
+  it("uses the latest A-share trading day instead of a market holiday for default fills", async () => {
+    const user = setupUser();
+    vi.setSystemTime(new Date("2026-06-19T10:00:00+08:00"));
+
+    render(<DataCenter cacheDir=".astock-cache" coverage={coverage} onCoverageChange={vi.fn()} />);
+
+    expect(await screen.findByLabelText("开始日期")).toHaveValue("2026-06-12");
+    expect(screen.getByLabelText("结束日期")).toHaveValue("2026-06-18");
+    await user.click(screen.getByRole("button", { name: "补全缺失数据" }));
+
+    await waitFor(() => expect(apiMocks.startFullMarketSync).toHaveBeenCalledWith(
+      "http://127.0.0.1:9011",
+      "2026-06-12",
+      "2026-06-18"
+    ));
+  });
+
   it("fills from the local coverage end date to the latest open day when coverage is stale", async () => {
     const user = setupUser();
     apiMocks.loadDataServiceHealth.mockResolvedValue({

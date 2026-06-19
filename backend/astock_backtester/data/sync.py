@@ -10,7 +10,8 @@ from uuid import uuid4
 import pandas as pd
 
 from astock_backtester.data.cache import LocalCache
-from astock_backtester.data.operations import fetch_capital_flow_into_cache
+from astock_backtester.data.operations import effective_a_share_date_range, fetch_capital_flow_into_cache
+from astock_backtester.data.trading_calendar import a_share_trade_dates
 from astock_backtester.data.warehouse import Warehouse
 from astock_backtester.models import SyncJobStatus
 
@@ -32,18 +33,30 @@ class SyncJobManager:
         self._lock = Lock()
 
     def run_full_market(self, symbols: list[str], start_date: str, end_date: str) -> SyncJobStatus:
+        effective_range = effective_a_share_date_range(start_date, end_date)
+        effective_start_date, effective_end_date = effective_range or (start_date, end_date)
         status = SyncJobStatus(
             job_id=str(uuid4()),
             mode="full_market_bootstrap",
             status="running",
             total_symbols=len(symbols),
-            start_date=date.fromisoformat(start_date),
-            end_date=date.fromisoformat(end_date),
+            start_date=date.fromisoformat(effective_start_date),
+            end_date=date.fromisoformat(effective_end_date),
         )
+        if effective_range is None:
+            status.processed_symbols = len(symbols)
+            status.skipped_symbols = len(symbols)
+            status.status = "completed"
+            return status
+        complete_symbols = self._complete_daily_symbols(effective_start_date, effective_end_date)
         for symbol in symbols:
             status.current_symbol = symbol
+            status.processed_symbols += 1
+            if symbol in complete_symbols:
+                status.skipped_symbols += 1
+                continue
             try:
-                frame = self.provider.fetch_daily_bars(symbol, start_date, end_date)
+                frame = self.provider.fetch_daily_bars(symbol, effective_start_date, effective_end_date)
                 if not frame.empty:
                     self.warehouse.write_daily_bars(frame)
                     status.imported_rows += int(len(frame))
@@ -59,36 +72,52 @@ class SyncJobManager:
         return status
 
     def start_full_market(self, symbols: list[str], start_date: str, end_date: str) -> SyncJobStatus:
+        effective_range = effective_a_share_date_range(start_date, end_date)
+        effective_start_date, effective_end_date = effective_range or (start_date, end_date)
         status = SyncJobStatus(
             job_id=str(uuid4()),
             mode="full_market_bootstrap",
             status="running",
             total_symbols=len(symbols),
-            start_date=date.fromisoformat(start_date),
-            end_date=date.fromisoformat(end_date),
+            start_date=date.fromisoformat(effective_start_date),
+            end_date=date.fromisoformat(effective_end_date),
         )
         self._store(status)
+        if effective_range is None:
+            status.status = "completed"
+            status.processed_symbols = len(symbols)
+            status.skipped_symbols = len(symbols)
+            self._store(status)
+            return self.get_job(status.job_id) or status
         thread = Thread(
             target=self._run_full_market_job,
-            args=(status.job_id, list(symbols), start_date, end_date),
+            args=(status.job_id, list(symbols), effective_start_date, effective_end_date),
             daemon=True,
         )
         thread.start()
         return self.get_job(status.job_id) or status
 
     def start_capital_flow_backfill(self, symbols: list[str], start_date: str, end_date: str) -> SyncJobStatus:
+        effective_range = effective_a_share_date_range(start_date, end_date)
+        effective_start_date, effective_end_date = effective_range or (start_date, end_date)
         status = SyncJobStatus(
             job_id=str(uuid4()),
             mode="capital_flow_backfill",
             status="running",
             total_symbols=len(symbols),
-            start_date=date.fromisoformat(start_date),
-            end_date=date.fromisoformat(end_date),
+            start_date=date.fromisoformat(effective_start_date),
+            end_date=date.fromisoformat(effective_end_date),
         )
         self._store(status)
+        if effective_range is None:
+            status.status = "completed"
+            status.processed_symbols = len(symbols)
+            status.skipped_symbols = len(symbols)
+            self._store(status)
+            return self.get_job(status.job_id) or status
         thread = Thread(
             target=self._run_capital_flow_job,
-            args=(status.job_id, list(symbols), start_date, end_date),
+            args=(status.job_id, list(symbols), effective_start_date, effective_end_date),
             daemon=True,
         )
         thread.start()
@@ -145,6 +174,7 @@ class SyncJobManager:
 
     def _run_full_market_job(self, job_id: str, symbols: list[str], start_date: str, end_date: str) -> None:
         try:
+            complete_symbols = self._complete_daily_symbols(start_date, end_date)
             pending_frames: list[pd.DataFrame] = []
             pending_rows = 0
             for batch in _chunks(symbols, self.full_market_batch_size):
@@ -154,7 +184,7 @@ class SyncJobManager:
                 batch_failed = False
                 with ThreadPoolExecutor(max_workers=max(1, self.full_market_workers)) as executor:
                     futures = {
-                        executor.submit(self.provider.fetch_daily_bars, symbol, start_date, end_date): symbol
+                        executor.submit(self._fetch_daily_bars_if_needed, symbol, start_date, end_date, complete_symbols): symbol
                         for symbol in batch
                     }
                     for future in as_completed(futures):
@@ -164,13 +194,25 @@ class SyncJobManager:
                         if current:
                             self._mutate(job_id, processed_symbols=current.processed_symbols + 1)
                         try:
-                            frame = future.result()
+                            outcome, frame = future.result()
                         except Exception as exc:
                             batch_failed = True
                             current = self.get_job(job_id)
                             if current:
                                 self._mutate(job_id, failed_symbols=current.failed_symbols + 1)
                             self._append_error(job_id, f"{symbol}: {exc}")
+                            continue
+                        if outcome == "skipped":
+                            current = self.get_job(job_id)
+                            if current:
+                                self._mutate(job_id, skipped_symbols=current.skipped_symbols + 1)
+                            continue
+                        if frame is None:
+                            batch_failed = True
+                            current = self.get_job(job_id)
+                            if current:
+                                self._mutate(job_id, failed_symbols=current.failed_symbols + 1)
+                            self._append_error(job_id, f"{symbol}: provider returned no daily rows")
                             continue
                         if frame.empty:
                             batch_failed = True
@@ -206,6 +248,39 @@ class SyncJobManager:
                 current.status = "failed"
                 current.errors.append(str(exc))
                 self._store(current)
+
+    def _fetch_daily_bars_if_needed(
+        self,
+        symbol: str,
+        start_date: str,
+        end_date: str,
+        complete_symbols: set[str],
+    ) -> tuple[str, pd.DataFrame | None]:
+        if symbol in complete_symbols:
+            return "skipped", None
+        return "fetched", self.provider.fetch_daily_bars(symbol, start_date, end_date)
+
+    def _complete_daily_symbols(self, start_date: str, end_date: str) -> set[str]:
+        expected_dates = effective_a_share_date_range(start_date, end_date)
+        if expected_dates is None:
+            return set()
+        frame = self.warehouse.read_daily_bars(
+            start_date=expected_dates[0],
+            end_date=expected_dates[1],
+            require_ohlc=True,
+        )
+        if frame.empty or not {"symbol", "trade_date"}.issubset(frame.columns):
+            return set()
+        required_dates = a_share_trade_dates(expected_dates[0], expected_dates[1])
+        complete: set[str] = set()
+        normalized = frame.copy()
+        normalized["symbol"] = normalized["symbol"].astype(str)
+        normalized["trade_date"] = pd.to_datetime(normalized["trade_date"], errors="coerce")
+        for symbol, symbol_frame in normalized.dropna(subset=["trade_date"]).groupby("symbol"):
+            actual_dates = {pd.Timestamp(value).normalize() for value in symbol_frame["trade_date"].tolist()}
+            if required_dates.issubset(actual_dates):
+                complete.add(str(symbol))
+        return complete
 
     def _flush_full_market_frames(self, job_id: str, frames: list[pd.DataFrame]) -> int:
         if not frames:

@@ -189,6 +189,49 @@ def test_async_full_market_job_flushes_successful_rows_after_a_batch_failure(tmp
     assert sorted(warehouse.read_daily_bars()["symbol"].tolist()) == ["000001", "000003"]
 
 
+def test_full_market_job_skips_symbols_already_complete_in_local_warehouse(tmp_path):
+    class CountingProvider(FakeProvider):
+        def __init__(self):
+            super().__init__()
+            self.calls = []
+
+        def fetch_daily_bars(self, symbol, start_date, end_date):
+            self.calls.append(symbol)
+            return super().fetch_daily_bars(symbol, start_date, end_date)
+
+    warehouse = Warehouse(tmp_path)
+    warehouse.write_daily_bars(
+        pd.DataFrame(
+            {
+                "symbol": ["000001"],
+                "trade_date": ["2026-06-18"],
+                "open": [10.0],
+                "high": [10.5],
+                "low": [9.8],
+                "close": [10.2],
+                "volume": [1000],
+                "float_market_cap": [100.0],
+                "total_market_cap": [120.0],
+            }
+        )
+    )
+    provider = CountingProvider()
+    manager = SyncJobManager(warehouse=warehouse, provider=provider)
+
+    status = manager.run_full_market(
+        symbols=["000001", "000002"],
+        start_date="2026-06-18",
+        end_date="2026-06-19",
+    )
+
+    assert provider.calls == ["000002"]
+    assert status.processed_symbols == 2
+    assert status.skipped_symbols == 1
+    assert status.completed_symbols == 1
+    assert status.failed_symbols == 0
+    assert status.status == "completed"
+
+
 def test_capital_flow_job_reports_completed_with_errors_when_rows_import_with_failures(tmp_path):
     cache = LocalCache(tmp_path)
     warehouse = Warehouse(tmp_path)
