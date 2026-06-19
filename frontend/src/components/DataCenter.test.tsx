@@ -191,6 +191,56 @@ describe("DataCenter", () => {
     await waitFor(() => expect(onCoverageChange).toHaveBeenLastCalledWith(refreshedCoverage));
   });
 
+  it("keeps polling while a large warehouse coverage refresh is still running", async () => {
+    const emptyRefreshingCoverage = [
+      { dataset: "daily_bars", symbols: 0, start_date: null, end_date: null, missing_rows: 0 },
+      { dataset: "capital_flow", symbols: 0, start_date: null, end_date: null, missing_rows: 0 },
+      { dataset: "market_cap", symbols: 0, start_date: null, end_date: null, missing_rows: 0 }
+    ];
+    const refreshedCoverage = [
+      { dataset: "daily_bars", symbols: 5469, start_date: "2015-01-05", end_date: "2026-06-18", missing_rows: 2930 },
+      { dataset: "capital_flow", symbols: 5530, start_date: "2015-01-05", end_date: "2026-06-18", missing_rows: 19338 },
+      { dataset: "market_cap", symbols: 5469, start_date: "2015-01-05", end_date: "2026-06-18", missing_rows: 48959 }
+    ];
+    const onCoverageChange = vi.fn();
+    apiMocks.loadDataServiceHealth
+      .mockResolvedValueOnce({
+        ok: true,
+        cache_path: "C:\\cache",
+        port: 9011,
+        coverage: emptyRefreshingCoverage,
+        coverage_refreshing: true
+      });
+    for (let index = 0; index < 8; index += 1) {
+      apiMocks.loadDataServiceHealth.mockResolvedValueOnce({
+        ok: true,
+        cache_path: "C:\\cache",
+        port: 9011,
+        coverage: emptyRefreshingCoverage,
+        coverage_refreshing: true
+      });
+    }
+    apiMocks.loadDataServiceHealth.mockResolvedValueOnce({
+      ok: true,
+      cache_path: "C:\\cache",
+      port: 9011,
+      coverage: refreshedCoverage,
+      coverage_refreshing: false
+    });
+
+    render(<DataCenter cacheDir=".astock-cache" coverage={staleRecentCoverage} onCoverageChange={onCoverageChange} />);
+
+    expect(await screen.findByText(/http:\/\/127\.0\.0\.1:9011/)).toBeInTheDocument();
+    expect(onCoverageChange).not.toHaveBeenCalledWith(emptyRefreshingCoverage);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10 * 1200);
+    });
+
+    await waitFor(() => expect(onCoverageChange).toHaveBeenLastCalledWith(refreshedCoverage));
+    expect(apiMocks.loadDataServiceHealth).toHaveBeenCalledTimes(10);
+  });
+
   it("shows recent service logs when a fetch fails", async () => {
     const user = setupUser();
     apiMocks.fetchDailyBars.mockRejectedValue(new Error("HTTP 400: request_failed - boom"));
@@ -283,7 +333,7 @@ describe("DataCenter", () => {
     expect(apiMocks.fetchDailyBars).not.toHaveBeenCalled();
   });
 
-  it("maps full-market imported rows to an estimated missing-row decrease while syncing", async () => {
+  it("keeps full-market missing rows authoritative while syncing", async () => {
     const user = setupUser();
     const missingCoverage = [
       { dataset: "daily_bars", symbols: 5000, start_date: "2015-01-05", end_date: "2026-06-01", missing_rows: 100 },
@@ -304,6 +354,7 @@ describe("DataCenter", () => {
         completed_symbols: 2,
         failed_symbols: 0,
         imported_rows: 25,
+        filled_missing_rows: 8,
         current_symbol: "000002",
         start_date: "2026-06-01",
         end_date: "2026-06-05",
@@ -316,11 +367,13 @@ describe("DataCenter", () => {
     await screen.findByText(/http:\/\/127\.0\.0\.1:9011/);
     await user.click(screen.getByRole("button", { name: "补全缺失数据" }));
 
-    expect(await screen.findByText("75")).toBeInTheDocument();
-    expect(screen.getByText("本次已补 25 行")).toBeInTheDocument();
+    const rows = screen.getAllByRole("row");
+    expect(within(rows[1]).getByText("100")).toBeInTheDocument();
+    expect(screen.queryByText("75")).not.toBeInTheDocument();
+    expect(screen.getByText("已写入 25 行，确认补缺 8 行，等待覆盖刷新确认")).toBeInTheDocument();
   });
 
-  it("maps capital-flow imported rows only to the capital-flow missing-row estimate", async () => {
+  it("keeps capital-flow missing rows authoritative while syncing", async () => {
     const user = setupUser();
     const missingCoverage = [
       { dataset: "daily_bars", symbols: 5000, start_date: "2015-01-05", end_date: "2026-06-01", missing_rows: 100 },
@@ -354,6 +407,7 @@ describe("DataCenter", () => {
         processed_symbols: 2,
         skipped_symbols: 0,
         imported_rows: 25,
+        filled_missing_rows: 11,
         returned_rows: 30,
         current_symbol: "000003",
         start_date: "2026-06-01",
@@ -371,7 +425,9 @@ describe("DataCenter", () => {
     await waitFor(() => expect(apiMocks.fetchCapitalFlow).toHaveBeenCalled());
     const rows = screen.getAllByRole("row");
     expect(within(rows[1]).getByText("100")).toBeInTheDocument();
-    expect(within(rows[2]).getByText("35")).toBeInTheDocument();
+    expect(within(rows[2]).getByText("60")).toBeInTheDocument();
+    expect(screen.queryByText("35")).not.toBeInTheDocument();
+    expect(screen.getByText("已写入 25 行，确认补缺 11 行，等待覆盖刷新确认")).toBeInTheDocument();
   });
 
   it("does not refresh health immediately after starting an async capital-flow backfill", async () => {
@@ -585,7 +641,7 @@ describe("DataCenter", () => {
     await user.click(screen.getByRole("button", { name: "补齐资金流" }));
 
     expect(await screen.findByRole("button", { name: "停止任务" })).toBeInTheDocument();
-    expect(screen.getByText(/接口返回 8 行，新增 5 行/)).toBeInTheDocument();
+    expect(screen.getByText(/接口返回 8 行，写入 5 行/)).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "停止任务" }));
 
@@ -716,8 +772,8 @@ describe("DataCenter", () => {
       await vi.advanceTimersByTimeAsync(1100);
     });
     await waitFor(() => expect(apiMocks.loadSyncJob).toHaveBeenCalledWith("http://127.0.0.1:9011", "job-1"));
-    expect(await screen.findByText(/已处理 2\/2/)).toBeInTheDocument();
-    expect(screen.getAllByText(/导入 20 行/).length).toBeGreaterThan(0);
+    await waitFor(() => expect(screen.getByRole("status", { name: "数据中心状态" })).toHaveTextContent("全市场下载完成"));
+    expect(screen.getByRole("status", { name: "数据中心状态" })).toHaveTextContent("写入 20 行");
   });
 
   it("uses a recent business-day range and moves the date inputs after successful fetch coverage", async () => {

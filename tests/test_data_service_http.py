@@ -117,6 +117,11 @@ def test_service_health_returns_json_when_warehouse_coverage_fails(tmp_path):
         health = _request_json("GET", f"http://127.0.0.1:{port}/health")
 
         assert health["ok"] is True
+        for _ in range(10):
+            if not health.get("coverage_refreshing"):
+                break
+            time.sleep(0.2)
+            health = _request_json("GET", f"http://127.0.0.1:{port}/health")
         assert health["coverage"][0]["symbols"] >= 1
     finally:
         server.shutdown()

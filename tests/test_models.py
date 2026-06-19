@@ -194,6 +194,7 @@ def test_sync_job_status_tracks_batch_progress_and_cancellation():
         processed_symbols=3,
         imported_rows=12,
         returned_rows=18,
+        filled_missing_rows=7,
         skipped_symbols=1,
         start_date=date(2026, 6, 1),
         end_date=date(2026, 6, 5),
@@ -204,6 +205,7 @@ def test_sync_job_status_tracks_batch_progress_and_cancellation():
     assert status.status == "cancelled"
     assert status.processed_symbols == 3
     assert status.returned_rows == 18
+    assert status.filled_missing_rows == 7
     assert status.skipped_symbols == 1
     assert status.last_error == "000003: remote disconnected"
 

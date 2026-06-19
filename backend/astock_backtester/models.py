@@ -145,6 +145,7 @@ class DataOperationResult(BaseModel):
     status: Literal["ok", "partial"]
     imported_rows: int
     returned_rows: int = 0
+    filled_missing_rows: int = 0
     requested_symbols: list[str] = Field(default_factory=list)
     fetched_symbols: list[str] = Field(default_factory=list)
     missing_symbols: list[str] = Field(default_factory=list)
@@ -179,6 +180,7 @@ class SyncJobStatus(BaseModel):
     skipped_symbols: int = 0
     imported_rows: int = 0
     returned_rows: int = 0
+    filled_missing_rows: int = 0
     current_symbol: str | None = None
     start_date: date
     end_date: date

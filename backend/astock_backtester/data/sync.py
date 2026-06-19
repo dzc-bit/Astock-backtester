@@ -10,10 +10,20 @@ from uuid import uuid4
 import pandas as pd
 
 from astock_backtester.data.cache import LocalCache
+from astock_backtester.data.importer import normalize_daily_bars
 from astock_backtester.data.operations import effective_a_share_date_range, fetch_capital_flow_into_cache
 from astock_backtester.data.trading_calendar import a_share_trade_dates
 from astock_backtester.data.warehouse import Warehouse
 from astock_backtester.models import SyncJobStatus
+
+
+OHLC_COLUMNS = ["open", "high", "low", "close"]
+
+
+@dataclass
+class DailyCompletenessSnapshot:
+    complete_symbols: set[str]
+    existing_by_pair: dict[tuple[str, pd.Timestamp], pd.Series]
 
 
 @dataclass
@@ -48,16 +58,23 @@ class SyncJobManager:
             status.skipped_symbols = len(symbols)
             status.status = "completed"
             return status
-        complete_symbols = self._complete_daily_symbols(effective_start_date, effective_end_date)
+        snapshot = self._daily_completeness_snapshot(effective_start_date, effective_end_date)
         for symbol in symbols:
             status.current_symbol = symbol
             status.processed_symbols += 1
-            if symbol in complete_symbols:
+            if symbol in snapshot.complete_symbols:
                 status.skipped_symbols += 1
                 continue
             try:
                 frame = self.provider.fetch_daily_bars(symbol, effective_start_date, effective_end_date)
                 if not frame.empty:
+                    status.returned_rows += int(len(frame))
+                    status.filled_missing_rows += self._count_full_market_filled_missing_rows(
+                        frame,
+                        effective_start_date,
+                        effective_end_date,
+                        snapshot,
+                    )
                     self.warehouse.write_daily_bars(frame)
                     status.imported_rows += int(len(frame))
                     status.completed_symbols += 1
@@ -174,7 +191,7 @@ class SyncJobManager:
 
     def _run_full_market_job(self, job_id: str, symbols: list[str], start_date: str, end_date: str) -> None:
         try:
-            complete_symbols = self._complete_daily_symbols(start_date, end_date)
+            snapshot = self._daily_completeness_snapshot(start_date, end_date)
             pending_frames: list[pd.DataFrame] = []
             pending_rows = 0
             for batch in _chunks(symbols, self.full_market_batch_size):
@@ -184,7 +201,7 @@ class SyncJobManager:
                 batch_failed = False
                 with ThreadPoolExecutor(max_workers=max(1, self.full_market_workers)) as executor:
                     futures = {
-                        executor.submit(self._fetch_daily_bars_if_needed, symbol, start_date, end_date, complete_symbols): symbol
+                        executor.submit(self._fetch_daily_bars_if_needed, symbol, start_date, end_date, snapshot.complete_symbols): symbol
                         for symbol in batch
                     }
                     for future in as_completed(futures):
@@ -229,13 +246,13 @@ class SyncJobManager:
                     pending_frames.extend(frames)
                     pending_rows += sum(int(len(frame)) for frame in frames)
                     if batch_failed or pending_rows >= self.full_market_write_batch_rows:
-                        pending_rows = self._flush_full_market_frames(job_id, pending_frames)
+                        pending_rows = self._flush_full_market_frames(job_id, pending_frames, snapshot)
                 if self._finish_cancelled(job_id):
                     if pending_frames:
-                        self._flush_full_market_frames(job_id, pending_frames)
+                        self._flush_full_market_frames(job_id, pending_frames, snapshot)
                     return
             if pending_frames:
-                self._flush_full_market_frames(job_id, pending_frames)
+                self._flush_full_market_frames(job_id, pending_frames, snapshot)
             final = self.get_job(job_id)
             if final:
                 final.current_symbol = None
@@ -261,37 +278,109 @@ class SyncJobManager:
         return "fetched", self.provider.fetch_daily_bars(symbol, start_date, end_date)
 
     def _complete_daily_symbols(self, start_date: str, end_date: str) -> set[str]:
+        return self._daily_completeness_snapshot(start_date, end_date).complete_symbols
+
+    def _daily_completeness_snapshot(self, start_date: str, end_date: str) -> DailyCompletenessSnapshot:
         expected_dates = effective_a_share_date_range(start_date, end_date)
         if expected_dates is None:
-            return set()
+            return DailyCompletenessSnapshot(complete_symbols=set(), existing_by_pair={})
         frame = self.warehouse.read_daily_bars(
             start_date=expected_dates[0],
             end_date=expected_dates[1],
             require_ohlc=True,
         )
         if frame.empty or not {"symbol", "trade_date"}.issubset(frame.columns):
-            return set()
+            return DailyCompletenessSnapshot(complete_symbols=set(), existing_by_pair={})
         required_dates = a_share_trade_dates(expected_dates[0], expected_dates[1])
         complete: set[str] = set()
+        existing_by_pair: dict[tuple[str, pd.Timestamp], pd.Series] = {}
         normalized = frame.copy()
         normalized["symbol"] = normalized["symbol"].astype(str)
         normalized["trade_date"] = pd.to_datetime(normalized["trade_date"], errors="coerce")
-        for symbol, symbol_frame in normalized.dropna(subset=["trade_date"]).groupby("symbol"):
-            actual_dates = {pd.Timestamp(value).normalize() for value in symbol_frame["trade_date"].tolist()}
+        normalized = normalized.dropna(subset=["symbol", "trade_date"])
+        for _, row in normalized.drop_duplicates(["symbol", "trade_date"], keep="last").iterrows():
+            existing_by_pair[(str(row["symbol"]), pd.Timestamp(row["trade_date"]).normalize())] = row
+        if "float_market_cap" not in normalized.columns:
+            return DailyCompletenessSnapshot(complete_symbols=set(), existing_by_pair=existing_by_pair)
+        for symbol, symbol_frame in normalized.groupby("symbol"):
+            cap_complete = symbol_frame.dropna(subset=["float_market_cap"])
+            actual_dates = {pd.Timestamp(value).normalize() for value in cap_complete["trade_date"].tolist()}
             if required_dates.issubset(actual_dates):
                 complete.add(str(symbol))
-        return complete
+        return DailyCompletenessSnapshot(complete_symbols=complete, existing_by_pair=existing_by_pair)
 
-    def _flush_full_market_frames(self, job_id: str, frames: list[pd.DataFrame]) -> int:
+    def _flush_full_market_frames(
+        self,
+        job_id: str,
+        frames: list[pd.DataFrame],
+        snapshot: DailyCompletenessSnapshot | None = None,
+    ) -> int:
         if not frames:
             return 0
         merged = pd.concat(frames, ignore_index=True)
         frames.clear()
+        returned_rows = int(len(merged))
+        current = self.get_job(job_id)
+        filled_missing_rows = self._count_full_market_filled_missing_rows(
+            merged,
+            current.start_date.isoformat() if current else None,
+            current.end_date.isoformat() if current else None,
+            snapshot,
+        )
         self.warehouse.write_daily_bars(merged)
         current = self.get_job(job_id)
         if current:
-            self._mutate(job_id, imported_rows=current.imported_rows + int(len(merged)))
+            self._mutate(
+                job_id,
+                imported_rows=current.imported_rows + returned_rows,
+                returned_rows=current.returned_rows + returned_rows,
+                filled_missing_rows=current.filled_missing_rows + filled_missing_rows,
+            )
         return 0
+
+    def _count_full_market_filled_missing_rows(
+        self,
+        frame: pd.DataFrame,
+        start_date: str | None,
+        end_date: str | None,
+        snapshot: DailyCompletenessSnapshot | None = None,
+    ) -> int:
+        if frame.empty:
+            return 0
+        normalized = normalize_daily_bars(frame)
+        if normalized.empty or not {"symbol", "trade_date"}.issubset(normalized.columns):
+            return 0
+        normalized["trade_date"] = pd.to_datetime(normalized["trade_date"], errors="coerce")
+        normalized = normalized.dropna(subset=["symbol", "trade_date"])
+        if start_date:
+            normalized = normalized[normalized["trade_date"] >= pd.Timestamp(start_date)]
+        if end_date:
+            normalized = normalized[normalized["trade_date"] <= pd.Timestamp(end_date)]
+        normalized = normalized.drop_duplicates(["symbol", "trade_date"], keep="last")
+        if normalized.empty:
+            return 0
+        if snapshot is None:
+            snapshot = self._daily_completeness_snapshot(start_date, end_date) if start_date and end_date else None
+        existing_by_pair = snapshot.existing_by_pair if snapshot else {}
+
+        filled_rows = 0
+        for _, row in normalized.iterrows():
+            pair = (str(row["symbol"]), pd.Timestamp(row["trade_date"]).normalize())
+            existing_row = existing_by_pair.get(pair)
+            has_new_ohlc = all(column in row.index and pd.notna(row[column]) for column in OHLC_COLUMNS)
+            new_market_cap = row.get("float_market_cap", pd.NA)
+            if existing_row is None:
+                if has_new_ohlc or pd.notna(new_market_cap):
+                    filled_rows += 1
+                    existing_by_pair[pair] = row
+                continue
+            has_existing_ohlc = all(column in existing_row.index and pd.notna(existing_row[column]) for column in OHLC_COLUMNS)
+            existing_market_cap = existing_row.get("float_market_cap", pd.NA)
+            if (not has_existing_ohlc and has_new_ohlc) or (pd.isna(existing_market_cap) and pd.notna(new_market_cap)):
+                filled_rows += 1
+            if has_new_ohlc or pd.notna(new_market_cap):
+                existing_by_pair[pair] = row.combine_first(existing_row)
+        return filled_rows
 
     def _run_capital_flow_job(self, job_id: str, symbols: list[str], start_date: str, end_date: str) -> None:
         try:

@@ -23,7 +23,7 @@ type Props = {
 type BusyAction = "refresh" | "fetch" | "capital-flow" | "sample" | "file" | "sync" | null;
 
 const COVERAGE_REFRESH_RETRY_MS = 1200;
-const COVERAGE_REFRESH_MAX_ATTEMPTS = 4;
+const COVERAGE_REFRESH_MAX_ATTEMPTS = 30;
 const A_SHARE_HOLIDAY_RANGES: Record<number, Array<[string, string]>> = {
   2024: [
     ["2024-01-01", "2024-01-01"],
@@ -151,7 +151,10 @@ function syncFinishedMessage(job: SyncJobStatus): string {
   if (job.status === "cancelled") {
     return job.mode === "capital_flow_backfill" ? "资金流补齐已停止" : "全市场下载已停止";
   }
-  return `${job.mode === "capital_flow_backfill" ? "资金流补齐完成" : "全市场下载完成"}，导入 ${job.imported_rows} 行`;
+  const filledText = job.filled_missing_rows && job.filled_missing_rows > 0
+    ? `，确认补缺 ${job.filled_missing_rows} 行`
+    : "";
+  return `${job.mode === "capital_flow_backfill" ? "资金流补齐完成" : "全市场下载完成"}，写入 ${job.imported_rows} 行${filledText}`;
 }
 
 function fieldText(value: unknown): string | null {
@@ -195,19 +198,6 @@ function isPendingEmptyHealthCoverage(coverage: DatasetCoverage[], refreshing: b
   return Boolean(refreshing) && isEmptyCoverageSnapshot(coverage);
 }
 
-function coverageWithSyncProgress(coverage: DatasetCoverage[], job: SyncJobStatus | null): DatasetCoverage[] {
-  if (!job || !isSyncRunning(job) || job.imported_rows <= 0) {
-    return coverage;
-  }
-  const targetDataset = job.mode === "capital_flow_backfill" ? "capital_flow" : "daily_bars";
-  return coverage.map((item) => {
-    if (item.dataset !== targetDataset || item.missing_rows <= 0) {
-      return item;
-    }
-    return { ...item, missing_rows: Math.max(0, item.missing_rows - job.imported_rows) };
-  });
-}
-
 export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceReady }: Props) {
   const [service, setService] = useState<DataServiceStatus | null>(null);
   const [symbolsInput, setSymbolsInput] = useState("");
@@ -220,16 +210,17 @@ export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceRead
   const [syncJob, setSyncJob] = useState<SyncJobStatus | null>(null);
   const [message, setMessage] = useState("正在连接本地数据服务");
   const [busyAction, setBusyAction] = useState<BusyAction>(null);
-  const [syncBaseCoverage, setSyncBaseCoverage] = useState<DatasetCoverage[] | null>(null);
   const [coverageRefreshToken, setCoverageRefreshToken] = useState(0);
   const syncRunning = isSyncRunning(syncJob);
   const syncImportedRows = syncRunning && syncJob ? syncJob.imported_rows : 0;
+  const syncFilledMissingRows = syncRunning && syncJob ? syncJob.filled_missing_rows ?? 0 : 0;
   const busy = busyAction !== null || syncRunning;
   const recentSyncFailures = syncJob ? recentSyncFailureTexts(syncJob) : [];
-  const displayCoverage = useMemo(
-    () => coverageWithSyncProgress(syncBaseCoverage ?? coverage, syncJob),
-    [coverage, syncBaseCoverage, syncJob]
-  );
+  const displayCoverage = coverage;
+  const syncProgressNote =
+    syncImportedRows > 0
+      ? `已写入 ${syncImportedRows} 行${syncFilledMissingRows > 0 ? `，确认补缺 ${syncFilledMissingRows} 行` : ""}，等待覆盖刷新确认`
+      : null;
 
   const symbols = useMemo(
     () =>
@@ -372,7 +363,7 @@ export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceRead
         window.clearTimeout(timer);
       }
     };
-  }, [service, coverageRefreshToken]);
+  }, [service, coverageRefreshToken, onCoverageChange, dateRangeTouched, startDate, endDate]);
 
   useEffect(() => {
     const activeSyncJob = syncJob;
@@ -394,7 +385,6 @@ export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceRead
           );
           if (!isSyncRunning(result.job)) {
             await refreshAfterOperation(service);
-            setSyncBaseCoverage(null);
           }
         })
         .catch((error: Error) => {
@@ -477,7 +467,6 @@ export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceRead
       setMessage(operationMessage(result));
       onCoverageChange(result.coverage);
       if (result.job) {
-        setSyncBaseCoverage(coverage);
         setSyncJob(result.job);
         setMessage(isSyncRunning(result.job) ? syncRunningMessage(result.job) : syncFinishedMessage(result.job));
         if (isSyncRunning(result.job)) {
@@ -561,7 +550,6 @@ export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceRead
       return;
     }
     setBusyAction(action);
-    setSyncBaseCoverage(coverage);
     setMessage(action === "fetch" ? "正在补全全市场缺失数据" : "正在下载全市场历史数据");
     try {
       const result = await startFullMarketSync(service.base_url, startDate, endDate);
@@ -571,10 +559,8 @@ export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceRead
       } else {
         setMessage(syncFinishedMessage(result.job));
         await refreshAfterOperation(service);
-        setSyncBaseCoverage(null);
       }
     } catch (error) {
-      setSyncBaseCoverage(null);
       setMessage(error instanceof Error ? error.message : "全市场下载失败");
       await refreshLogs(service);
     } finally {
@@ -593,7 +579,6 @@ export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceRead
       setMessage(isSyncRunning(result.job) ? syncRunningMessage(result.job) : syncFinishedMessage(result.job));
       if (!isSyncRunning(result.job)) {
         await refreshAfterOperation(service);
-        setSyncBaseCoverage(null);
       }
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "停止任务失败");
@@ -684,7 +669,10 @@ export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceRead
             <span>
               完成 {syncJob.completed_symbols}，跳过 {syncJob.skipped_symbols ?? 0}，失败 {syncJob.failed_symbols}
             </span>
-            <span>接口返回 {syncJob.returned_rows ?? 0} 行，新增 {syncJob.imported_rows} 行</span>
+            <span>
+              接口返回 {syncJob.returned_rows ?? 0} 行，写入 {syncJob.imported_rows} 行
+              {syncJob.filled_missing_rows && syncJob.filled_missing_rows > 0 ? `，确认补缺 ${syncJob.filled_missing_rows} 行` : ""}
+            </span>
             {syncJob.current_symbol ? <span>当前 {syncJob.current_symbol}</span> : null}
             {syncJob.last_error ? <span>最近失败: {syncJob.last_error}</span> : null}
             {recentSyncFailures.length > 0 ? (
@@ -743,8 +731,8 @@ export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceRead
                     <td>{item.start_date ?? "-"} 至 {item.end_date ?? "-"}</td>
                     <td>
                       <span>{item.missing_rows}</span>
-                      {syncJob && item.dataset === (syncJob.mode === "capital_flow_backfill" ? "capital_flow" : "daily_bars") && syncImportedRows > 0 ? (
-                        <small className="coverage-progress-note">本次已补 {syncImportedRows} 行</small>
+                      {syncJob && item.dataset === (syncJob.mode === "capital_flow_backfill" ? "capital_flow" : "daily_bars") && syncProgressNote ? (
+                        <small className="coverage-progress-note">{syncProgressNote}</small>
                       ) : null}
                     </td>
                     <td>

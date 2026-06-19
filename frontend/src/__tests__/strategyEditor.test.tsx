@@ -1322,6 +1322,42 @@ describe("A 股回测工作台界面", () => {
     expect(screen.getByText(/可用范围 2024-01-02 至 2026-05-30/)).toBeInTheDocument();
   });
 
+  it("runs backtests through the latest local daily coverage date until dates are edited", async () => {
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    vi.setSystemTime(new Date("2026-06-20T10:00:00+08:00"));
+    apiMocks.loadDataServiceHealth.mockResolvedValue({
+      ok: true,
+      cache_path: "C:\\cache",
+      port: 9010,
+      coverage: [
+        { dataset: "daily_bars", symbols: 5469, start_date: "2015-01-05", end_date: "2026-06-18", missing_rows: 2930 },
+        { dataset: "market_cap", symbols: 5469, start_date: "2015-01-05", end_date: "2026-06-18", missing_rows: 48959 }
+      ]
+    });
+
+    render(<App />);
+
+    await screen.findByText("日线行情");
+    await waitFor(() => expect(screen.getAllByLabelText("结束日期")[0]).toHaveValue("2026-06-18"));
+    expect(screen.getAllByLabelText("开始日期")[0]).toHaveValue("2026-06-12");
+    await user.click(screen.getByRole("button", { name: "运行历史回测" }));
+
+    expect(apiMocks.runBacktestStreamWithDataService).toHaveBeenCalledWith(
+      "http://127.0.0.1:9010",
+      expect.any(Object),
+      expect.objectContaining({
+        start_date: "2026-06-12",
+        end_date: "2026-06-18"
+      }),
+      expect.objectContaining({
+        onPhase: expect.any(Function),
+        onProgress: expect.any(Function),
+        onTrade: expect.any(Function),
+        onResult: expect.any(Function)
+      })
+    );
+  });
+
   it("validates exit rules with exit-specific low-break conditions before running", async () => {
     const user = userEvent.setup();
     render(<App />);

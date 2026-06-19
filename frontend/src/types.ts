@@ -51,6 +51,7 @@ export type FetchResult = {
   status: "ok" | "partial";
   imported_rows: number;
   returned_rows?: number;
+  filled_missing_rows?: number;
   requested_symbols: string[];
   fetched_symbols: string[];
   missing_symbols: string[];
@@ -80,6 +81,7 @@ export type SyncJobStatus = {
   skipped_symbols?: number;
   imported_rows: number;
   returned_rows?: number;
+  filled_missing_rows?: number;
   current_symbol?: string | null;
   start_date: string;
   end_date: string;

@@ -170,7 +170,11 @@ docs/capital-flow-crawler-report.md
 
 `/coverage/daily-bars` 必须使用 A 股交易日历。不要用普通工作日直接判断缺失交易日。
 
-数据中心的“补全缺失数据”默认是全市场补齐：股票代码为空时走 `/sync/full-market`；只有用户显式输入股票代码时，才走指定股票 `/fetch/daily-bars`。全市场同步运行中，覆盖表的日线 `missing_rows` 要随本次 `imported_rows` 做可视化下降，不能一直静态显示旧缺口。
+数据中心的“补全缺失数据”默认是全市场补齐：股票代码为空时走 `/sync/full-market`；只有用户显式输入股票代码时，才走指定股票 `/fetch/daily-bars`。覆盖表的 `missing_rows` 只能来自刷新后的真实仓库 coverage，前端绝不能用本次 `imported_rows` 抵扣或估算缺失行，否则会出现“任务没补完却显示缺失为 0”的错误。同步进度里 `imported_rows` 表示接口返回并写入/合并的行，不等于缺口减少；如需展示实际补缺，使用后端 `filled_missing_rows`，并标注“等待覆盖刷新确认”。
+
+全市场日线同步的跳过条件必须同时满足 OHLC 完整和 `float_market_cap` 完整。不能因为某只股票 OHLC 已有就跳过它的市值缺口；市值缺口应随 `/sync/full-market` 或指定 `/fetch/daily-bars` 的日线补齐一并修复。后端计算 `filled_missing_rows` 时应复用任务开始时的仓库完整性快照，避免每个写入批次重复扫仓拖慢数据中心。
+
+回测设置的默认日期在用户未手动编辑前应跟随 `daily_bars` coverage 的最新日期，并按最近 A 股交易日范围回填；用户一旦手动修改日期或点“套用数据中心日期”，后续不要再自动覆盖用户选择。这样本地仓库已到 2026-06-18 时，回测候选不应仍停在旧的 2026-01-20。
 
 补缺日线 provider 顺序必须以公开 HTTP 爬虫为主：`HttpAStockProvider -> ADataProvider -> AkshareProvider`。`HttpAStockProvider` 的百度日 K 线普通 `requests` 可能被 403，必须保留 `curl_cffi` 浏览器 TLS 指纹传输作为同一 HTTP 主源内的备用，不要因为普通 requests 403 就直接跳到 adata/AKShare。`adata` 数据可能只覆盖到 2025 年底，不能放在近期补缺主路径第一位；AKShare 只能作为最后保底。所有来源都失败或返回空时，错误必须聚合展示每个 provider 的尝试结果，不能只把 AKShare 的断连显示成唯一失败原因。
 

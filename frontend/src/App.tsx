@@ -59,6 +59,69 @@ type PendingStrategySave = {
   name: string;
 } | null;
 
+const A_SHARE_HOLIDAY_RANGES: Record<number, Array<[string, string]>> = {
+  2024: [
+    ["2024-01-01", "2024-01-01"],
+    ["2024-02-09", "2024-02-17"],
+    ["2024-04-04", "2024-04-06"],
+    ["2024-05-01", "2024-05-05"],
+    ["2024-06-10", "2024-06-10"],
+    ["2024-09-15", "2024-09-17"],
+    ["2024-10-01", "2024-10-07"]
+  ],
+  2025: [
+    ["2025-01-01", "2025-01-01"],
+    ["2025-01-28", "2025-02-04"],
+    ["2025-04-04", "2025-04-06"],
+    ["2025-05-01", "2025-05-05"],
+    ["2025-05-31", "2025-06-02"],
+    ["2025-10-01", "2025-10-08"]
+  ],
+  2026: [
+    ["2026-01-01", "2026-01-03"],
+    ["2026-02-15", "2026-02-23"],
+    ["2026-04-04", "2026-04-06"],
+    ["2026-05-01", "2026-05-05"],
+    ["2026-06-19", "2026-06-21"],
+    ["2026-09-25", "2026-09-27"],
+    ["2026-10-01", "2026-10-07"]
+  ]
+};
+
+function formatLocalDate(date: Date): string {
+  const year = date.getFullYear();
+  const month = `${date.getMonth() + 1}`.padStart(2, "0");
+  const day = `${date.getDate()}`.padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function isAShareTradingDay(date: Date): boolean {
+  if (date.getDay() === 0 || date.getDay() === 6) {
+    return false;
+  }
+  const text = formatLocalDate(date);
+  return !(A_SHARE_HOLIDAY_RANGES[date.getFullYear()] ?? []).some(
+    ([start, end]) => start <= text && text <= end
+  );
+}
+
+function recentTradingDateRangeEnding(endDate: string, days = 5): { startDate: string; endDate: string } {
+  const end = new Date(`${endDate}T00:00:00`);
+  const start = new Date(end);
+  let counted = 1;
+  while (counted < days) {
+    start.setDate(start.getDate() - 1);
+    if (isAShareTradingDay(start)) {
+      counted += 1;
+    }
+  }
+  return { startDate: formatLocalDate(start), endDate };
+}
+
+function latestDailyCoverage(coverage: DatasetCoverage[]): DatasetCoverage | undefined {
+  return coverage.find((item) => item.dataset === "daily_bars");
+}
+
 function formatPercent(value: number | null | undefined): string {
   return value == null ? "--" : `${(value * 100).toFixed(2)}%`;
 }
@@ -215,6 +278,7 @@ export function App() {
   const [settingsDraftErrors, setSettingsDraftErrors] = useState<string[]>([]);
   const [strategySaveMessage, setStrategySaveMessage] = useState<string | null>(null);
   const [pendingStrategySave, setPendingStrategySave] = useState<PendingStrategySave>(null);
+  const [settingsDateTouched, setSettingsDateTouched] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -280,6 +344,42 @@ export function App() {
     setPendingStrategySave(null);
     setStrategySaveMessage("本次未保存策略，你可以继续调整后再次运行。");
   };
+
+  const handleCoverageChange = (nextCoverage: DatasetCoverage[]) => {
+    setCoverage(nextCoverage);
+  };
+
+  const handleSettingsChange = (nextSettings: BacktestSettingsConfig) => {
+    setSettings((current) => {
+      if (nextSettings.start_date !== current.start_date || nextSettings.end_date !== current.end_date) {
+        setSettingsDateTouched(true);
+      }
+      return nextSettings;
+    });
+  };
+
+  useEffect(() => {
+    if (settingsDateTouched) {
+      return;
+    }
+    const daily = latestDailyCoverage(coverage);
+    if (!daily?.end_date) {
+      return;
+    }
+    const today = formatLocalDate(new Date());
+    const effectiveEndDate = daily.end_date < today ? daily.end_date : today;
+    const range = recentTradingDateRangeEnding(effectiveEndDate);
+    setSettings((current) => {
+      if (current.start_date === range.startDate && current.end_date === range.endDate) {
+        return current;
+      }
+      return {
+        ...current,
+        start_date: range.startDate,
+        end_date: range.endDate
+      };
+    });
+  }, [coverage, settingsDateTouched]);
 
   const runBacktest = async () => {
     const validationErrors = validateBacktestSettings(settings, settingsDraftErrors);
@@ -683,7 +783,7 @@ export function App() {
           coverage={coverage}
           settings={settings}
           strategy={strategy}
-          onSettingsChange={setSettings}
+          onSettingsChange={handleSettingsChange}
           onStrategyChange={setStrategy}
           disabled={isRunningBacktest}
           conditionValidation={conditionValidation}
@@ -717,7 +817,7 @@ export function App() {
         <DataCenter
           cacheDir=".astock-cache"
           coverage={coverage}
-          onCoverageChange={setCoverage}
+          onCoverageChange={handleCoverageChange}
           onServiceReady={setDataService}
         />
       </div>
