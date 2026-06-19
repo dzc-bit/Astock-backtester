@@ -472,6 +472,7 @@ class RealtimeMarketProvider:
     breadth_source_timeout: float = 0.8
     sector_time_budget: float = 3.0
     sector_source_timeout: float = 0.8
+    local_snapshot_time_budget: float = 2.0
     allow_eastmoney_breadth_fallback: bool = False
     _last_live_sector_rows: list[dict] = field(default_factory=list, init=False, repr=False)
     _sector_member_cache: dict[str, list[str]] = field(default_factory=dict, init=False, repr=False)
@@ -549,7 +550,7 @@ class RealtimeMarketProvider:
         diagnostics.extend(breadth_diagnostics)
         diagnostics.extend(sector_diagnostics)
         has_live_context = bool(indexes and live_breadth and live_sectors)
-        local_snapshot = None if has_live_context else self._snapshot_from_local(now)
+        local_snapshot = None if has_live_context else self._snapshot_from_local_with_budget(now, diagnostics)
         strong_sectors = live_sectors or (local_snapshot.strong_sectors if local_snapshot else [])
         yesterday_sectors = local_snapshot.yesterday_strong_sectors if local_snapshot else []
         breadth = live_breadth or (local_snapshot.breadth if local_snapshot else None)
@@ -690,6 +691,29 @@ class RealtimeMarketProvider:
             self._skip_local_topic_fetch_once = True
             diagnostics.append(f"实时强势题材接口失败：{exc}，已回退本地题材。")
             return []
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
+
+    def _snapshot_from_local_with_budget(self, now: datetime, diagnostics: list[str]) -> RealtimeMarketSnapshot:
+        if self.local_snapshot_time_budget is None:
+            return self._snapshot_from_local(now)
+        executor = ThreadPoolExecutor(max_workers=1)
+        future = executor.submit(self._snapshot_from_local, now)
+        try:
+            return future.result(timeout=self.local_snapshot_time_budget)
+        except TimeoutError:
+            future.cancel()
+            diagnostics.append(f"本地兜底行情快照超时：{self.local_snapshot_time_budget:g}秒，已继续返回可用行情。")
+            return unavailable_market_snapshot(
+                "本地兜底行情快照生成超时。",
+                diagnostics=[f"本地兜底行情快照超时：{self.local_snapshot_time_budget:g}秒。"],
+            )
+        except Exception as exc:
+            diagnostics.append(f"本地兜底行情快照失败：{exc}，已继续返回可用行情。")
+            return unavailable_market_snapshot(
+                f"本地兜底行情快照生成失败：{exc}",
+                diagnostics=[f"本地兜底行情快照失败：{exc}"],
+            )
         finally:
             executor.shutdown(wait=False, cancel_futures=True)
 
