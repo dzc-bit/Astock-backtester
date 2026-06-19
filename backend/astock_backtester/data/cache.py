@@ -62,9 +62,15 @@ class LocalCache:
 
     def read_daily_bars(self) -> pd.DataFrame:
         if self.daily_bars_path.exists():
-            return pd.read_parquet(self.daily_bars_path).sort_values(["symbol", "trade_date"]).reset_index(drop=True)
+            try:
+                return pd.read_parquet(self.daily_bars_path).sort_values(["symbol", "trade_date"]).reset_index(drop=True)
+            except Exception:
+                pass
         if self.daily_bars_pickle_path.exists():
-            return pd.read_pickle(self.daily_bars_pickle_path).sort_values(["symbol", "trade_date"]).reset_index(drop=True)
+            try:
+                return pd.read_pickle(self.daily_bars_pickle_path).sort_values(["symbol", "trade_date"]).reset_index(drop=True)
+            except Exception:
+                pass
         return pd.DataFrame()
 
     def coverage(self) -> list[DatasetCoverage]:

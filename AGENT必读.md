@@ -29,7 +29,7 @@ git branch --show-current
 https://github.com/dzc-bit/Astock-backtester.git
 ```
 
-保护已有未提交修改。不要覆盖无关文件，不要清理、删除、迁移 `D:\New project 6\运行产物`。版本号统一保持 `1.2.2`，除非用户明确要求改版本。
+保护已有未提交修改。不要覆盖无关文件，不要清理、删除、迁移 `D:\New project 6\运行产物`。版本号统一跟随桌面端当前版本，当前为 `1.2.4`，除非用户明确要求改版本。
 
 ## 2. 绝对不要碰错边界
 
@@ -108,6 +108,13 @@ https://github.com/dzc-bit/Astock-backtester.git
 - 缓存最近成功结果只能作为 stale/fallback 明确标注。
 - 当前请求失败时，内部缓存不能参与本次 live 判定。
 - 不做登录、cookie 池、代理池、验证码绕过或付费抓取。
+
+同花顺大盘评分卡片规则：
+
+- 主源是 `q.10jqka.com.cn/api.php?t=indexflash&` 的 `dppj_data`，这是 10 分制同花顺大盘评级。
+- 该接口缺少浏览器脚本生成的 `v` cookie 时会 403；后端必须先执行同花顺 `chameleon` 浏览器脚本（当前用 Node/jsdom）生成本次请求 cookie，再请求 `indexflash`。
+- 成功解析后写入 `emotion.market_degree` / `emotion.market_degree_label`，前端“大盘评分”卡片直接消费该值。
+- 不要用财联社热度、新闻、本地启发式或其他评分静默替代同花顺评分；失败时保留 diagnostics/failures 并显示不可用或明确 fallback。
 
 ## 6. 行情评价状态机
 
@@ -198,6 +205,7 @@ POST /run/backtest/stream
 
 - `GET /ping`
 - `GET /health`
+- `GET /market/finance`
 - `POST /coverage/daily-bars`
 - `GET /realtime/market-snapshot`
 - `GET /market/commentary`
@@ -234,6 +242,7 @@ D:\New project 6\运行产物\签名密钥\a-stock-backtester-v017.key
 - `latest.json` 必须由本次真实 `.sig` 生成。
 - 不手改、不伪造、不复用旧 `latest.json` 或旧 `.sig`。
 - 覆盖安装后比较安装目录 sidecar 和工作区 sidecar SHA256。
+- 覆盖安装只使用本轮构建产物；源码版本、Tauri 版本和安装包文件名不一致时，先修正版本并重新构建，不复用旧包。
 - GitHub Release 的 updater 资产名尽量用 ASCII，避免 `latest.json` URL 和安装包资产名不一致。
 
 硬坑：

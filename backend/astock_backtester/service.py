@@ -373,11 +373,15 @@ class DataServiceHandler(BaseHTTPRequestHandler):
         try:
             payload = self._read_json()
             if self.path == "/coverage/daily-bars":
+                symbols = payload.get("symbols")
+                if not symbols:
+                    self._send_json({"items": []})
+                    return
                 self._send_json(
                     build_daily_bars_coverage(
                         self.server.state.cache,
                         self.server.state.warehouse,
-                        symbols=payload.get("symbols"),
+                        symbols=symbols,
                         start_date=payload.get("start_date"),
                         end_date=payload.get("end_date"),
                     ).model_dump(mode="json")

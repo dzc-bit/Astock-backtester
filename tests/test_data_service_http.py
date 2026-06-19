@@ -173,6 +173,21 @@ def test_service_coverage_endpoint_returns_symbol_items(tmp_path):
         thread.join(timeout=5)
 
 
+def test_service_coverage_endpoint_skips_full_market_details_without_symbols(tmp_path):
+    server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
+    server.state.cache.write_daily_bars(sample_daily_bars())
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        response = _request_json("POST", f"http://127.0.0.1:{port}/coverage/daily-bars", {})
+
+        assert response["items"] == []
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
 def test_service_coverage_endpoint_filters_requested_symbols_and_dates(tmp_path):
     server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
     server.state.cache.write_daily_bars(sample_daily_bars())
@@ -2909,6 +2924,7 @@ def test_service_market_finance_prefers_ths_market_degree_for_score_card(tmp_pat
 
     server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
     server.state.finance_provider.requester = requester
+    server.state.finance_provider.browser_cookie_getter = lambda: None
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:

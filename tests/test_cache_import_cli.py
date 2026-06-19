@@ -35,6 +35,17 @@ def test_local_cache_reports_dataset_coverage(tmp_path):
     assert str(daily.start_date) == "2024-01-02"
 
 
+def test_local_cache_ignores_corrupt_daily_bars_parquet(tmp_path):
+    cache = LocalCache(tmp_path)
+    cache.daily_bars_path.write_bytes(b"not a parquet file")
+
+    loaded = cache.read_daily_bars()
+    coverage = cache.coverage()
+
+    assert loaded.empty
+    assert all(item.symbols == 0 for item in coverage)
+
+
 def test_cli_coverage_command_returns_daily_bars_dataset(tmp_path):
     payload = {"command": "coverage", "cache_dir": str(tmp_path)}
     response = handle_command(payload)
