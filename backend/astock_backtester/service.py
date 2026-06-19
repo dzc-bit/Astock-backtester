@@ -274,7 +274,9 @@ class DataServiceHandler(BaseHTTPRequestHandler):
         return json.loads(self.rfile.read(length).decode("utf-8"))
 
     def _read_backtest_frame(self, settings: BacktestSettings) -> Any:
+        symbols = settings.custom_symbols if settings.stock_pool == "custom" else None
         frame = self.server.state.warehouse.read_daily_bars(
+            symbols=symbols,
             start_date=str(settings.start_date),
             end_date=str(settings.end_date),
             require_ohlc=True,

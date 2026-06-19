@@ -695,6 +695,40 @@ def test_service_streams_backtest_trade_events_before_final_result(tmp_path, bas
         thread.join(timeout=5)
 
 
+def test_service_backtest_stream_reads_only_custom_symbols_from_warehouse(tmp_path, basic_strategy, basic_settings):
+    class RecordingWarehouse(Warehouse):
+        def __init__(self, root):
+            super().__init__(root)
+            self.read_calls = []
+
+        def read_daily_bars(self, *args, **kwargs):
+            self.read_calls.append(kwargs)
+            return super().read_daily_bars(*args, **kwargs)
+
+    warehouse = RecordingWarehouse(tmp_path)
+    warehouse.write_daily_bars(sample_daily_bars())
+    server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
+    server.state.warehouse = warehouse
+    settings = basic_settings.model_copy(update={"stock_pool": "custom", "custom_symbols": ["AAA"]})
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        events = _request_ndjson(
+            f"http://127.0.0.1:{port}/run/backtest/stream",
+            {
+                "strategy": json.loads(basic_strategy.model_dump_json()),
+                "settings": json.loads(settings.model_dump_json()),
+            },
+        )
+
+        assert events[-1]["type"] == "result"
+        assert warehouse.read_calls[0]["symbols"] == ["AAA"]
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
 def test_service_streams_serialized_trade_blocked_event(tmp_path, basic_settings):
     from astock_backtester.models import ConditionGroup, ConditionNode, ConditionOperator, StrategyConfig
 
