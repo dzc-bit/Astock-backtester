@@ -2305,6 +2305,56 @@ def test_realtime_provider_returns_breadth_without_waiting_for_slow_sector_sourc
     assert any("实时强势题材接口超时" in item for item in snapshot.diagnostics)
 
 
+def test_realtime_provider_returns_sectors_without_waiting_for_slow_breadth_sources(tmp_path):
+    warehouse = Warehouse(tmp_path)
+    provider = RealtimeMarketProvider(warehouse)
+    provider.breadth_time_budget = 0.02
+    provider._fetch_indexes = lambda: [
+        MarketIndexQuote(
+            symbol="sh000001",
+            name="上证指数",
+            last=3100.0,
+            previous_close=3080.0,
+            change=20.0,
+            change_pct=0.0064935,
+            source="fake-live",
+        )
+    ]
+
+    def slow_breadth(diagnostics):
+        time.sleep(0.2)
+        return MarketBreadth(up=3200, down=1700, flat=200, total=5100, source="slow-breadth")
+
+    provider._fetch_live_breadth = slow_breadth
+    provider._fetch_live_sectors = lambda diagnostics: [
+        SectorMover(name="快板块", change_pct=0.05, source="fast-sector")
+    ]
+
+    def local_snapshot(now):
+        return RealtimeMarketSnapshot(
+            status="stale",
+            source="local-latest",
+            updated_at=now,
+            indexes=[],
+            breadth=None,
+            strong_sectors=[],
+            yesterday_strong_sectors=[],
+            message="local",
+        )
+
+    provider._snapshot_from_local = local_snapshot
+
+    started_at = time.perf_counter()
+    snapshot = provider.market_snapshot()
+    elapsed = time.perf_counter() - started_at
+
+    assert elapsed < 0.15
+    assert snapshot.status == "stale"
+    assert snapshot.breadth is None
+    assert snapshot.strong_sectors[0].source == "fast-sector"
+    assert any("实时红绿家数接口超时" in item for item in snapshot.diagnostics)
+
+
 def test_realtime_provider_does_not_cache_stale_snapshot_with_local_fallback_sectors(tmp_path):
     warehouse = Warehouse(tmp_path)
     provider = RealtimeMarketProvider(warehouse)

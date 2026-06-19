@@ -509,7 +509,7 @@ class RealtimeMarketProvider:
         with ThreadPoolExecutor(max_workers=3) as executor:
             futures = {
                 executor.submit(self._fetch_indexes): "indexes",
-                executor.submit(self._call_live_breadth, breadth_diagnostics): "breadth",
+                executor.submit(self._fetch_live_breadth_with_budget, breadth_diagnostics): "breadth",
                 executor.submit(self._fetch_live_sectors_with_budget, sector_diagnostics): "sectors",
             }
             for future in as_completed(futures):
@@ -656,6 +656,23 @@ class RealtimeMarketProvider:
             return self._fetch_live_breadth(diagnostics)
         except TypeError:
             return self._fetch_live_breadth()
+
+    def _fetch_live_breadth_with_budget(self, diagnostics: list[str]) -> MarketBreadth | None:
+        if self.breadth_time_budget is None:
+            return self._call_live_breadth(diagnostics)
+        executor = ThreadPoolExecutor(max_workers=1)
+        future = executor.submit(self._call_live_breadth, diagnostics)
+        try:
+            return future.result(timeout=self.breadth_time_budget)
+        except TimeoutError:
+            future.cancel()
+            diagnostics.append(f"实时红绿家数接口超时：{self.breadth_time_budget:g}秒，已继续返回可用行情。")
+            return None
+        except Exception as exc:
+            diagnostics.append(f"实时红绿家数接口失败：{exc}，已继续返回可用行情。")
+            return None
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
 
     def _fetch_live_sectors_with_budget(self, diagnostics: list[str]) -> list[SectorMover]:
         if self.sector_time_budget is None:
