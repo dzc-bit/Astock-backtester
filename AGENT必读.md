@@ -86,12 +86,13 @@ https://github.com/dzc-bit/Astock-backtester.git
 
 红绿家数 provider 链：
 
-1. 同花顺市场总览：`q.10jqka.com.cn/index/index/board/all/`
-2. Sina 批量实时个股：`hq.sinajs.cn/list=...`
-3. Tencent 批量实时个股：`qt.gtimg.cn/q=...`
-4. AKShare：`stock_zh_a_spot_em()`
-5. 后端重型公开行情爬虫：公开 XHR 优先，headless DOM 其次。
-6. 东方财富轻量 spot：只作受控备选，必须有超时、字段校验、数量校验和 diagnostics。
+1. 财联社行情页对应的签名 XHR：`https://www.cls.cn/quotation` 背后的 `x-quote.cls.cn/quote/index/home`，解析 `up_down_dis`；该来源拿到数字后直接展示，不再用 `total>=3000` 额外丢弃。
+2. 同花顺市场总览：`q.10jqka.com.cn/index/index/board/all/`
+3. Sina 批量实时个股：`hq.sinajs.cn/list=...`
+4. Tencent 批量实时个股：`qt.gtimg.cn/q=...`
+5. AKShare：`stock_zh_a_spot_em()`
+6. 后端重型公开行情爬虫：公开 XHR 优先，headless DOM 其次。
+7. 东方财富轻量 spot：只作受控备选，必须有超时、字段校验、数量校验和 diagnostics。
 
 强势板块 provider 链：
 
@@ -169,7 +170,7 @@ docs/capital-flow-crawler-report.md
 
 数据中心的“补全缺失数据”默认是全市场补齐：股票代码为空时走 `/sync/full-market`；只有用户显式输入股票代码时，才走指定股票 `/fetch/daily-bars`。全市场同步运行中，覆盖表的日线 `missing_rows` 要随本次 `imported_rows` 做可视化下降，不能一直静态显示旧缺口。
 
-补缺日线 provider 顺序必须以公开 HTTP 爬虫为主：`HttpAStockProvider -> ADataProvider -> AkshareProvider`。`adata` 数据可能只覆盖到 2025 年底，不能放在近期补缺主路径第一位；AKShare 只能作为最后保底。所有来源都失败或返回空时，错误必须聚合展示每个 provider 的尝试结果，不能只把 AKShare 的断连显示成唯一失败原因。
+补缺日线 provider 顺序必须以公开 HTTP 爬虫为主：`HttpAStockProvider -> ADataProvider -> AkshareProvider`。`HttpAStockProvider` 的百度日 K 线普通 `requests` 可能被 403，必须保留 `curl_cffi` 浏览器 TLS 指纹传输作为同一 HTTP 主源内的备用，不要因为普通 requests 403 就直接跳到 adata/AKShare。`adata` 数据可能只覆盖到 2025 年底，不能放在近期补缺主路径第一位；AKShare 只能作为最后保底。所有来源都失败或返回空时，错误必须聚合展示每个 provider 的尝试结果，不能只把 AKShare 的断连显示成唯一失败原因。
 
 `/health` 不能同步阻塞重型 `warehouse.coverage()` 扫描。数据中心连接和操作后刷新应快速返回最近 coverage 快照，并用后台刷新更新缺失行数；不要让 60 秒级 coverage 扫描卡住“本地服务已连接”、按钮状态或全市场同步进度。
 
