@@ -548,10 +548,11 @@ class RealtimeMarketProvider:
                     }
         diagnostics.extend(breadth_diagnostics)
         diagnostics.extend(sector_diagnostics)
-        local_snapshot = self._snapshot_from_local(now)
-        strong_sectors = live_sectors or local_snapshot.strong_sectors
-        yesterday_sectors = local_snapshot.yesterday_strong_sectors
-        breadth = live_breadth or local_snapshot.breadth
+        has_live_context = bool(indexes and live_breadth and live_sectors)
+        local_snapshot = None if has_live_context else self._snapshot_from_local(now)
+        strong_sectors = live_sectors or (local_snapshot.strong_sectors if local_snapshot else [])
+        yesterday_sectors = local_snapshot.yesterday_strong_sectors if local_snapshot else []
+        breadth = live_breadth or (local_snapshot.breadth if local_snapshot else None)
         if not live_breadth and breadth:
             yield {
                 "type": "breadth",
@@ -578,33 +579,32 @@ class RealtimeMarketProvider:
                 "market_phase": phase,
                 "diagnostics": list(diagnostics),
             }
-        has_live_context = bool(indexes and live_breadth and live_sectors)
         has_partial_realtime_context = bool(indexes or live_breadth or live_sectors)
         status = "live" if has_live_context else ("stale" if has_partial_realtime_context else local_snapshot.status)
-        if not live_breadth and local_snapshot.diagnostics:
+        if local_snapshot and not live_breadth and local_snapshot.diagnostics:
             diagnostics.extend(local_snapshot.diagnostics)
         if not indexes:
             diagnostics.append("实时指数接口暂不可用，尝试使用最近成功快照或本地最近交易日。")
-        if indexes and not live_breadth and local_snapshot.breadth:
+        if local_snapshot and indexes and not live_breadth and local_snapshot.breadth:
             diagnostics.append("实时红绿家数接口暂不可用，已回退到本地最近交易日统计。")
-        if indexes and not live_breadth and local_snapshot.breadth is None:
+        if local_snapshot and indexes and not live_breadth and local_snapshot.breadth is None:
             diagnostics.append("实时红绿家数接口暂不可用，本地最近交易日红绿宽度也不完整，已隐藏该宽度统计。")
-        if indexes and not live_sectors and local_snapshot.strong_sectors:
+        if local_snapshot and indexes and not live_sectors and local_snapshot.strong_sectors:
             diagnostics.append("实时强势题材接口暂不可用，已回退到本地最近交易日题材聚合。")
         source_parts: list[str] = []
         if indexes:
             source_parts.extend(_unique_sources(quote.source for quote in indexes))
         if live_breadth:
             source_parts.append(live_breadth.source)
-        elif local_snapshot.breadth:
+        elif local_snapshot and local_snapshot.breadth:
             source_parts.append(local_snapshot.breadth.source)
         if live_sectors:
             source_parts.append(live_sectors[0].source)
-        elif local_snapshot.strong_sectors:
+        elif local_snapshot and local_snapshot.strong_sectors:
             source_parts.append(local_snapshot.strong_sectors[0].source)
         if yesterday_sectors:
             source_parts.append("local-yesterday-group")
-        source = "+".join(source_parts) if source_parts else local_snapshot.source
+        source = "+".join(source_parts) if source_parts else (local_snapshot.source if local_snapshot else "live")
         if not indexes:
             message = local_snapshot.message
         else:
@@ -619,7 +619,7 @@ class RealtimeMarketProvider:
             source=source,
             updated_at=now,
             market_phase=phase,
-            indexes=indexes or local_snapshot.indexes,
+            indexes=indexes or (local_snapshot.indexes if local_snapshot else []),
             breadth=breadth,
             strong_sectors=strong_sectors,
             yesterday_strong_sectors=yesterday_sectors,

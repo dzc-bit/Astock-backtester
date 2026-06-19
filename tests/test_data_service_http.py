@@ -2351,6 +2351,43 @@ def test_realtime_provider_does_not_cache_stale_snapshot_with_local_fallback_sec
     assert provider._last_successful_snapshot is None
 
 
+def test_realtime_provider_live_snapshot_does_not_build_local_fallback(tmp_path):
+    warehouse = Warehouse(tmp_path)
+    provider = RealtimeMarketProvider(warehouse)
+    provider._fetch_indexes = lambda: [
+        MarketIndexQuote(
+            symbol="sh000001",
+            name="上证指数",
+            last=3100.0,
+            previous_close=3080.0,
+            change=20.0,
+            change_pct=0.0064935,
+            source="fake-live",
+        )
+    ]
+    provider._fetch_live_breadth = lambda diagnostics: MarketBreadth(
+        up=3200,
+        down=1700,
+        flat=200,
+        total=5100,
+        source="fast-breadth",
+    )
+    provider._fetch_live_sectors = lambda diagnostics: [
+        SectorMover(name="电力", change_pct=0.024, leading_symbol="600001", source="ths-industry-html")
+    ]
+
+    def fail_local_snapshot(now):
+        raise AssertionError("live snapshot should not build local fallback")
+
+    provider._snapshot_from_local = fail_local_snapshot
+
+    snapshot = provider.market_snapshot()
+
+    assert snapshot.status == "live"
+    assert snapshot.strong_sectors[0].source == "ths-industry-html"
+    assert snapshot.yesterday_strong_sectors == []
+
+
 def test_service_realtime_market_snapshot_tracks_yesterday_strong_sectors_from_local_history(tmp_path):
     class FakeResponse:
         text = ""
