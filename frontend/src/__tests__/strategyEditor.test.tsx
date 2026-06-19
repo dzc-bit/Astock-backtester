@@ -434,6 +434,127 @@ describe("A 股回测工作台界面", () => {
     expect(within(overview).queryByText("待导入")).not.toBeInTheDocument();
   });
 
+  it("uses A-share red for high Tonghuashun score and green for low score in the overview band", async () => {
+    apiMocks.loadClsFinance.mockResolvedValueOnce({
+      updated_at: "2026-06-09T07:05:00Z",
+      source: "cls-finance",
+      source_url: "https://www.cls.cn/finance",
+      tline: [],
+      anchors: [],
+      emotion: {
+        market_degree: 6.7,
+        market_degree_source: "ths-market-summary",
+        market_degree_label: "同花顺大盘评级",
+        up_limit: 130,
+        open_limit: 25
+      },
+      up_pool: [],
+      diagnostics: []
+    });
+
+    const { unmount } = render(<App />);
+
+    await screen.findByText("日线行情");
+    await screen.findAllByText("6.7");
+    const highScoreCard = screen.getByLabelText("工作台概览").querySelector(".market-degree-card");
+    expect(highScoreCard).toHaveClass("market-degree-card-high");
+    expect(within(highScoreCard as HTMLElement).getByText("6.7")).toHaveClass("up-text");
+
+    unmount();
+    vi.clearAllMocks();
+    apiMocks.ensureDataService.mockResolvedValue({
+      running: true,
+      port: 9010,
+      base_url: "http://127.0.0.1:9010",
+      cache_dir: ".astock-cache",
+      message: "browser preview uses mock local service"
+    });
+    apiMocks.loadDataServiceHealth.mockResolvedValue({
+      ok: true,
+      cache_path: "C:\\cache",
+      port: 9010,
+      coverage: [
+        { dataset: "daily_bars", symbols: 2, start_date: "2024-01-02", end_date: "2024-01-08", missing_rows: 0 }
+      ]
+    });
+    apiMocks.loadDataServiceLogs.mockResolvedValue({ items: [] });
+    apiMocks.loadDailyBarsCoverage.mockResolvedValue({ items: [] });
+    apiMocks.loadRealtimeMarketSnapshot.mockResolvedValue({
+      status: "live",
+      source: "test",
+      updated_at: "2026-05-27T10:30:00Z",
+      indexes: [],
+      breadth: { up: 1200, down: 3600, flat: 200, total: 5000, source: "test" },
+      strong_sectors: [],
+      yesterday_strong_sectors: [],
+      message: "test"
+    });
+    apiMocks.loadRealtimeMarketSnapshotStream.mockImplementation(async (_baseUrl, handlers = {}) => {
+      const snapshot = await apiMocks.loadRealtimeMarketSnapshot();
+      handlers.onSnapshot?.(snapshot);
+      return snapshot;
+    });
+    apiMocks.loadMarketNews.mockResolvedValue({ updated_at: "2026-05-27T10:30:00Z", source: "test", items: [] });
+    apiMocks.loadMarketBriefing.mockImplementation((_baseUrl, kind) =>
+      Promise.resolve({ kind, updated_at: "2026-05-27T10:30:00Z", source: "test", summary: "", sections: [], diagnostics: [] })
+    );
+    apiMocks.loadNewsSummary.mockResolvedValue({ updated_at: "2026-05-27T10:30:00Z", source: "test", item_count: 0, themes: [], highlights: [], risks: [], diagnostics: [] });
+    apiMocks.loadRiskAlerts.mockResolvedValue({ updated_at: "2026-05-27T10:30:00Z", source: "test", diagnostics: [], items: [] });
+    apiMocks.loadRecommendedStrategies.mockResolvedValue({ items: [] });
+    apiMocks.loadClsFinance.mockResolvedValueOnce({
+      updated_at: "2026-06-09T07:05:00Z",
+      source: "cls-finance",
+      source_url: "https://www.cls.cn/finance",
+      tline: [],
+      anchors: [],
+      emotion: {
+        market_degree: 3.2,
+        market_degree_source: "ths-market-summary",
+        market_degree_label: "同花顺大盘评级",
+        up_limit: 40,
+        open_limit: 5
+      },
+      up_pool: [],
+      diagnostics: []
+    });
+
+    render(<App />);
+
+    await waitFor(() => {
+      const lowScoreCard = screen.getByLabelText("工作台概览").querySelector(".market-degree-card");
+      expect(lowScoreCard).toHaveClass("market-degree-card-low");
+      expect(within(lowScoreCard as HTMLElement).getByText("3.2")).toHaveClass("down-text");
+    });
+  });
+
+  it("does not use CLS market heat as the Tonghuashun overview score fallback", async () => {
+    apiMocks.loadClsFinance.mockResolvedValueOnce({
+      updated_at: "2026-06-09T07:05:00Z",
+      source: "cls-finance",
+      source_url: "https://www.cls.cn/finance",
+      tline: [],
+      anchors: [],
+      emotion: {
+        market_degree: 56,
+        market_degree_source: "cls-finance-emotion",
+        market_degree_label: "财联社市场热度",
+        up_limit: 130,
+        open_limit: 25
+      },
+      up_pool: [],
+      diagnostics: []
+    });
+
+    render(<App />);
+
+    await screen.findByText("日线行情");
+    await waitFor(() => expect(apiMocks.loadClsFinance).toHaveBeenCalled());
+    const overview = screen.getByLabelText("工作台概览");
+    const scoreCard = overview.querySelector(".market-degree-card");
+    expect(scoreCard).not.toHaveTextContent("56.0");
+    expect(within(scoreCard as HTMLElement).getByText("--")).toBeInTheDocument();
+  });
+
   afterEach(() => {
     window.localStorage.clear();
     vi.restoreAllMocks();

@@ -113,6 +113,8 @@ https://github.com/dzc-bit/Astock-backtester.git
 
 - 主源是 `q.10jqka.com.cn/api.php?t=indexflash&` 的 `dppj_data`，这是 10 分制同花顺大盘评级。
 - 该接口缺少浏览器脚本生成的 `v` cookie 时会 403；后端必须先执行同花顺 `chameleon` 浏览器脚本（当前用 Node/jsdom）生成本次请求 cookie，再请求 `indexflash`。
+- 桌面安装版 sidecar 旁边必须同时带 `node.exe`、`ths-cookie-worker.cjs`、`xhr-sync-worker.js`；只在开发机 `.tools` 里有 Node 不算安装版可用。
+- 评分解析只能读取 `indexflash` 原始载荷或 `dppj_data` 等结构化字段；HTML 页面兜底只能从可见文本解析，不能把 `<div id="dppj">` 这类标签属性里的数字当评分。
 - 成功解析后写入 `emotion.market_degree` / `emotion.market_degree_label`，前端“大盘评分”卡片直接消费该值。
 - 不要用财联社热度、新闻、本地启发式或其他评分静默替代同花顺评分；失败时保留 diagnostics/failures 并显示不可用或明确 fallback。
 
@@ -170,6 +172,8 @@ docs/capital-flow-crawler-report.md
 补缺日线 provider 顺序必须以公开 HTTP 爬虫为主：`HttpAStockProvider -> ADataProvider -> AkshareProvider`。`adata` 数据可能只覆盖到 2025 年底，不能放在近期补缺主路径第一位；AKShare 只能作为最后保底。所有来源都失败或返回空时，错误必须聚合展示每个 provider 的尝试结果，不能只把 AKShare 的断连显示成唯一失败原因。
 
 `/health` 不能同步阻塞重型 `warehouse.coverage()` 扫描。数据中心连接和操作后刷新应快速返回最近 coverage 快照，并用后台刷新更新缺失行数；不要让 60 秒级 coverage 扫描卡住“本地服务已连接”、按钮状态或全市场同步进度。
+
+后台刷新期间如果 `/health` 返回三项 coverage 全是 `symbols=0`、无日期、`missing_rows=0` 且 `coverage_refreshing=true`，前端不能把它当权威结果覆盖已有覆盖表；应保留旧覆盖并继续轮询，等刷新完成后的真实快照再更新。
 
 春节、清明、劳动节、国庆等合法休市日不能进入 `missing_trade_dates`。
 

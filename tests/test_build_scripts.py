@@ -17,7 +17,19 @@ def test_build_data_service_targets_tauri_bin_executable():
 
     assert 'Join-Path $repoRoot "src-tauri\\bin"' in script
     assert 'Join-Path $distDir "astock-data-service.exe"' in script
+    assert 'Join-Path $distDir "node.exe"' in script
+    assert 'Join-Path $distDir "ths-cookie-worker.cjs"' in script
+    assert 'Join-Path $distDir "xhr-sync-worker.js"' in script
     assert "--distpath $distDir" in script
+
+
+def test_build_data_service_bundles_ths_cookie_worker_for_desktop_score():
+    script = Path("scripts/build-data-service.ps1").read_text(encoding="utf-8")
+
+    assert "esbuild" in script
+    assert "jsdom" in script
+    assert "ths-cookie-worker.cjs" in script
+    assert "xhr-sync-worker.js" in script
 
 
 def test_build_data_service_collects_curl_cffi_native_dependencies():

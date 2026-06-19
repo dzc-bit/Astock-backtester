@@ -71,6 +71,32 @@ function formatMarketDegree(value: number | null | undefined): string {
   return value == null ? "--" : value.toFixed(1);
 }
 
+function marketDegreeCardClass(value: number | null | undefined): string {
+  if (value == null) {
+    return "";
+  }
+  if (value >= 5) {
+    return "market-degree-card-high";
+  }
+  if (value < 4) {
+    return "market-degree-card-low";
+  }
+  return "market-degree-card-neutral";
+}
+
+function marketDegreeTextClass(value: number | null | undefined): "up-text" | "down-text" | "flat-text" | undefined {
+  if (value == null) {
+    return undefined;
+  }
+  if (value >= 5) {
+    return "up-text";
+  }
+  if (value < 4) {
+    return "down-text";
+  }
+  return "flat-text";
+}
+
 function translateError(message: string): string {
   if (message.includes("No cached daily bars found")) {
     return "未找到已缓存的日线行情，请先确认 a-stock-data 数据包已导入到本地缓存。";
@@ -542,14 +568,15 @@ export function App() {
   const liveHeatRatio = marketSnapshot?.breadth && marketSnapshot.breadth.total > 0
     ? marketSnapshot.breadth.up / marketSnapshot.breadth.total
     : null;
-  const marketDegree = clsFinance?.emotion?.market_degree;
-  const marketDegreeLabel = clsFinance?.emotion?.market_degree_label ?? "同花顺大盘评级";
   const marketDegreeSource = clsFinance?.emotion?.market_degree_source;
+  const hasTonghuashunMarketDegree = marketDegreeSource === "ths-market-summary";
+  const marketDegree = hasTonghuashunMarketDegree ? clsFinance?.emotion?.market_degree : null;
+  const marketDegreeLabel = hasTonghuashunMarketDegree
+    ? clsFinance?.emotion?.market_degree_label ?? "同花顺大盘评级"
+    : "同花顺大盘评级";
   const marketDegreeNote = marketDegree == null
     ? isLoadingNews ? "正在读取同花顺大盘评分" : "同花顺评分暂不可用"
-    : marketDegreeSource === "ths-market-summary"
-      ? marketDegreeLabel
-      : `${marketDegreeLabel} / 非同花顺主源`;
+    : marketDegreeLabel;
   const issueCount = result?.preflight_issues.length ?? 0;
   const riskAlertCount = riskAlerts?.items.length ?? 0;
   const closedTrades = result?.metrics.trade_count ?? 0;
@@ -621,10 +648,10 @@ export function App() {
           <Flame size={24} aria-hidden="true" />
           <small>{marketBreadthLabel}</small>
         </article>
-        <article className="summary-card">
+        <article className={`summary-card market-degree-card ${marketDegreeCardClass(marketDegree)}`.trim()}>
           <div>
             <span>大盘评分</span>
-            <strong>{formatMarketDegree(marketDegree)}</strong>
+            <strong className={marketDegreeTextClass(marketDegree)}>{formatMarketDegree(marketDegree)}</strong>
           </div>
           <Gauge size={24} aria-hidden="true" />
           <small>{marketDegreeNote}</small>

@@ -1439,6 +1439,40 @@ def test_realtime_provider_times_out_slow_akshare_sector_before_eastmoney_backup
     assert any("akshare-sector" in item and "timeout" in item.lower() for item in diagnostics)
 
 
+def test_realtime_provider_times_out_slow_akshare_breadth_before_heavy_backup(tmp_path):
+    provider = RealtimeMarketProvider(Warehouse(tmp_path))
+    provider.breadth_source_timeout = 0.01
+    provider._latest_local_symbol_count = lambda: 5000
+    provider._coverage_symbol_count = lambda: 5000
+    provider._fetch_cls_breadth = lambda: None
+    provider._fetch_ths_market_summary_breadth = lambda: None
+    provider._fetch_sina_breadth = lambda: None
+    provider._fetch_tencent_breadth = lambda diagnostics: None
+
+    def slow_akshare_breadth(diagnostics):
+        time.sleep(0.2)
+        return MarketBreadth(up=4900, down=100, flat=0, total=5000, source="akshare-a-share-live")
+
+    provider._fetch_akshare_breadth = slow_akshare_breadth
+    provider._fetch_heavy_breadth = lambda diagnostics: MarketBreadth(
+        up=3200,
+        down=1600,
+        flat=200,
+        total=5000,
+        source="heavy-market-crawler",
+    )
+    diagnostics: list[str] = []
+
+    started_at = time.perf_counter()
+    breadth = provider._fetch_live_breadth(diagnostics)
+    elapsed = time.perf_counter() - started_at
+
+    assert elapsed < 0.15
+    assert breadth is not None
+    assert breadth.source == "heavy-market-crawler"
+    assert any("AKShare 实时个股" in item and ("timeout" in item.lower() or "超时" in item) for item in diagnostics)
+
+
 def test_realtime_provider_keeps_cls_hot_plate_on_request_timeout_only(tmp_path):
     class FakeResponse:
         def __init__(self, payload=None):
@@ -3026,6 +3060,58 @@ def test_service_market_finance_uses_browser_cookie_for_ths_indexflash(tmp_path)
         assert response["emotion"]["market_degree"] == 7.8
         assert response["emotion"]["market_degree_source"] == "ths-market-summary"
         assert seen_cookies == ["v=browser-cookie"]
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_service_market_finance_does_not_parse_html_tag_numbers_as_ths_score(tmp_path):
+    class FakeResponse:
+        encoding = "utf-8"
+
+        def __init__(self, payload=None, text=""):
+            self._payload = payload or {}
+            self.text = text
+
+        def raise_for_status(self):
+            return
+
+        def json(self):
+            return self._payload
+
+    class ForbiddenResponse(FakeResponse):
+        def raise_for_status(self):
+            raise RuntimeError("403 forbidden")
+
+    def requester(url, **kwargs):
+        if "quote/index/tline" in url:
+            return FakeResponse({"code": 200, "data": []})
+        if "v3/transaction/anchor" in url:
+            return FakeResponse({"errno": 0, "data": []})
+        if "quote/index/basic" in url:
+            return FakeResponse({"code": 200, "data": {}})
+        if "v2/quote/a/stock/emotion" in url:
+            return FakeResponse({"code": 200, "data": {}})
+        if "quote/index/up_down_analysis" in url:
+            return FakeResponse({"code": 200, "data": []})
+        if "q.10jqka.com.cn/api.php?t=indexflash" in url:
+            return ForbiddenResponse(text="<h1>Nginx forbidden.</h1>")
+        if "q.10jqka.com.cn/index/index/board" in url:
+            return FakeResponse(text='<html><body><h3>大盘评级</h3><div id="dppj"></div><p>投资建议</p></body></html>')
+        raise AssertionError(f"unexpected url: {url}")
+
+    server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
+    server.state.finance_provider.requester = requester
+    server.state.finance_provider.browser_cookie_getter = lambda: None
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        response = _request_json("GET", f"http://127.0.0.1:{port}/market/finance")
+
+        assert response["emotion"]["market_degree"] is None
+        assert response["emotion"]["market_degree_source"] is None
+        assert any("403 forbidden" in item for item in response["diagnostics"])
     finally:
         server.shutdown()
         thread.join(timeout=5)

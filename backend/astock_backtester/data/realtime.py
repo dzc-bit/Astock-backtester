@@ -469,6 +469,7 @@ class RealtimeMarketProvider:
     timeout: float = 4.0
     requester: Callable[..., requests.Response] = requests.get
     breadth_time_budget: float = 2.0
+    breadth_source_timeout: float = 0.8
     sector_time_budget: float = 3.0
     sector_source_timeout: float = 0.8
     allow_eastmoney_breadth_fallback: bool = False
@@ -841,7 +842,7 @@ class RealtimeMarketProvider:
             ("同花顺市场总览", self._fetch_ths_market_summary_breadth),
             ("Sina 批量实时个股", self._fetch_sina_breadth),
             ("Tencent 批量实时个股", lambda: self._fetch_tencent_breadth(diagnostics)),
-            ("AKShare 实时个股", lambda: self._fetch_akshare_breadth(diagnostics)),
+            ("AKShare 实时个股", lambda: self._fetch_akshare_breadth_with_timeout(diagnostics)),
             ("重型公开行情爬虫", lambda: self._fetch_heavy_breadth(diagnostics)),
         ]
         if self.allow_eastmoney_breadth_fallback:
@@ -945,6 +946,12 @@ class RealtimeMarketProvider:
             total=total,
             source="sina-a-share-live",
         )
+
+    def _breadth_request_timeout(self) -> float:
+        timeout = self.breadth_source_timeout
+        if self.breadth_time_budget is not None:
+            timeout = min(timeout, max(0.2, self.breadth_time_budget / 2))
+        return min(self.timeout, timeout)
 
     def _latest_local_symbols(self) -> list[str]:
         try:
@@ -1064,6 +1071,22 @@ class RealtimeMarketProvider:
         down = int((data[change_column] < 0).sum())
         flat = int((data[change_column] == 0).sum())
         return MarketBreadth(up=up, down=down, flat=flat, total=up + down + flat, source="akshare-a-share-live")
+
+    def _fetch_akshare_breadth_with_timeout(self, diagnostics: list[str]) -> MarketBreadth | None:
+        timeout = self._breadth_request_timeout()
+        executor = ThreadPoolExecutor(max_workers=1)
+        future = executor.submit(self._fetch_akshare_breadth, diagnostics)
+        try:
+            return future.result(timeout=timeout)
+        except TimeoutError:
+            future.cancel()
+            diagnostics.append(f"AKShare 实时个股红绿家数读取超时：{timeout:g}秒。")
+            return None
+        except Exception as exc:
+            diagnostics.append(f"AKShare 实时个股红绿家数读取失败：{exc}")
+            return None
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
 
     def _fetch_heavy_breadth(self, diagnostics: list[str]) -> MarketBreadth | None:
         if self._heavy_market_provider is None:

@@ -149,6 +149,14 @@ function latestCoverageEndDate(coverage: DatasetCoverage[]): string | null {
   return dates.at(-1) ?? null;
 }
 
+function isEmptyCoverageSnapshot(coverage: DatasetCoverage[]): boolean {
+  return coverage.length > 0 && coverage.every((item) => item.symbols === 0 && item.missing_rows === 0 && !item.start_date && !item.end_date);
+}
+
+function isPendingEmptyHealthCoverage(coverage: DatasetCoverage[], refreshing: boolean | undefined): boolean {
+  return Boolean(refreshing) && isEmptyCoverageSnapshot(coverage);
+}
+
 function coverageWithSyncProgress(coverage: DatasetCoverage[], job: SyncJobStatus | null): DatasetCoverage[] {
   if (!job || !isSyncRunning(job) || job.imported_rows <= 0) {
     return coverage;
@@ -236,9 +244,12 @@ export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceRead
       loadDataServiceHealth(activeService.base_url),
       loadDataServiceLogs(activeService.base_url)
     ]);
-    onCoverageChange(health.coverage);
+    const hasPendingEmptyCoverage = isPendingEmptyHealthCoverage(health.coverage, health.coverage_refreshing);
+    if (!hasPendingEmptyCoverage) {
+      onCoverageChange(health.coverage);
+    }
     setLogs(recentLogs.items);
-    const range = applyCoverageDateRange(health.coverage);
+    const range = hasPendingEmptyCoverage ? coverageFillDateRange(coverage) : applyCoverageDateRange(health.coverage);
     if (health.coverage_refreshing) {
       setCoverageRefreshToken((current) => current + 1);
     }
@@ -303,8 +314,10 @@ export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceRead
             if (cancelled) {
               return;
             }
-            onCoverageChange(health.coverage);
-            applyCoverageDateRange(health.coverage);
+            if (!isPendingEmptyHealthCoverage(health.coverage, health.coverage_refreshing)) {
+              onCoverageChange(health.coverage);
+              applyCoverageDateRange(health.coverage);
+            }
             if (health.coverage_refreshing && attempts < COVERAGE_REFRESH_MAX_ATTEMPTS) {
               pollCoverage();
             }

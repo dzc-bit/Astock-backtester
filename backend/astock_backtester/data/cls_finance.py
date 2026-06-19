@@ -4,6 +4,7 @@ import json
 import re
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -275,7 +276,9 @@ class ClsFinanceProvider:
             response.encoding = response.encoding or "gbk"
             text = response.text
             visible_text = BeautifulSoup(text, "html.parser").get_text(" ", strip=True)
-            degree = _parse_ths_market_degree(f"{visible_text} {text}")
+            degree = _parse_ths_market_degree(text)
+            if degree is None:
+                degree = _parse_ths_market_degree_visible_text(visible_text)
             if degree is None:
                 errors.append(f"{url}: 页面未包含可解析的大盘评分")
                 continue
@@ -313,6 +316,12 @@ def _parse_ths_market_degree(text: str) -> float | None:
         value = _normalize_ths_market_degree(match.group(1))
         if value is not None:
             return value
+    return None
+
+
+def _parse_ths_market_degree_visible_text(text: str) -> float | None:
+    if not text:
+        return None
     for match in THS_MARKET_DEGREE_RE.finditer(text):
         value = _normalize_ths_market_degree(match.group(1))
         if value is not None:
@@ -367,16 +376,27 @@ def _read_ths_browser_cookie() -> str | None:
     node = _resolve_node_executable()
     if node is None:
         return None
-    script = _ths_browser_cookie_script()
+    worker = _resolve_ths_cookie_worker()
     try:
-        completed = subprocess.run(
-            [node, "-e", script],
-            cwd=_project_root(),
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=8,
-        )
+        if worker is not None:
+            completed = subprocess.run(
+                [node, str(worker)],
+                cwd=worker.parent,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=8,
+            )
+        else:
+            script = _ths_browser_cookie_script()
+            completed = subprocess.run(
+                [node, "-e", script],
+                cwd=_project_root(),
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=8,
+            )
     except Exception:
         return None
     cookie = completed.stdout.strip()
@@ -385,10 +405,41 @@ def _read_ths_browser_cookie() -> str | None:
     return cookie
 
 
+def _sidecar_runtime_dir() -> Path | None:
+    if getattr(sys, "frozen", False):
+        try:
+            return Path(sys.executable).resolve().parent
+        except OSError:
+            return None
+    return None
+
+
+def _resolve_ths_cookie_worker() -> Path | None:
+    candidates: list[Path] = []
+    sidecar_dir = _sidecar_runtime_dir()
+    if sidecar_dir is not None:
+        candidates.append(sidecar_dir / "ths-cookie-worker.cjs")
+    candidates.append(_project_root() / "src-tauri" / "bin" / "ths-cookie-worker.cjs")
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
+
+
 def _resolve_node_executable() -> str | None:
-    project_node = _project_root() / ".tools" / "node-v20.18.1-win-x64" / "node.exe"
-    if project_node.exists():
-        return str(project_node)
+    candidates: list[Path] = []
+    sidecar_dir = _sidecar_runtime_dir()
+    if sidecar_dir is not None:
+        candidates.append(sidecar_dir / "node.exe")
+    candidates.extend(
+        [
+            _project_root() / "src-tauri" / "bin" / "node.exe",
+            _project_root() / ".tools" / "node-v20.18.1-win-x64" / "node.exe",
+        ]
+    )
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate)
     return shutil.which("node")
 
 

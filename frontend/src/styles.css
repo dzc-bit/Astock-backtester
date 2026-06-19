@@ -225,6 +225,21 @@ body {
   background: linear-gradient(180deg, #ffffff, #effaf8);
 }
 
+.market-degree-card-high {
+  border-color: rgba(217, 45, 32, 0.42);
+  background: linear-gradient(180deg, #ffffff, #fff4f2);
+}
+
+.market-degree-card-low {
+  border-color: rgba(7, 148, 85, 0.42);
+  background: linear-gradient(180deg, #ffffff, #effaf4);
+}
+
+.market-degree-card-neutral {
+  border-color: #cbd5e1;
+  background: linear-gradient(180deg, #ffffff, #f8fafc);
+}
+
 .market-news-layout,
 .market-insight-layout {
   display: grid;
