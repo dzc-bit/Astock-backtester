@@ -2005,6 +2005,38 @@ def test_realtime_provider_accepts_cls_quotation_breadth_without_extra_completen
     assert diagnostics == []
 
 
+def test_realtime_provider_returns_cls_breadth_before_slow_local_count_scan(tmp_path):
+    provider = RealtimeMarketProvider(Warehouse(tmp_path))
+    provider.breadth_time_budget = 0.05
+    diagnostics: list[str] = []
+
+    def slow_local_count():
+        time.sleep(0.2)
+        return 5500
+
+    provider._latest_local_symbol_count = slow_local_count
+    provider._coverage_symbol_count = slow_local_count
+    provider._fetch_cls_breadth = lambda: MarketBreadth(
+        up=101,
+        down=34,
+        flat=0,
+        total=135,
+        source="cls-quote-breadth",
+    )
+    provider._fetch_ths_market_summary_breadth = lambda: (_ for _ in ()).throw(
+        AssertionError("CLS breadth should return before local completeness scans")
+    )
+
+    started_at = time.perf_counter()
+    breadth = provider._fetch_live_breadth_with_budget(diagnostics)
+    elapsed = time.perf_counter() - started_at
+
+    assert elapsed < 0.15
+    assert breadth is not None
+    assert breadth.source == "cls-quote-breadth"
+    assert diagnostics == []
+
+
 def test_realtime_provider_rejects_breadth_below_local_pool_ratio(tmp_path):
     warehouse = Warehouse(tmp_path)
     provider = RealtimeMarketProvider(warehouse)

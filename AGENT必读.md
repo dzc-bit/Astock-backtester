@@ -94,6 +94,8 @@ https://github.com/dzc-bit/Astock-backtester.git
 6. 后端重型公开行情爬虫：公开 XHR 优先，headless DOM 其次。
 7. 东方财富轻量 spot：只作受控备选，必须有超时、字段校验、数量校验和 diagnostics。
 
+财联社红绿家数是主源且已经代表全市场分布，不能在请求它之前先扫本地股票池或 coverage 数量；本地完整性扫描只允许在非财联社来源需要 `total>=3000`/本地比例校验时懒加载，否则主仓数据量大时会先耗尽红绿家数 2 秒预算，导致 CLS 明明可用却被判超时。
+
 强势板块 provider 链：
 
 1. 同花顺概念题材页。

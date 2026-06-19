@@ -877,7 +877,6 @@ class RealtimeMarketProvider:
         return sectors
 
     def _fetch_live_breadth(self, diagnostics: list[str]) -> MarketBreadth | None:
-        local_symbol_count = max(self._latest_local_symbol_count(), self._coverage_symbol_count())
         fetchers: list[tuple[str, Callable[[], MarketBreadth | None]]] = [
             ("财联社涨跌分布", self._fetch_cls_breadth),
             ("同花顺市场总览", self._fetch_ths_market_summary_breadth),
@@ -888,6 +887,7 @@ class RealtimeMarketProvider:
         ]
         if self.allow_eastmoney_breadth_fallback:
             fetchers.append(("东方财富轻量 spot 兜底", lambda: self._fetch_eastmoney_breadth(diagnostics)))
+        local_symbol_count: int | None = None
         for label, fetcher in fetchers:
             try:
                 breadth = fetcher()
@@ -898,6 +898,8 @@ class RealtimeMarketProvider:
                 continue
             if breadth.source == "cls-quote-breadth" and breadth.total > 0:
                 return breadth
+            if local_symbol_count is None:
+                local_symbol_count = max(self._latest_local_symbol_count(), self._coverage_symbol_count())
             if self._breadth_is_complete(breadth, local_symbol_count, diagnostics):
                 return breadth
         return None
