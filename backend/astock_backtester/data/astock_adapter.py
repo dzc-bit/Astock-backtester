@@ -21,6 +21,7 @@ class AStockDataUnavailable(RuntimeError):
 
 DailyBarsFetcher = Callable[[Sequence[str], str, str], pd.DataFrame]
 JsonGetter = Callable[[str, dict[str, str], dict[str, str], int], dict[str, Any]]
+JsonGetterVariants = Sequence[tuple[str, JsonGetter]]
 
 
 def _normalize_code(symbol: str) -> str:
@@ -52,8 +53,30 @@ def _parse_date(value: Any) -> date | None:
     return None
 
 
+def _should_retry_baidu_payload(payload: Any) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    result_code = str(payload.get("ResultCode") or "")
+    result = payload.get("Result")
+    return result_code in {"403", "429"} or result == []
+
+
 def _default_json_get(url: str, params: dict[str, str], headers: dict[str, str], timeout: int) -> dict[str, Any]:
     response = requests.get(url, params=params, headers=headers, timeout=timeout, proxies={})
+    response.raise_for_status()
+    return json.loads(response.text)
+
+
+def _curl_cffi_json_get(url: str, params: dict[str, str], headers: dict[str, str], timeout: int) -> dict[str, Any]:
+    from curl_cffi import requests as curl_requests
+
+    response = curl_requests.get(
+        url,
+        params=params,
+        headers=headers,
+        timeout=timeout,
+        impersonate="chrome124",
+    )
     response.raise_for_status()
     return json.loads(response.text)
 
@@ -61,8 +84,13 @@ def _default_json_get(url: str, params: dict[str, str], headers: dict[str, str],
 class HttpAStockFetcher:
     """HTTP subset learned from simonlin1212/a-stock-data for daily backtest cache fills."""
 
-    def __init__(self, json_get: JsonGetter | None = None) -> None:
-        self._json_get = json_get or _default_json_get
+    def __init__(self, json_get: JsonGetter | None = None, json_gets: JsonGetterVariants | None = None) -> None:
+        if json_gets is not None:
+            self._json_gets = tuple(json_gets)
+        elif json_get is not None:
+            self._json_gets = (("injected", json_get),)
+        else:
+            self._json_gets = (("requests", _default_json_get), ("curl_cffi", _curl_cffi_json_get))
 
     def fetch_daily_bars(self, symbols: Sequence[str], start_date: str, end_date: str) -> pd.DataFrame:
         frames = [self._fetch_one(symbol, start_date, end_date) for symbol in symbols]
@@ -103,38 +131,7 @@ class HttpAStockFetcher:
             return {}
 
     def _fetch_baidu_kline(self, code: str, start_date: str, end_date: str) -> pd.DataFrame:
-        market_data: dict[str, Any] = {}
-        for attempt in range(3):
-            payload = self._json_get(
-                "https://finance.pae.baidu.com/selfselect/getstockquotation",
-                {
-                    "all": "1",
-                    "isIndex": "false",
-                    "isBk": "false",
-                    "isBlock": "false",
-                    "isFutures": "false",
-                    "isStock": "true",
-                    "newFormat": "1",
-                    "group": "quotation_kline_ab",
-                    "finClientType": "pc",
-                    "code": code,
-                    "start_time": start_date,
-                    "ktype": "1",
-                },
-                {
-                    "User-Agent": UA,
-                    "Accept": "application/vnd.finance-web.v1+json",
-                    "Origin": "https://gushitong.baidu.com",
-                    "Referer": "https://gushitong.baidu.com/",
-                },
-                20,
-            )
-            result = payload.get("Result") if isinstance(payload, dict) else None
-            if isinstance(result, dict):
-                market_data = result.get("newMarketData", {}) or {}
-                break
-            if attempt < 2:
-                time.sleep(1.5 * (attempt + 1))
+        market_data = self._fetch_baidu_market_data(code, start_date)
         if not market_data:
             return pd.DataFrame()
         keys = list(market_data.get("keys") or [])
@@ -173,8 +170,65 @@ class HttpAStockFetcher:
         frame.loc[turnover <= 0, "float_market_cap"] = float("nan")
         return normalize_daily_bars(frame)
 
+    def _fetch_baidu_market_data(self, code: str, start_date: str) -> dict[str, Any]:
+        params = {
+            "all": "1",
+            "isIndex": "false",
+            "isBk": "false",
+            "isBlock": "false",
+            "isFutures": "false",
+            "isStock": "true",
+            "newFormat": "1",
+            "group": "quotation_kline_ab",
+            "finClientType": "pc",
+            "code": code,
+            "start_time": start_date,
+            "ktype": "1",
+        }
+        headers = {
+            "User-Agent": UA,
+            "Accept": "application/vnd.finance-web.v1+json",
+            "Origin": "https://gushitong.baidu.com",
+            "Referer": "https://gushitong.baidu.com/",
+        }
+        for label, json_get in self._json_gets:
+            for attempt in range(2):
+                try:
+                    payload = json_get(
+                        "https://finance.pae.baidu.com/selfselect/getstockquotation",
+                        params,
+                        headers,
+                        8,
+                    )
+                except Exception:
+                    break
+                result = payload.get("Result") if isinstance(payload, dict) else None
+                if isinstance(result, dict):
+                    return result.get("newMarketData", {}) or {}
+                if not _should_retry_baidu_payload(payload):
+                    break
+                if label != "injected":
+                    break
+                if attempt == 0 and label == "injected":
+                    time.sleep(0.2)
+            if label != "injected":
+                continue
+        return {}
+
+    def _request_json(self, url: str, params: dict[str, str], headers: dict[str, str], timeout: int) -> dict[str, Any]:
+        last_error: Exception | None = None
+        for _label, json_get in self._json_gets:
+            try:
+                return json_get(url, params, headers, timeout)
+            except Exception as exc:
+                last_error = exc
+                continue
+        if last_error is not None:
+            raise last_error
+        return {}
+
     def _fetch_eastmoney_fund_flow_120d(self, code: str) -> list[dict[str, Any]]:
-        payload = self._json_get(
+        payload = self._request_json(
             "https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get",
             {
                 "secid": f"{_market_code(code)}.{code}",
@@ -197,7 +251,7 @@ class HttpAStockFetcher:
         return rows
 
     def _fetch_eastmoney_stock_info(self, code: str) -> dict[str, Any]:
-        payload = self._json_get(
+        payload = self._request_json(
             "https://push2.eastmoney.com/api/qt/stock/get",
             {
                 "fltt": "2",

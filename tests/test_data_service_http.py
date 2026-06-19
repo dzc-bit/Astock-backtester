@@ -1979,6 +1979,32 @@ def test_realtime_provider_rejects_partial_live_breadth_with_diagnostics(tmp_pat
     assert any("全市场红绿家数不完整" in item for item in diagnostics)
 
 
+def test_realtime_provider_accepts_cls_quotation_breadth_without_extra_completeness_gate(tmp_path):
+    provider = RealtimeMarketProvider(Warehouse(tmp_path))
+    diagnostics: list[str] = []
+
+    provider._latest_local_symbol_count = lambda: 5500
+    provider._coverage_symbol_count = lambda: 5500
+    provider._fetch_cls_breadth = lambda: MarketBreadth(
+        up=101,
+        down=34,
+        flat=0,
+        total=135,
+        source="cls-quote-breadth",
+    )
+    provider._fetch_ths_market_summary_breadth = lambda: (_ for _ in ()).throw(
+        AssertionError("should not query slower breadth providers after CLS returns numbers")
+    )
+
+    breadth = provider._fetch_live_breadth(diagnostics)
+
+    assert breadth is not None
+    assert breadth.source == "cls-quote-breadth"
+    assert breadth.up == 101
+    assert breadth.down == 34
+    assert diagnostics == []
+
+
 def test_realtime_provider_rejects_breadth_below_local_pool_ratio(tmp_path):
     warehouse = Warehouse(tmp_path)
     provider = RealtimeMarketProvider(warehouse)

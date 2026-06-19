@@ -189,6 +189,30 @@ def test_async_full_market_job_flushes_successful_rows_after_a_batch_failure(tmp
     assert sorted(warehouse.read_daily_bars()["symbol"].tolist()) == ["000001", "000003"]
 
 
+def test_full_market_job_records_recent_failures_with_symbol_and_reason(tmp_path):
+    warehouse = Warehouse(tmp_path)
+    manager = SyncJobManager(warehouse=warehouse, provider=FakeProvider(fail_symbols={"000050"}))
+
+    status = manager.start_full_market(
+        symbols=["000050"],
+        start_date="2026-06-18",
+        end_date="2026-06-18",
+    )
+
+    eventually = None
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        eventually = manager.get_job(status.job_id)
+        if eventually and eventually.status != "running":
+            break
+        sleep(0.02)
+
+    assert eventually is not None
+    assert eventually.status == "completed_with_errors"
+    assert eventually.recent_failures == [{"symbol": "000050", "reason": "source unavailable"}]
+    assert eventually.last_error == "000050: source unavailable"
+
+
 def test_full_market_job_skips_symbols_already_complete_in_local_warehouse(tmp_path):
     class CountingProvider(FakeProvider):
         def __init__(self):

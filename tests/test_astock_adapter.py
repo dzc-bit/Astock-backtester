@@ -217,6 +217,60 @@ def test_http_fetcher_retries_baidu_kline_when_result_shape_is_throttled():
     assert result.loc[0, "close"] == 10.5
 
 
+def test_http_fetcher_tries_browser_transport_when_requests_gets_baidu_403():
+    calls = []
+
+    def requests_json_get(url, params, headers, timeout):
+        calls.append(("requests", url))
+        if "getstockquotation" in url:
+            return {"QueryID": "0", "ResultCode": "403", "Result": []}
+        raise AssertionError(f"requests transport should not reach optional source: {url}")
+
+    def browser_json_get(url, params, headers, timeout):
+        calls.append(("curl_cffi", url))
+        if "getstockquotation" in url:
+            return {
+                "ResultCode": "0",
+                "Result": {
+                    "newMarketData": {
+                        "keys": ["time", "open", "close", "high", "low", "volume"],
+                        "marketData": "2026-06-12,10,10.5,11,9.8,1000",
+                    }
+                },
+            }
+        if "fflow/daykline/get" in url:
+            return {"data": {"klines": []}}
+        if "api/qt/stock/get" in url:
+            return {"data": {"f117": 8_800_000_000, "f189": "20200101"}}
+        raise AssertionError(f"unexpected url: {url}")
+
+    fetcher = HttpAStockFetcher(json_gets=(("requests", requests_json_get), ("curl_cffi", browser_json_get)))
+
+    result = fetcher.fetch_daily_bars(["600519"], "2026-06-12", "2026-06-18")
+
+    assert result["symbol"].tolist() == ["600519"]
+    assert result.loc[0, "close"] == 10.5
+    assert [label for label, _ in calls[:2]] == ["requests", "curl_cffi"]
+
+
+def test_http_fetcher_does_not_retry_plain_empty_baidu_daily_rows():
+    calls = 0
+
+    def fake_json_get(url, params, headers, timeout):
+        nonlocal calls
+        if "getstockquotation" in url:
+            calls += 1
+            return {"Result": {"newMarketData": {"keys": ["time", "open"], "marketData": ""}}}
+        raise AssertionError(f"unexpected optional source call after empty daily rows: {url}")
+
+    fetcher = HttpAStockFetcher(json_get=fake_json_get)
+
+    result = fetcher.fetch_daily_bars(["000050"], "2026-06-12", "2026-06-18")
+
+    assert result.empty
+    assert calls == 1
+
+
 def test_cli_fetch_daily_bars_writes_cache(monkeypatch, tmp_path):
     class FakeAdapter:
         def fetch_daily_bars(self, symbols, start_date, end_date):

@@ -200,7 +200,7 @@ class SyncJobManager:
                             current = self.get_job(job_id)
                             if current:
                                 self._mutate(job_id, failed_symbols=current.failed_symbols + 1)
-                            self._append_error(job_id, f"{symbol}: {exc}")
+                            self._append_failure(job_id, symbol, str(exc))
                             continue
                         if outcome == "skipped":
                             current = self.get_job(job_id)
@@ -212,14 +212,14 @@ class SyncJobManager:
                             current = self.get_job(job_id)
                             if current:
                                 self._mutate(job_id, failed_symbols=current.failed_symbols + 1)
-                            self._append_error(job_id, f"{symbol}: provider returned no daily rows")
+                            self._append_failure(job_id, symbol, "provider returned no daily rows")
                             continue
                         if frame.empty:
                             batch_failed = True
                             current = self.get_job(job_id)
                             if current:
                                 self._mutate(job_id, failed_symbols=current.failed_symbols + 1)
-                            self._append_error(job_id, f"{symbol}: provider returned no daily rows")
+                            self._append_failure(job_id, symbol, "provider returned no daily rows")
                             continue
                         frames.append(frame)
                         current = self.get_job(job_id)

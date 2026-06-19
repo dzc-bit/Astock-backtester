@@ -2772,12 +2772,15 @@ td small {
   text-align: right;
 }
 
-.matched-stock-reasons {
-  display: flex;
+.matched-stock-reason-text {
   flex: 1 1 100%;
-  flex-wrap: wrap;
-  gap: 7px;
   min-width: 0;
+  margin: 0;
+  color: #334155;
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
 }
 
 .matched-stocks-empty {

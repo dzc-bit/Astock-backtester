@@ -896,6 +896,8 @@ class RealtimeMarketProvider:
                 continue
             if breadth is None:
                 continue
+            if breadth.source == "cls-quote-breadth" and breadth.total > 0:
+                return breadth
             if self._breadth_is_complete(breadth, local_symbol_count, diagnostics):
                 return breadth
         return None

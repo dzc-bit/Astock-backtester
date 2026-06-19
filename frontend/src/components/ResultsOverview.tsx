@@ -12,26 +12,18 @@ type Props = {
   onOpenRiskAlerts: () => void;
 };
 
-function formatPrice(value: number | null | undefined): string {
-  if (value == null || Number.isNaN(value)) {
-    return "--";
-  }
-  return value.toFixed(2);
+function translateMatchReason(reason: string): string {
+  return reason
+    .replace(/close ([\d.]+) broke prior (\d+)d high ([\d.]+)/, "收盘价 $1 突破前$2日高点 $3")
+    .replace(/close ([\d.]+) broke prior (\d+)d low ([\d.]+)/, "收盘价 $1 跌破前$2日低点 $3")
+    .replace(/(\d+)d volume ratio ([\d.]+) in \[([\d.]+), ([\d.]+)\]/, "$1日量比 $2 位于 [$3, $4]")
+    .replace(/float market cap ([\d.]+) in \[([\d.]+), ([\d.]+)\]/, "流通市值 $1 位于 [$2, $3]")
+    .replace(/turnover ([\d.]+) in \[([\d.]+), ([\d.]+)\]/, "换手率 $1 位于 [$2, $3]");
 }
 
-function formatPercent(value: number | null | undefined): string {
-  if (value == null || Number.isNaN(value)) {
-    return "--";
-  }
-  const sign = value > 0 ? "+" : "";
-  return `${sign}${(value * 100).toFixed(2)}%`;
-}
-
-function movementClass(value: number | null | undefined): "up-text" | "down-text" | "flat-text" {
-  if (value == null || Number.isNaN(value) || value === 0) {
-    return "flat-text";
-  }
-  return value > 0 ? "up-text" : "down-text";
+function matchReasonText(reasons: string[]): string {
+  const translated = reasons.slice(0, 4).map(translateMatchReason);
+  return translated.length > 0 ? translated.join("；") : "命中策略条件";
 }
 
 function isToday(value: string | null | undefined): boolean {
@@ -71,7 +63,6 @@ function MatchedStocksPanel({ dailyMatches }: { dailyMatches?: DailyStrategyMatc
   const dateLabel = dailyMatches
     ? `信号日 ${dailyMatches.signal_date} / 展示日 ${dailyMatches.trade_date} / 本地回测快照`
     : "等待 latest_strategy_matches";
-  const priceLabel = matchesAreToday ? "本地收盘价" : "本地最近收盘价";
   return (
     <section className="matched-stocks-panel" aria-label="策略命中">
       <div className="matched-stocks-head">
@@ -87,21 +78,12 @@ function MatchedStocksPanel({ dailyMatches }: { dailyMatches?: DailyStrategyMatc
           {items.slice(0, 12).map((stock) => (
             <article className="matched-stock-card" key={`${stock.symbol}-${stock.trade_date ?? ""}`}>
               <div className="matched-stock-id">
-                <strong>{stock.symbol}</strong>
-                <span>{stock.name || "--"}</span>
+                <strong>{stock.symbol} {stock.name || "--"}</strong>
               </div>
               <div className="matched-stock-quote">
-                <strong className={movementClass(stock.change_pct)}>{formatPercent(stock.change_pct)}</strong>
-                <span>{priceLabel} {formatPrice(stock.close)}</span>
                 {stock.rank_score != null ? <small>评分 {stock.rank_score.toFixed(2)}</small> : null}
               </div>
-              <div className="matched-stock-reasons">
-                {stock.reasons.length > 0 ? (
-                  stock.reasons.slice(0, 4).map((reason) => <span key={reason}>{reason}</span>)
-                ) : (
-                  <span>命中策略条件</span>
-                )}
-              </div>
+              <p className="matched-stock-reason-text">理由：{matchReasonText(stock.reasons)}</p>
             </article>
           ))}
         </div>
@@ -111,7 +93,7 @@ function MatchedStocksPanel({ dailyMatches }: { dailyMatches?: DailyStrategyMatc
           <span>
             {hasPayload
               ? "可以放宽入场条件、扩大股票池，或查看数据中心是否缺少行情/资金字段。"
-              : "回测完成后，这里会展示代码、名称、本地收盘价、涨跌幅、匹配理由和 rank_score。"}
+              : "回测完成后，这里会展示代码、名称、评分和匹配理由。"}
           </span>
         </div>
       )}
