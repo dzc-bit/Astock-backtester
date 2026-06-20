@@ -286,29 +286,6 @@ def test_service_coverage_endpoint_filters_requested_symbols_and_dates(tmp_path)
         thread.join(timeout=5)
 
 
-def test_service_rejects_legacy_non_stream_backtest_endpoint(tmp_path, basic_strategy, basic_settings):
-    server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
-    server.state.cache.write_daily_bars(sample_daily_bars())
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        port = server.server_address[1]
-        response = _request_json(
-            "POST",
-            f"http://127.0.0.1:{port}/run/backtest",
-            {
-                "strategy": json.loads(basic_strategy.model_dump_json()),
-                "settings": json.loads(basic_settings.model_dump_json()),
-            },
-        )
-
-        assert response["code"] == "not_found"
-        assert response["message"] == "/run/backtest"
-    finally:
-        server.shutdown()
-        thread.join(timeout=5)
-
-
 def test_service_starts_full_market_sync_job(tmp_path):
     class FakeManager:
         def run_full_market(self, symbols, start_date, end_date):

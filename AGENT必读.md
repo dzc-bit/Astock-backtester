@@ -38,6 +38,7 @@ https://github.com/dzc-bit/Astock-backtester.git
 - 不清理整个 `运行产物`。
 - 不提交私钥、安装包、`.sig`、临时 `latest.json`、探针脚本、日志或运行数据。
 - 前端只消费后端结构化响应，不写上游 URL、爬虫逻辑或字段清洗规则。
+- 清理临时文件时不要直接执行 `git clean -fdX` 或等价的一把梭命令，因为它会把 `.tools`、`node_modules`、`src-tauri\bin`、`src-tauri\target` 和 `运行产物` 这类仍需保留的本地工具、构建产物或用户数据也列入删除范围；只点名删除 `.pytest_cache`、`.ruff_cache`、`.tmp`、`.pyinstaller`、`__pycache__` 等明确临时缓存。
 
 ## 3. JSON 文件别误判
 
@@ -209,6 +210,8 @@ POST /run/backtest/stream
 最后一个 NDJSON 事件 result.latest_strategy_matches.matches
 ```
 
+旧的非流式 `/run/backtest` 接口不是兼容目标，不要恢复；前端也不要继续保留旧 `matched_stocks` 结果字段。user 候选只认 `latest_strategy_matches`。
+
 不要把 user 候选塞进同花顺复盘正文。
 
 如果实时失败并回退本地最近交易日，前端必须标注：
@@ -260,7 +263,8 @@ D:\New project 6\运行产物\签名密钥\a-stock-backtester-v017.key
 - 不手改、不伪造、不复用旧 `latest.json` 或旧 `.sig`。
 - 覆盖安装后比较安装目录 sidecar 和工作区 sidecar SHA256。
 - 覆盖安装只使用本轮构建产物；源码版本、Tauri 版本和安装包文件名不一致时，先修正版本并重新构建，不复用旧包。
-- GitHub Release 的 updater 资产名尽量用 ASCII，避免 `latest.json` URL 和安装包资产名不一致。
+- GitHub Release 的 updater 安装包资产名必须用 ASCII，例如 `Astock-backtester_1.3.0_x64-setup.exe`；用 `scripts\write-latest-json.ps1 -AssetName 本地中文安装包名 -ReleaseAssetName ASCII资产名` 生成 `latest.json`，并确认 `latest.json.platforms.windows-x86_64.url` 指向真实上传的 ASCII 资产名。
+- `release-assets\latest.json` 是本地发布暂存文件，生成后用于上传 GitHub Release，不提交到仓库；发布完成或验证结束后本地可删除。
 
 硬坑：
 

@@ -392,7 +392,6 @@ export type BacktestResult = {
   equity_curve: EquityPoint[];
   trades: Trade[];
   latest_strategy_matches?: DailyStrategyMatches | null;
-  matched_stocks?: MatchedStock[];
   preflight_issues: Array<{ code: string; message: string; severity: "warning" | "error"; dataset?: string | null }>;
 };
 

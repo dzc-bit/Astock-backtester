@@ -87,11 +87,10 @@ it("lists today's matched stocks after a strategy run", () => {
   expect(cards[0]).not.toHaveTextContent("本地收盘价");
 });
 
-it("prefers latest strategy matches over legacy matched stocks and sorts by rank score", () => {
+it("sorts latest strategy matches by rank score", () => {
   render(
     <ResultsOverview
       result={buildResult({
-        matched_stocks: [{ symbol: "OLD", name: "旧字段", close: 1, change_pct: 0, reasons: ["legacy"] }],
         latest_strategy_matches: {
           signal_date: "2026-06-03",
           trade_date: "2026-06-03",
@@ -106,7 +105,6 @@ it("prefers latest strategy matches over legacy matched stocks and sorts by rank
     />
   );
 
-  expect(screen.queryByText("OLD")).not.toBeInTheDocument();
   const cards = screen.getAllByRole("article").filter((item) => item.className.includes("matched-stock-card"));
   expect(cards[0]).toHaveTextContent("HIGH");
   expect(cards[0]).toHaveTextContent("评分 2.40");
@@ -173,21 +171,6 @@ it("omits placeholder name when a latest strategy match has no stock name", () =
   expect(card).toHaveTextContent("000001");
   expect(card).not.toHaveTextContent("000001 --");
   expect(card).not.toHaveTextContent("--");
-});
-
-it("does not display legacy matched stocks without latest strategy matches", () => {
-  render(
-    <ResultsOverview
-      result={buildResult({
-        matched_stocks: [{ symbol: "OLD", name: "legacy", close: 1, change_pct: 0, reasons: ["legacy"] }]
-      })}
-      onRun={vi.fn()}
-      onOpenRiskAlerts={vi.fn()}
-    />
-  );
-
-  expect(screen.queryByText("OLD")).not.toBeInTheDocument();
-  expect(screen.queryByText("legacy")).not.toBeInTheDocument();
 });
 
 it("shows a friendly empty state when no stocks match today", () => {
