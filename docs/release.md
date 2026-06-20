@@ -28,7 +28,7 @@ npm run tauri -- signer generate -w (Join-Path $projectKeyDir "a-stock-backteste
 D:\New project 6\运行产物\签名密钥\a-stock-backtester-v017.key
 ```
 
-历史版本曾使用的本机私钥路径如下。1.1.1 发布不要把它作为 fallback；如需迁移密钥，先做单独的签名迁移验证。
+历史版本曾使用的本机私钥路径如下。发布时不要把它作为 fallback；如需迁移密钥，先做单独的签名迁移验证。
 
 ```text
 %USERPROFILE%\.tauri\a-stock-receiver.key
@@ -60,7 +60,7 @@ D:\New project 6\运行产物\签名密钥\a-stock-backtester-v017.key
 Git tag 使用 `v版本号`，例如：
 
 ```text
-v1.1.1
+v1.3.0
 ```
 
 ## Release Order
@@ -135,7 +135,7 @@ Get-FileHash "D:\New project 6\src-tauri\bin\astock-data-service.exe"
 - `latest.json`
 
 `latest.json` 必须以这个文件名上传，因为应用配置固定读取 `releases/latest/download/latest.json`。
-安装包上传到 GitHub Release 时使用 ASCII 资产名，例如 `Astock-backtester_1.1.1_x64-setup.exe`；
+安装包上传到 GitHub Release 时使用 ASCII 资产名，例如 `Astock-backtester_1.3.0_x64-setup.exe`；
 `latest.json.platforms.windows-x86_64.url` 必须指向这个真实资产名。保留本地中文安装包文件名可以用于归档，但不要让 updater 指向 GitHub 自动转写后的乱码资产名。
 
 ## latest.json
@@ -143,10 +143,10 @@ Get-FileHash "D:\New project 6\src-tauri\bin\astock-data-service.exe"
 用发布版本、安装包 URL 和签名内容生成 `latest.json`：
 
 ```powershell
-$assetName = "A股策略回测工作台_1.1.1_x64-setup.exe"
-$releaseAssetName = "Astock-backtester_1.1.1_x64-setup.exe"
+$assetName = "A股策略回测工作台_1.3.0_x64-setup.exe"
+$releaseAssetName = "Astock-backtester_1.3.0_x64-setup.exe"
 powershell -ExecutionPolicy Bypass -File scripts/write-latest-json.ps1 `
-  -Version "1.1.1" `
+  -Version "1.3.0" `
   -AssetName $assetName `
   -ReleaseAssetName $releaseAssetName `
   -Notes "发布实时行情完整性校验、行情评价严格降级、复盘候选分离、A 股交易日历覆盖和安装后 sidecar 验证增强。"
