@@ -144,7 +144,7 @@ describe("service fetch timeouts", () => {
     });
   });
 
-  it("keeps full-market sync startup alive while backend resolves the local stock pool", async () => {
+  it("keeps full-market sync start requests alive while the backend prepares symbols", async () => {
     let resolveFetch: ((response: Response) => void) | undefined;
     let requestSignal: AbortSignal | undefined;
     vi.stubGlobal(
@@ -158,7 +158,7 @@ describe("service fetch timeouts", () => {
       })
     );
 
-    const settled = startFullMarketSync("http://127.0.0.1:9010", "2026-06-09", "2026-06-10").then(
+    const settled = startFullMarketSync("http://127.0.0.1:9010", "2026-06-01", "2026-06-05").then(
       (value) => ({ ok: true as const, value }),
       (error) => ({ ok: false as const, error })
     );
@@ -170,15 +170,15 @@ describe("service fetch timeouts", () => {
       new Response(
         JSON.stringify({
           job: {
-            job_id: "sync-1",
+            job_id: "job-1",
             mode: "full_market_bootstrap",
             status: "running",
-            total_symbols: 2,
+            total_symbols: 5445,
             completed_symbols: 0,
             failed_symbols: 0,
             imported_rows: 0,
-            start_date: "2026-06-09",
-            end_date: "2026-06-10",
+            start_date: "2026-06-01",
+            end_date: "2026-06-05",
             errors: []
           }
         }),
@@ -189,7 +189,7 @@ describe("service fetch timeouts", () => {
     await expect(settled).resolves.toEqual({
       ok: true,
       value: expect.objectContaining({
-        job: expect.objectContaining({ job_id: "sync-1", status: "running" })
+        job: expect.objectContaining({ job_id: "job-1", status: "running" })
       })
     });
   });

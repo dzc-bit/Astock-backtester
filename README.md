@@ -7,7 +7,7 @@ Windows 桌面版 A 股策略回测工具。项目使用 React + TypeScript 构�
 ## 核心能力
 
 - 本地历史数据仓：维护 A 股日线、资金流、市值和覆盖信息。
-- 数据中心：支持导入、全市场同步、指定股票补齐、资金流补齐和覆盖查询；“补全缺失数据”默认走全市场，完成后继续补齐主仓缺失资金流，输入股票代码时才只补个股。
+- 数据中心：支持导入、全市场同步、指定股票补齐、资金流补齐和覆盖查询；“补全缺失数据”默认走全市场，输入股票代码时才只补个股。
 - 策略回测：支持入场/离场条件、仓位参数、止盈止损、涨跌停约束和流式回测结果。
 - 行情看板：展示指数、红绿家数、强势板块、行情评价、新闻摘要、资讯事件、同花顺复盘/早盘和风险提示。
 - user 模式候选：回测结果通过 `latest_strategy_matches.matches` 展示符合用户策略的个股。
@@ -31,7 +31,7 @@ Windows 桌面版 A 股策略回测工具。项目使用 React + TypeScript 构�
 | 能力 | 接口 |
 | --- | --- |
 | 健康检查 | `GET /ping`、`GET /health`、`GET /logs/recent` |
-| 覆盖查询 | `POST /coverage/daily-bars`、`GET /coverage/summary` |
+| 覆盖查询 | `POST /coverage/daily-bars` |
 | 数据同步 | `POST /sync/full-market`、`GET /sync/jobs/{job_id}` |
 | 数据导入与补齐 | `POST /import/daily-bars`、`POST /fetch/daily-bars`、`POST /fetch/capital-flow` |
 | 行情与资讯 | `GET /realtime/market-snapshot`、`GET /market/commentary`、`GET /market/news-summary`、`GET /market/news` |
@@ -39,9 +39,7 @@ Windows 桌面版 A 股策略回测工具。项目使用 React + TypeScript 构�
 | 风险与策略 | `GET /risk/alerts`、`GET /strategy/recommended`、`POST /strategy/conditions/validate` |
 | 回测 | `POST /run/backtest/stream` |
 
-`/coverage/summary` 返回主仓精确覆盖摘要，数据中心用它刷新缺失行数；`imported_rows` 只表示本次真实新增或变更行，不直接等同于缺口减少量。
-
-`/run/backtest/stream` 返回 NDJSON，需要逐行解析，最后一行应为 `{"type":"result", ...}`。旧的非流式 `/run/backtest` 和临时 `/identity` 诊断接口不再作为公开服务契约。
+`/run/backtest/stream` 返回 NDJSON，需要逐行解析，最后一行应为 `{"type":"result", ...}`。
 
 ## 数据源概览
 

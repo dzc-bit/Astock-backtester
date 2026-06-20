@@ -6,7 +6,6 @@ import time as monotonic_time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta, timezone
-from threading import Lock
 from typing import Any, Callable, Iterable
 
 import pandas as pd
@@ -470,8 +469,10 @@ class RealtimeMarketProvider:
     timeout: float = 4.0
     requester: Callable[..., requests.Response] = requests.get
     breadth_time_budget: float = 2.0
+    breadth_source_timeout: float = 0.8
     sector_time_budget: float = 3.0
     sector_source_timeout: float = 0.8
+    local_snapshot_time_budget: float = 2.0
     allow_eastmoney_breadth_fallback: bool = False
     _last_live_sector_rows: list[dict] = field(default_factory=list, init=False, repr=False)
     _sector_member_cache: dict[str, list[str]] = field(default_factory=dict, init=False, repr=False)
@@ -480,8 +481,6 @@ class RealtimeMarketProvider:
     _last_successful_snapshot: RealtimeMarketSnapshot | None = field(default=None, init=False, repr=False)
     _skip_local_topic_fetch_once: bool = field(default=False, init=False, repr=False)
     _heavy_market_provider: HeavyMarketCrawlerProvider | None = field(default=None, init=False, repr=False)
-    _cls_home_payload_cache: dict[str, Any] | None = field(default=None, init=False, repr=False)
-    _cls_home_payload_lock: Lock = field(default_factory=Lock, init=False, repr=False)
 
     def market_snapshot(self) -> RealtimeMarketSnapshot:
         for event in self.market_snapshot_events():
@@ -504,7 +503,6 @@ class RealtimeMarketProvider:
         self._ths_industry_rows_cache = None
         self._last_live_sector_rows = []
         self._skip_local_topic_fetch_once = False
-        self._cls_home_payload_cache = None
 
         indexes: list[MarketIndexQuote] = []
         live_breadth: MarketBreadth | None = None
@@ -512,7 +510,7 @@ class RealtimeMarketProvider:
         with ThreadPoolExecutor(max_workers=3) as executor:
             futures = {
                 executor.submit(self._fetch_indexes): "indexes",
-                executor.submit(self._call_live_breadth, breadth_diagnostics): "breadth",
+                executor.submit(self._fetch_live_breadth_with_budget, breadth_diagnostics): "breadth",
                 executor.submit(self._fetch_live_sectors_with_budget, sector_diagnostics): "sectors",
             }
             for future in as_completed(futures):
@@ -551,10 +549,11 @@ class RealtimeMarketProvider:
                     }
         diagnostics.extend(breadth_diagnostics)
         diagnostics.extend(sector_diagnostics)
-        local_snapshot = self._snapshot_from_local(now)
-        strong_sectors = live_sectors or local_snapshot.strong_sectors
-        yesterday_sectors = local_snapshot.yesterday_strong_sectors
-        breadth = live_breadth or local_snapshot.breadth
+        has_live_context = bool(indexes and live_breadth and live_sectors)
+        local_snapshot = None if has_live_context else self._snapshot_from_local_with_budget(now, diagnostics)
+        strong_sectors = live_sectors or (local_snapshot.strong_sectors if local_snapshot else [])
+        yesterday_sectors = local_snapshot.yesterday_strong_sectors if local_snapshot else []
+        breadth = live_breadth or (local_snapshot.breadth if local_snapshot else None)
         if not live_breadth and breadth:
             yield {
                 "type": "breadth",
@@ -581,33 +580,32 @@ class RealtimeMarketProvider:
                 "market_phase": phase,
                 "diagnostics": list(diagnostics),
             }
-        has_live_context = bool(indexes and live_breadth and live_sectors)
         has_partial_realtime_context = bool(indexes or live_breadth or live_sectors)
         status = "live" if has_live_context else ("stale" if has_partial_realtime_context else local_snapshot.status)
-        if not live_breadth and local_snapshot.diagnostics:
+        if local_snapshot and not live_breadth and local_snapshot.diagnostics:
             diagnostics.extend(local_snapshot.diagnostics)
         if not indexes:
             diagnostics.append("实时指数接口暂不可用，尝试使用最近成功快照或本地最近交易日。")
-        if indexes and not live_breadth and local_snapshot.breadth:
+        if local_snapshot and indexes and not live_breadth and local_snapshot.breadth:
             diagnostics.append("实时红绿家数接口暂不可用，已回退到本地最近交易日统计。")
-        if indexes and not live_breadth and local_snapshot.breadth is None:
+        if local_snapshot and indexes and not live_breadth and local_snapshot.breadth is None:
             diagnostics.append("实时红绿家数接口暂不可用，本地最近交易日红绿宽度也不完整，已隐藏该宽度统计。")
-        if indexes and not live_sectors and local_snapshot.strong_sectors:
+        if local_snapshot and indexes and not live_sectors and local_snapshot.strong_sectors:
             diagnostics.append("实时强势题材接口暂不可用，已回退到本地最近交易日题材聚合。")
         source_parts: list[str] = []
         if indexes:
             source_parts.extend(_unique_sources(quote.source for quote in indexes))
         if live_breadth:
             source_parts.append(live_breadth.source)
-        elif local_snapshot.breadth:
+        elif local_snapshot and local_snapshot.breadth:
             source_parts.append(local_snapshot.breadth.source)
         if live_sectors:
             source_parts.append(live_sectors[0].source)
-        elif local_snapshot.strong_sectors:
+        elif local_snapshot and local_snapshot.strong_sectors:
             source_parts.append(local_snapshot.strong_sectors[0].source)
         if yesterday_sectors:
             source_parts.append("local-yesterday-group")
-        source = "+".join(source_parts) if source_parts else local_snapshot.source
+        source = "+".join(source_parts) if source_parts else (local_snapshot.source if local_snapshot else "live")
         if not indexes:
             message = local_snapshot.message
         else:
@@ -622,7 +620,7 @@ class RealtimeMarketProvider:
             source=source,
             updated_at=now,
             market_phase=phase,
-            indexes=indexes or local_snapshot.indexes,
+            indexes=indexes or (local_snapshot.indexes if local_snapshot else []),
             breadth=breadth,
             strong_sectors=strong_sectors,
             yesterday_strong_sectors=yesterday_sectors,
@@ -655,24 +653,27 @@ class RealtimeMarketProvider:
         yield {"type": "result", "snapshot": snapshot}
 
     def _call_live_breadth(self, diagnostics: list[str]) -> MarketBreadth | None:
-        if self.breadth_time_budget is not None:
-            executor = ThreadPoolExecutor(max_workers=1)
-            future = executor.submit(self._call_live_breadth_unbounded, diagnostics)
-            try:
-                return future.result(timeout=self.breadth_time_budget)
-            except TimeoutError:
-                future.cancel()
-                diagnostics.append(f"realtime breadth source timeout after {self.breadth_time_budget:g}s.")
-                return None
-            finally:
-                executor.shutdown(wait=False, cancel_futures=True)
-        return self._call_live_breadth_unbounded(diagnostics)
-
-    def _call_live_breadth_unbounded(self, diagnostics: list[str]) -> MarketBreadth | None:
         try:
             return self._fetch_live_breadth(diagnostics)
         except TypeError:
             return self._fetch_live_breadth()
+
+    def _fetch_live_breadth_with_budget(self, diagnostics: list[str]) -> MarketBreadth | None:
+        if self.breadth_time_budget is None:
+            return self._call_live_breadth(diagnostics)
+        executor = ThreadPoolExecutor(max_workers=1)
+        future = executor.submit(self._call_live_breadth, diagnostics)
+        try:
+            return future.result(timeout=self.breadth_time_budget)
+        except TimeoutError:
+            future.cancel()
+            diagnostics.append(f"实时红绿家数接口超时：{self.breadth_time_budget:g}秒，已继续返回可用行情。")
+            return None
+        except Exception as exc:
+            diagnostics.append(f"实时红绿家数接口失败：{exc}，已继续返回可用行情。")
+            return None
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
 
     def _fetch_live_sectors_with_budget(self, diagnostics: list[str]) -> list[SectorMover]:
         if self.sector_time_budget is None:
@@ -690,6 +691,29 @@ class RealtimeMarketProvider:
             self._skip_local_topic_fetch_once = True
             diagnostics.append(f"实时强势题材接口失败：{exc}，已回退本地题材。")
             return []
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
+
+    def _snapshot_from_local_with_budget(self, now: datetime, diagnostics: list[str]) -> RealtimeMarketSnapshot:
+        if self.local_snapshot_time_budget is None:
+            return self._snapshot_from_local(now)
+        executor = ThreadPoolExecutor(max_workers=1)
+        future = executor.submit(self._snapshot_from_local, now)
+        try:
+            return future.result(timeout=self.local_snapshot_time_budget)
+        except TimeoutError:
+            future.cancel()
+            diagnostics.append(f"本地兜底行情快照超时：{self.local_snapshot_time_budget:g}秒，已继续返回可用行情。")
+            return unavailable_market_snapshot(
+                "本地兜底行情快照生成超时。",
+                diagnostics=[f"本地兜底行情快照超时：{self.local_snapshot_time_budget:g}秒。"],
+            )
+        except Exception as exc:
+            diagnostics.append(f"本地兜底行情快照失败：{exc}，已继续返回可用行情。")
+            return unavailable_market_snapshot(
+                f"本地兜底行情快照生成失败：{exc}",
+                diagnostics=[f"本地兜底行情快照失败：{exc}"],
+            )
         finally:
             executor.shutdown(wait=False, cancel_futures=True)
 
@@ -724,14 +748,11 @@ class RealtimeMarketProvider:
         return quotes
 
     def _fetch_cls_home_payload(self) -> dict[str, Any]:
-        with self._cls_home_payload_lock:
-            if self._cls_home_payload_cache is None:
-                self._cls_home_payload_cache = cls_request_json(
-                    self.requester,
-                    CLS_QUOTE_HOME_URL,
-                    timeout=min(self.timeout, 2.5),
-                )
-            return self._cls_home_payload_cache
+        return cls_request_json(
+            self.requester,
+            CLS_QUOTE_HOME_URL,
+            timeout=min(self.timeout, 2.5),
+        )
 
     def _fetch_cls_indexes(self) -> list[MarketIndexQuote]:
         try:
@@ -856,51 +877,32 @@ class RealtimeMarketProvider:
         return sectors
 
     def _fetch_live_breadth(self, diagnostics: list[str]) -> MarketBreadth | None:
-        local_symbol_count = max(self._latest_local_symbol_count(), self._coverage_symbol_count())
         fetchers: list[tuple[str, Callable[[], MarketBreadth | None]]] = [
             ("财联社涨跌分布", self._fetch_cls_breadth),
             ("同花顺市场总览", self._fetch_ths_market_summary_breadth),
             ("Sina 批量实时个股", self._fetch_sina_breadth),
             ("Tencent 批量实时个股", lambda: self._fetch_tencent_breadth(diagnostics)),
-            ("AKShare 实时个股", lambda: self._fetch_akshare_breadth(diagnostics)),
+            ("AKShare 实时个股", lambda: self._fetch_akshare_breadth_with_timeout(diagnostics)),
             ("重型公开行情爬虫", lambda: self._fetch_heavy_breadth(diagnostics)),
         ]
         if self.allow_eastmoney_breadth_fallback:
             fetchers.append(("东方财富轻量 spot 兜底", lambda: self._fetch_eastmoney_breadth(diagnostics)))
+        local_symbol_count: int | None = None
         for label, fetcher in fetchers:
-            breadth = self._call_breadth_fetcher_with_budget(label, fetcher, diagnostics)
+            try:
+                breadth = fetcher()
+            except Exception as exc:
+                diagnostics.append(f"{label}红绿家数读取失败：{exc}")
+                continue
             if breadth is None:
                 continue
+            if breadth.source == "cls-quote-breadth" and breadth.total > 0:
+                return breadth
+            if local_symbol_count is None:
+                local_symbol_count = max(self._latest_local_symbol_count(), self._coverage_symbol_count())
             if self._breadth_is_complete(breadth, local_symbol_count, diagnostics):
                 return breadth
         return None
-
-    def _call_breadth_fetcher_with_budget(
-        self,
-        label: str,
-        fetcher: Callable[[], MarketBreadth | None],
-        diagnostics: list[str],
-    ) -> MarketBreadth | None:
-        if self.breadth_time_budget is None:
-            try:
-                return fetcher()
-            except Exception as exc:
-                diagnostics.append(f"{label}红绿家数读取失败：{exc}")
-                return None
-        per_source_timeout = min(self.timeout, max(0.01, self.breadth_time_budget / 4))
-        executor = ThreadPoolExecutor(max_workers=1)
-        future = executor.submit(fetcher)
-        try:
-            return future.result(timeout=per_source_timeout)
-        except TimeoutError:
-            future.cancel()
-            diagnostics.append(f"{label}红绿家数读取超时：{per_source_timeout:g}秒，继续尝试后续来源。")
-            return None
-        except Exception as exc:
-            diagnostics.append(f"{label}红绿家数读取失败：{exc}")
-            return None
-        finally:
-            executor.shutdown(wait=False, cancel_futures=True)
 
     def _fetch_cls_breadth(self) -> MarketBreadth | None:
         payload = self._fetch_cls_home_payload()
@@ -989,6 +991,12 @@ class RealtimeMarketProvider:
             total=total,
             source="sina-a-share-live",
         )
+
+    def _breadth_request_timeout(self) -> float:
+        timeout = self.breadth_source_timeout
+        if self.breadth_time_budget is not None:
+            timeout = min(timeout, max(0.2, self.breadth_time_budget / 2))
+        return min(self.timeout, timeout)
 
     def _latest_local_symbols(self) -> list[str]:
         try:
@@ -1108,6 +1116,22 @@ class RealtimeMarketProvider:
         down = int((data[change_column] < 0).sum())
         flat = int((data[change_column] == 0).sum())
         return MarketBreadth(up=up, down=down, flat=flat, total=up + down + flat, source="akshare-a-share-live")
+
+    def _fetch_akshare_breadth_with_timeout(self, diagnostics: list[str]) -> MarketBreadth | None:
+        timeout = self._breadth_request_timeout()
+        executor = ThreadPoolExecutor(max_workers=1)
+        future = executor.submit(self._fetch_akshare_breadth, diagnostics)
+        try:
+            return future.result(timeout=timeout)
+        except TimeoutError:
+            future.cancel()
+            diagnostics.append(f"AKShare 实时个股红绿家数读取超时：{timeout:g}秒。")
+            return None
+        except Exception as exc:
+            diagnostics.append(f"AKShare 实时个股红绿家数读取失败：{exc}")
+            return None
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
 
     def _fetch_heavy_breadth(self, diagnostics: list[str]) -> MarketBreadth | None:
         if self._heavy_market_provider is None:
@@ -1558,8 +1582,7 @@ class RealtimeMarketProvider:
 
     def _coverage_symbol_count(self) -> int:
         try:
-            health_coverage = getattr(self.warehouse, "health_coverage", None)
-            coverage = health_coverage() if callable(health_coverage) else self.warehouse.coverage()
+            coverage = self.warehouse.coverage()
         except Exception:
             return 0
         for item in coverage:

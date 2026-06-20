@@ -8,7 +8,6 @@ import pandas as pd
 
 from astock_backtester.data.astock_adapter import AStockDataAdapter
 from astock_backtester.data.importer import normalize_daily_bars
-from astock_backtester.data.trading_calendar import a_share_trade_dates
 
 
 class ProviderError(RuntimeError):
@@ -47,22 +46,6 @@ def _unique_symbols(symbols: list[str]) -> list[str]:
         seen.add(code)
         out.append(code)
     return out
-
-
-def _requested_latest_trade_date(start_date: str, end_date: str) -> pd.Timestamp | None:
-    trade_dates = a_share_trade_dates(pd.Timestamp(start_date), pd.Timestamp(end_date))
-    return max(trade_dates) if trade_dates else None
-
-
-def _covers_requested_latest_trade_date(frame: pd.DataFrame, latest_trade_date: pd.Timestamp | None) -> bool:
-    if latest_trade_date is None:
-        return True
-    if frame.empty or "trade_date" not in frame:
-        return False
-    dates = pd.to_datetime(frame["trade_date"], errors="coerce").dropna()
-    if dates.empty:
-        return False
-    return pd.Timestamp(dates.max()).normalize() >= latest_trade_date
 
 
 def enrich_market_cap_from_share_history(bars: pd.DataFrame, shares: pd.DataFrame) -> pd.DataFrame:
@@ -137,15 +120,12 @@ class ADataProvider:
 @dataclass
 class HttpAStockProvider:
     name: str = "http"
-    adapter: AStockDataAdapter | None = None
 
     def list_symbols(self) -> list[str]:
         return []
 
     def fetch_daily_bars(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
-        if self.adapter is None:
-            self.adapter = AStockDataAdapter.from_http_sources(include_optional_enrichment=False)
-        frame = self.adapter.fetch_daily_bars([symbol], start_date, end_date)
+        frame = AStockDataAdapter.from_http_sources().fetch_daily_bars([symbol], start_date, end_date)
         if frame.empty:
             return frame
         frame["source"] = self.name
@@ -270,8 +250,6 @@ class CompositeProvider:
 
     def fetch_daily_bars(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
         errors: list[str] = []
-        best_frame = pd.DataFrame()
-        latest_trade_date = _requested_latest_trade_date(start_date, end_date)
         for provider in self.providers:
             try:
                 frame = provider.fetch_daily_bars(symbol, start_date, end_date)
@@ -281,13 +259,8 @@ class CompositeProvider:
             if not frame.empty:
                 if "source" not in frame.columns:
                     frame["source"] = provider.name
-                normalized = normalize_daily_bars(frame)
-                if best_frame.empty or pd.to_datetime(normalized["trade_date"]).max() > pd.to_datetime(best_frame["trade_date"]).max():
-                    best_frame = normalized
-                if _covers_requested_latest_trade_date(normalized, latest_trade_date):
-                    return normalized
-        if not best_frame.empty:
-            return best_frame
+                return normalize_daily_bars(frame)
+            errors.append(f"{provider.name}: returned no daily rows")
         if errors:
             raise ProviderError("; ".join(errors))
         return pd.DataFrame()

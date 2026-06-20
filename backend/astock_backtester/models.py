@@ -145,6 +145,7 @@ class DataOperationResult(BaseModel):
     status: Literal["ok", "partial"]
     imported_rows: int
     returned_rows: int = 0
+    filled_missing_rows: int = 0
     requested_symbols: list[str] = Field(default_factory=list)
     fetched_symbols: list[str] = Field(default_factory=list)
     missing_symbols: list[str] = Field(default_factory=list)
@@ -165,6 +166,7 @@ class ServiceHealth(BaseModel):
     started_at: datetime | None = None
     instance_id: str | None = None
     coverage: list[DatasetCoverage]
+    coverage_refreshing: bool = False
 
 
 class SyncJobStatus(BaseModel):
@@ -178,6 +180,9 @@ class SyncJobStatus(BaseModel):
     skipped_symbols: int = 0
     imported_rows: int = 0
     returned_rows: int = 0
+    filled_missing_rows: int = 0
+    filled_daily_rows: int = 0
+    filled_market_cap_rows: int = 0
     current_symbol: str | None = None
     start_date: date
     end_date: date
@@ -310,6 +315,8 @@ class ClsFinancePoolItem(BaseModel):
 
 class ClsFinanceEmotion(BaseModel):
     market_degree: float | None = None
+    market_degree_source: str | None = None
+    market_degree_label: str | None = None
     shsz_balance: str | None = None
     shsz_balance_change: str | None = None
     breadth: MarketBreadth | None = None

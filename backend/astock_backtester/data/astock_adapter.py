@@ -13,10 +13,6 @@ from astock_backtester.data.importer import normalize_daily_bars
 
 
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-TENCENT_KLINE_URL = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
-EASTMONEY_KLINE_URL = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
-BAIDU_KLINE_URL = "https://finance.pae.baidu.com/selfselect/getstockquotation"
-SINA_KLINE_URL = "https://quotes.sina.cn/cn/api/jsonp_v2.php/var%20x=/CN_MarketDataService.getKLineData"
 
 
 class AStockDataUnavailable(RuntimeError):
@@ -25,7 +21,6 @@ class AStockDataUnavailable(RuntimeError):
 
 DailyBarsFetcher = Callable[[Sequence[str], str, str], pd.DataFrame]
 JsonGetter = Callable[[str, dict[str, str], dict[str, str], int], dict[str, Any]]
-TextGetter = Callable[[str, dict[str, str], dict[str, str], int], str]
 JsonGetterVariants = Sequence[tuple[str, JsonGetter]]
 
 
@@ -40,10 +35,6 @@ def _normalize_code(symbol: str) -> str:
 
 def _market_code(code: str) -> int:
     return 1 if code.startswith(("6", "9")) else 0
-
-
-def _tencent_symbol(code: str) -> str:
-    return ("sh" if _market_code(code) == 1 else "sz") + code
 
 
 def _to_float(value: Any, default: float = 0.0) -> float:
@@ -62,23 +53,22 @@ def _parse_date(value: Any) -> date | None:
     return None
 
 
+def _should_retry_baidu_payload(payload: Any) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    result_code = str(payload.get("ResultCode") or "")
+    result = payload.get("Result")
+    return result_code in {"403", "429"} or result == []
+
+
 def _default_json_get(url: str, params: dict[str, str], headers: dict[str, str], timeout: int) -> dict[str, Any]:
     response = requests.get(url, params=params, headers=headers, timeout=timeout, proxies={})
     response.raise_for_status()
     return json.loads(response.text)
 
 
-def _default_text_get(url: str, params: dict[str, str], headers: dict[str, str], timeout: int) -> str:
-    response = requests.get(url, params=params, headers=headers, timeout=timeout, proxies={})
-    response.raise_for_status()
-    return response.text
-
-
 def _curl_cffi_json_get(url: str, params: dict[str, str], headers: dict[str, str], timeout: int) -> dict[str, Any]:
-    try:
-        from curl_cffi import requests as curl_requests
-    except Exception as exc:
-        raise AStockDataUnavailable(f"curl_cffi is not available: {exc}") from exc
+    from curl_cffi import requests as curl_requests
 
     response = curl_requests.get(
         url,
@@ -91,34 +81,16 @@ def _curl_cffi_json_get(url: str, params: dict[str, str], headers: dict[str, str
     return json.loads(response.text)
 
 
-def _is_remote_disconnect(exc: Exception) -> bool:
-    text = repr(exc).lower()
-    return any(marker in text for marker in ("remote", "connection", "closed", "disconnect", "reset"))
-
-
 class HttpAStockFetcher:
     """HTTP subset learned from simonlin1212/a-stock-data for daily backtest cache fills."""
 
-    def __init__(
-        self,
-        json_get: JsonGetter | None = None,
-        text_get: TextGetter | None = None,
-        eastmoney_json_getters: JsonGetterVariants | None = None,
-        include_optional_enrichment: bool = True,
-    ) -> None:
-        self._json_get = json_get or _default_json_get
-        self._text_get = text_get
-        self._include_optional_enrichment = include_optional_enrichment
-        if eastmoney_json_getters is not None:
-            self._eastmoney_json_getters = tuple(eastmoney_json_getters)
-        elif json_get is None:
-            self._eastmoney_json_getters: JsonGetterVariants = (
-                ("requests", _default_json_get),
-                ("curl_cffi", _curl_cffi_json_get),
-            )
+    def __init__(self, json_get: JsonGetter | None = None, json_gets: JsonGetterVariants | None = None) -> None:
+        if json_gets is not None:
+            self._json_gets = tuple(json_gets)
+        elif json_get is not None:
+            self._json_gets = (("injected", json_get),)
         else:
-            self._eastmoney_json_getters = (("injected", json_get),)
-        self._skip_eastmoney_kline = False
+            self._json_gets = (("requests", _default_json_get), ("curl_cffi", _curl_cffi_json_get))
 
     def fetch_daily_bars(self, symbols: Sequence[str], start_date: str, end_date: str) -> pd.DataFrame:
         frames = [self._fetch_one(symbol, start_date, end_date) for symbol in symbols]
@@ -129,21 +101,16 @@ class HttpAStockFetcher:
 
     def _fetch_one(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
         code = _normalize_code(symbol)
-        bars = self._try_fetch_sina_kline(code, start_date, end_date)
+        bars = self._fetch_baidu_kline(code, start_date, end_date)
         if bars.empty:
-            bars = self._try_fetch_tencent_kline(code, start_date, end_date)
-        if bars.empty and not self._skip_eastmoney_kline:
-            bars = self._try_fetch_eastmoney_kline(code, start_date, end_date)
-        if bars.empty:
-            bars = self._fetch_baidu_kline(code, start_date, end_date)
-        if bars.empty:
-            return bars
-        if not self._include_optional_enrichment:
             return bars
 
         info = self._try_fetch_eastmoney_stock_info(code)
         flow_by_date = {item["date"]: item["main_net"] for item in self._try_fetch_eastmoney_fund_flow_120d(code)}
         bars["main_net_inflow"] = bars["trade_date"].dt.strftime("%Y-%m-%d").map(flow_by_date)
+        name = str(info.get("name") or "").strip()
+        if name:
+            bars["name"] = name
         float_market_cap = _to_float(info.get("float_mcap"), float("nan"))
         if float_market_cap > 0:
             bars["float_market_cap"] = float_market_cap
@@ -166,197 +133,8 @@ class HttpAStockFetcher:
         except Exception:
             return {}
 
-    def _try_fetch_tencent_kline(self, code: str, start_date: str, end_date: str) -> pd.DataFrame:
-        try:
-            return self._fetch_tencent_kline(code, start_date, end_date)
-        except Exception:
-            return pd.DataFrame()
-
-    def _try_fetch_sina_kline(self, code: str, start_date: str, end_date: str) -> pd.DataFrame:
-        if self._text_get is None:
-            return pd.DataFrame()
-        try:
-            return self._fetch_sina_kline(code, start_date, end_date)
-        except Exception:
-            return pd.DataFrame()
-
-    def _fetch_sina_kline(self, code: str, start_date: str, end_date: str) -> pd.DataFrame:
-        text = self._text_get(
-            SINA_KLINE_URL,
-            {"symbol": _tencent_symbol(code), "scale": "240", "ma": "no", "datalen": "320"},
-            {
-                "User-Agent": UA,
-                "Accept": "application/javascript, */*;q=0.8",
-                "Referer": "https://finance.sina.com.cn/",
-            },
-            5,
-        )
-        start = text.find("([")
-        end = text.rfind("])")
-        if start < 0 or end <= start:
-            return pd.DataFrame()
-        items = json.loads(text[start + 1 : end + 1])
-        if not isinstance(items, list):
-            return pd.DataFrame()
-        rows = []
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            trade_date = _parse_date(item.get("day"))
-            if trade_date is None or not (start_date <= trade_date.isoformat() <= end_date):
-                continue
-            rows.append(
-                {
-                    "symbol": code,
-                    "trade_date": trade_date.isoformat(),
-                    "open": _to_float(item.get("open")),
-                    "high": _to_float(item.get("high")),
-                    "low": _to_float(item.get("low")),
-                    "close": _to_float(item.get("close")),
-                    "volume": _to_float(item.get("volume")),
-                }
-            )
-        return pd.DataFrame() if not rows else normalize_daily_bars(pd.DataFrame(rows))
-
-    def _fetch_tencent_kline(self, code: str, start_date: str, end_date: str) -> pd.DataFrame:
-        tencent_symbol = _tencent_symbol(code)
-        payload = self._json_get(
-            TENCENT_KLINE_URL,
-            {"param": f"{tencent_symbol},day,{start_date},{end_date},640,qfq"},
-            {
-                "User-Agent": UA,
-                "Accept": "application/json, text/plain, */*",
-                "Referer": "https://gu.qq.com/",
-            },
-            5,
-        )
-        data = payload.get("data", {}) if isinstance(payload, dict) else {}
-        item = data.get(tencent_symbol, {}) if isinstance(data, dict) else {}
-        rows_data = item.get("qfqday") or item.get("day") if isinstance(item, dict) else []
-        if not isinstance(rows_data, list) or not rows_data:
-            return pd.DataFrame()
-        rows = []
-        for row in rows_data:
-            if not isinstance(row, list) or len(row) < 6:
-                continue
-            trade_date = _parse_date(row[0])
-            if trade_date is None or not (start_date <= trade_date.isoformat() <= end_date):
-                continue
-            rows.append(
-                {
-                    "symbol": code,
-                    "trade_date": trade_date.isoformat(),
-                    "open": _to_float(row[1]),
-                    "close": _to_float(row[2]),
-                    "high": _to_float(row[3]),
-                    "low": _to_float(row[4]),
-                    "volume": _to_float(row[5]),
-                }
-            )
-        return pd.DataFrame() if not rows else normalize_daily_bars(pd.DataFrame(rows))
-
-    def _try_fetch_eastmoney_kline(self, code: str, start_date: str, end_date: str) -> pd.DataFrame:
-        try:
-            return self._fetch_eastmoney_kline(code, start_date, end_date)
-        except Exception as exc:
-            if _is_remote_disconnect(exc):
-                self._skip_eastmoney_kline = True
-            return pd.DataFrame()
-
-    def _fetch_eastmoney_kline(self, code: str, start_date: str, end_date: str) -> pd.DataFrame:
-        params = {
-            "secid": f"{_market_code(code)}.{code}",
-            "fields1": "f1,f2,f3,f4,f5,f6",
-            "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61",
-            "klt": "101",
-            "fqt": "1",
-            "beg": start_date.replace("-", ""),
-            "end": end_date.replace("-", ""),
-            "lmt": "1000000",
-        }
-        headers = {
-            "User-Agent": UA,
-            "Accept": "application/json, text/plain, */*",
-            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-            "Connection": "close",
-            "Referer": "https://quote.eastmoney.com/",
-            "Origin": "https://quote.eastmoney.com",
-        }
-        last_error: Exception | None = None
-        for _label, json_get in self._eastmoney_json_getters:
-            try:
-                payload = json_get(EASTMONEY_KLINE_URL, params, headers, 5)
-                break
-            except Exception as exc:
-                last_error = exc
-        else:
-            if last_error is not None:
-                raise last_error
-            return pd.DataFrame()
-        klines = payload.get("data", {}).get("klines", []) if isinstance(payload, dict) else []
-        if not isinstance(klines, list) or not klines:
-            return pd.DataFrame()
-        rows = []
-        for line in klines:
-            parts = str(line).split(",")
-            if len(parts) < 7:
-                continue
-            trade_date = _parse_date(parts[0])
-            if trade_date is None or not (start_date <= trade_date.isoformat() <= end_date):
-                continue
-            rows.append(
-                {
-                    "symbol": code,
-                    "trade_date": trade_date.isoformat(),
-                    "open": _to_float(parts[1]),
-                    "close": _to_float(parts[2]),
-                    "high": _to_float(parts[3]),
-                    "low": _to_float(parts[4]),
-                    "volume": _to_float(parts[5]),
-                    "amount": _to_float(parts[6]),
-                    "change_pct": _to_float(parts[8]) if len(parts) > 8 else 0.0,
-                    "change": _to_float(parts[9]) if len(parts) > 9 else 0.0,
-                    "turnover_rate": _to_float(parts[10]) if len(parts) > 10 else 0.0,
-                }
-            )
-        return pd.DataFrame() if not rows else normalize_daily_bars(pd.DataFrame(rows))
-
     def _fetch_baidu_kline(self, code: str, start_date: str, end_date: str) -> pd.DataFrame:
-        market_data: dict[str, Any] = {}
-        for attempt in range(3):
-            payload = self._json_get(
-                BAIDU_KLINE_URL,
-                {
-                    "all": "1",
-                    "isIndex": "false",
-                    "isBk": "false",
-                    "isBlock": "false",
-                    "isFutures": "false",
-                    "isStock": "true",
-                    "newFormat": "1",
-                    "group": "quotation_kline_ab",
-                    "finClientType": "pc",
-                    "code": code,
-                    "start_time": start_date,
-                    "ktype": "1",
-                },
-                {
-                    "User-Agent": UA,
-                    "Accept": "application/vnd.finance-web.v1+json",
-                    "Origin": "https://gushitong.baidu.com",
-                    "Referer": "https://gushitong.baidu.com/",
-                },
-                5,
-            )
-            result_code = str(payload.get("ResultCode", "")) if isinstance(payload, dict) else ""
-            if result_code in {"403", "401", "429"}:
-                break
-            result = payload.get("Result") if isinstance(payload, dict) else None
-            if isinstance(result, dict):
-                market_data = result.get("newMarketData", {}) or {}
-                break
-            if attempt < 2:
-                time.sleep(1.5 * (attempt + 1))
+        market_data = self._fetch_baidu_market_data(code, start_date)
         if not market_data:
             return pd.DataFrame()
         keys = list(market_data.get("keys") or [])
@@ -395,8 +173,65 @@ class HttpAStockFetcher:
         frame.loc[turnover <= 0, "float_market_cap"] = float("nan")
         return normalize_daily_bars(frame)
 
+    def _fetch_baidu_market_data(self, code: str, start_date: str) -> dict[str, Any]:
+        params = {
+            "all": "1",
+            "isIndex": "false",
+            "isBk": "false",
+            "isBlock": "false",
+            "isFutures": "false",
+            "isStock": "true",
+            "newFormat": "1",
+            "group": "quotation_kline_ab",
+            "finClientType": "pc",
+            "code": code,
+            "start_time": start_date,
+            "ktype": "1",
+        }
+        headers = {
+            "User-Agent": UA,
+            "Accept": "application/vnd.finance-web.v1+json",
+            "Origin": "https://gushitong.baidu.com",
+            "Referer": "https://gushitong.baidu.com/",
+        }
+        for label, json_get in self._json_gets:
+            for attempt in range(2):
+                try:
+                    payload = json_get(
+                        "https://finance.pae.baidu.com/selfselect/getstockquotation",
+                        params,
+                        headers,
+                        8,
+                    )
+                except Exception:
+                    break
+                result = payload.get("Result") if isinstance(payload, dict) else None
+                if isinstance(result, dict):
+                    return result.get("newMarketData", {}) or {}
+                if not _should_retry_baidu_payload(payload):
+                    break
+                if label != "injected":
+                    break
+                if attempt == 0 and label == "injected":
+                    time.sleep(0.2)
+            if label != "injected":
+                continue
+        return {}
+
+    def _request_json(self, url: str, params: dict[str, str], headers: dict[str, str], timeout: int) -> dict[str, Any]:
+        last_error: Exception | None = None
+        for _label, json_get in self._json_gets:
+            try:
+                return json_get(url, params, headers, timeout)
+            except Exception as exc:
+                last_error = exc
+                continue
+        if last_error is not None:
+            raise last_error
+        return {}
+
     def _fetch_eastmoney_fund_flow_120d(self, code: str) -> list[dict[str, Any]]:
-        payload = self._json_get(
+        payload = self._request_json(
             "https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get",
             {
                 "secid": f"{_market_code(code)}.{code}",
@@ -419,7 +254,7 @@ class HttpAStockFetcher:
         return rows
 
     def _fetch_eastmoney_stock_info(self, code: str) -> dict[str, Any]:
-        payload = self._json_get(
+        payload = self._request_json(
             "https://push2.eastmoney.com/api/qt/stock/get",
             {
                 "fltt": "2",
@@ -449,13 +284,8 @@ class AStockDataAdapter:
         self.fetcher = fetcher
 
     @classmethod
-    def from_http_sources(cls, *, include_optional_enrichment: bool = True) -> "AStockDataAdapter":
-        return cls(
-            fetcher=HttpAStockFetcher(
-                text_get=_default_text_get,
-                include_optional_enrichment=include_optional_enrichment,
-            ).fetch_daily_bars
-        )
+    def from_http_sources(cls) -> "AStockDataAdapter":
+        return cls(fetcher=HttpAStockFetcher().fetch_daily_bars)
 
     def fetch_daily_bars(self, symbols: Sequence[str], start_date: str, end_date: str) -> pd.DataFrame:
         if self.fetcher is None:

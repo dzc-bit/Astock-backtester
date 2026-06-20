@@ -29,15 +29,7 @@ git branch --show-current
 https://github.com/dzc-bit/Astock-backtester.git
 ```
 
-保护已有未提交修改。不要覆盖无关文件，不要清理、删除、迁移 `D:\New project 6\运行产物`。当前版本按用户要求维护为 `1.2.4`；除非用户明确要求，不要再改版本号。
-
-截至 2026-06-13，当前目标修复版需要覆盖安装到桌面端目录：
-
-```text
-D:\New project 6\运行产物\桌面软件\A股策略回测工作台
-```
-
-覆盖安装后必须重新比对工作区 sidecar 与安装目录 `bin\astock-data-service.exe` 的 SHA256。不要复用旧 hash，也不要做 1.2.2 回退。
+保护已有未提交修改。不要覆盖无关文件，不要清理、删除、迁移 `D:\New project 6\运行产物`。版本号统一跟随桌面端当前版本，当前为 `1.3.0`，除非用户明确要求改版本。
 
 ## 2. 绝对不要碰错边界
 
@@ -46,6 +38,7 @@ D:\New project 6\运行产物\桌面软件\A股策略回测工作台
 - 不清理整个 `运行产物`。
 - 不提交私钥、安装包、`.sig`、临时 `latest.json`、探针脚本、日志或运行数据。
 - 前端只消费后端结构化响应，不写上游 URL、爬虫逻辑或字段清洗规则。
+- 清理临时文件时不要直接执行 `git clean -fdX` 或等价的一把梭命令，因为它会把 `.tools`、`node_modules`、`src-tauri\bin`、`src-tauri\target` 和 `运行产物` 这类仍需保留的本地工具、构建产物或用户数据也列入删除范围；只点名删除 `.pytest_cache`、`.ruff_cache`、`.tmp`、`.pyinstaller`、`__pycache__` 等明确临时缓存。
 
 ## 3. JSON 文件别误判
 
@@ -80,7 +73,6 @@ D:\New project 6\运行产物\桌面软件\A股策略回测工作台
 | 同花顺早盘 | `GET /market/zaopan` |
 | user 模式候选 | `/run/backtest/stream` 最终 `result.latest_strategy_matches.matches` |
 | 资金流补齐 | `POST /fetch/daily-bars`、`POST /fetch/capital-flow` |
-| 数据中心精确摘要 | `GET /coverage/summary` |
 
 复盘正文不能塞 user 候选；新闻不能替代行情评价；实时行情失败不能拿本地历史数据伪装成 live。
 
@@ -93,16 +85,17 @@ D:\New project 6\运行产物\桌面软件\A股策略回测工作台
 
 `total=192`、`total=26` 这类局部样本必须判失败并写入 diagnostics，不能标记为全市场 live。
 
-红绿家数链路必须有外层时间预算。慢 provider 不能拖住整个 `/realtime/market-snapshot` 或 `/market/commentary`；超时要快速返回 diagnostics，再走后续可用来源或本地防守口径。
-
 红绿家数 provider 链：
 
-1. 同花顺市场总览：`q.10jqka.com.cn/index/index/board/all/`
-2. Sina 批量实时个股：`hq.sinajs.cn/list=...`
-3. Tencent 批量实时个股：`qt.gtimg.cn/q=...`
-4. AKShare：`stock_zh_a_spot_em()`
-5. 后端重型公开行情爬虫：公开 XHR 优先，headless DOM 其次。
-6. 东方财富轻量 spot：只作受控备选，必须有超时、字段校验、数量校验和 diagnostics。
+1. 财联社行情页对应的签名 XHR：`https://www.cls.cn/quotation` 背后的 `x-quote.cls.cn/quote/index/home`，解析 `up_down_dis`；该来源拿到数字后直接展示，不再用 `total>=3000` 额外丢弃。
+2. 同花顺市场总览：`q.10jqka.com.cn/index/index/board/all/`
+3. Sina 批量实时个股：`hq.sinajs.cn/list=...`
+4. Tencent 批量实时个股：`qt.gtimg.cn/q=...`
+5. AKShare：`stock_zh_a_spot_em()`
+6. 后端重型公开行情爬虫：公开 XHR 优先，headless DOM 其次。
+7. 东方财富轻量 spot：只作受控备选，必须有超时、字段校验、数量校验和 diagnostics。
+
+财联社红绿家数是主源且已经代表全市场分布，不能在请求它之前先扫本地股票池或 coverage 数量；本地完整性扫描只允许在非财联社来源需要 `total>=3000`/本地比例校验时懒加载，否则主仓数据量大时会先耗尽红绿家数 2 秒预算，导致 CLS 明明可用却被判超时。
 
 强势板块 provider 链：
 
@@ -119,6 +112,15 @@ D:\New project 6\运行产物\桌面软件\A股策略回测工作台
 - 缓存最近成功结果只能作为 stale/fallback 明确标注。
 - 当前请求失败时，内部缓存不能参与本次 live 判定。
 - 不做登录、cookie 池、代理池、验证码绕过或付费抓取。
+
+同花顺大盘评分卡片规则：
+
+- 主源是 `q.10jqka.com.cn/api.php?t=indexflash&` 的 `dppj_data`，这是 10 分制同花顺大盘评级。
+- 该接口缺少浏览器脚本生成的 `v` cookie 时会 403；后端必须先执行同花顺 `chameleon` 浏览器脚本（当前用 Node/jsdom）生成本次请求 cookie，再请求 `indexflash`。
+- 桌面安装版 sidecar 旁边必须同时带 `node.exe`、`ths-cookie-worker.cjs`、`xhr-sync-worker.js`；只在开发机 `.tools` 里有 Node 不算安装版可用。
+- 评分解析只能读取 `indexflash` 原始载荷或 `dppj_data` 等结构化字段；HTML 页面兜底只能从可见文本解析，不能把 `<div id="dppj">` 这类标签属性里的数字当评分。
+- 成功解析后写入 `emotion.market_degree` / `emotion.market_degree_label`，前端“大盘评分”卡片直接消费该值。
+- 不要用财联社热度、新闻、本地启发式或其他评分静默替代同花顺评分；失败时保留 diagnostics/failures 并显示不可用或明确 fallback。
 
 ## 6. 行情评价状态机
 
@@ -169,9 +171,19 @@ docs/capital-flow-crawler-report.md
 
 `/coverage/daily-bars` 必须使用 A 股交易日历。不要用普通工作日直接判断缺失交易日。
 
-数据中心的“补全缺失数据”默认是全市场补齐：股票代码为空时走 `/sync/full-market`；只有用户显式输入股票代码时，才走指定股票 `/fetch/daily-bars`。全市场同步运行中不要用 `imported_rows` 假扣覆盖表缺口；`imported_rows` 只是本次真实新增或变更行。任务完成后用 `GET /coverage/summary` 刷新主仓精确覆盖，随后自动走 `/fetch/capital-flow` 补齐主仓内缺失的资金流。
+数据中心的“补全缺失数据”默认是全市场补齐：股票代码为空时走 `/sync/full-market`；只有用户显式输入股票代码时，才走指定股票 `/fetch/daily-bars`。覆盖表的 `missing_rows` 只能来自刷新后的真实仓库 coverage，前端绝不能用本次 `imported_rows` 抵扣或估算缺失行，否则会出现“任务没补完却显示缺失为 0”的错误。同步进度里 `imported_rows` 表示接口返回并写入/合并的行，不等于缺口减少；全市场日线任务的实际补缺必须拆分展示后端 `filled_daily_rows` 和 `filled_market_cap_rows`，`filled_missing_rows` 仅保留为兼容总数，不能当成单一日线缺口。
 
-默认无股票参数的 `/coverage/daily-bars` 不能全量扫描多年历史明细，否则会拖慢数据中心；应走最近分区/轻量摘要。指定股票或指定日期范围时，才需要逐股精确缺口明细。数据中心覆盖表的最终真值来自 `/coverage/summary`，不能拿 `/health` 的轻量摘要或旧缓存覆盖主仓精确结果。
+全市场日线同步的股票池必须优先来自本地仓库全量 OHLC 股票集合，不能用本次补齐日期范围过滤后的股票集合。否则缺最新交易日 OHLC 的股票会在任务创建时被排除，出现覆盖表显示仍有缺口但同步任务总数小于本地股票数的问题。
+
+全市场日线同步的跳过条件必须同时满足 OHLC 完整和 `float_market_cap` 完整。不能因为某只股票 OHLC 已有就跳过它的市值缺口；市值缺口应随 `/sync/full-market` 或指定 `/fetch/daily-bars` 的日线补齐一并修复。后端计算 `filled_missing_rows` 时应复用任务开始时的仓库完整性快照，避免每个写入批次重复扫仓拖慢数据中心。
+
+回测设置的默认日期在用户未手动编辑前应跟随 `daily_bars` coverage 的最新日期，并按最近 A 股交易日范围回填；用户一旦手动修改日期或点“套用数据中心日期”，后续不要再自动覆盖用户选择。这样本地仓库已到 2026-06-18 时，回测候选不应仍停在旧的 2026-01-20。
+
+补缺日线 provider 顺序必须以公开 HTTP 爬虫为主：`HttpAStockProvider -> ADataProvider -> AkshareProvider`。`HttpAStockProvider` 的百度日 K 线普通 `requests` 可能被 403，必须保留 `curl_cffi` 浏览器 TLS 指纹传输作为同一 HTTP 主源内的备用，不要因为普通 requests 403 就直接跳到 adata/AKShare。`adata` 数据可能只覆盖到 2025 年底，不能放在近期补缺主路径第一位；AKShare 只能作为最后保底。所有来源都失败或返回空时，错误必须聚合展示每个 provider 的尝试结果，不能只把 AKShare 的断连显示成唯一失败原因。
+
+`/health` 不能同步阻塞重型 `warehouse.coverage()` 扫描。数据中心连接和操作后刷新应快速返回最近 coverage 快照，并用后台刷新更新缺失行数；不要让 60 秒级 coverage 扫描卡住“本地服务已连接”、按钮状态或全市场同步进度。
+
+后台刷新期间如果 `/health` 返回三项 coverage 全是 `symbols=0`、无日期、`missing_rows=0` 且 `coverage_refreshing=true`，前端不能把它当权威结果覆盖已有覆盖表；应保留旧覆盖并继续轮询，等刷新完成后的真实快照再更新。
 
 春节、清明、劳动节、国庆等合法休市日不能进入 `missing_trade_dates`。
 
@@ -198,7 +210,9 @@ POST /run/backtest/stream
 最后一个 NDJSON 事件 result.latest_strategy_matches.matches
 ```
 
-不要把 user 候选塞进同花顺复盘正文。旧的非流式 `/run/backtest` 已废弃并应返回 404；不要恢复这个接口。
+旧的非流式 `/run/backtest` 接口不是兼容目标，不要恢复；前端也不要继续保留旧 `matched_stocks` 结果字段。user 候选只认 `latest_strategy_matches`。
+
+不要把 user 候选塞进同花顺复盘正文。
 
 如果实时失败并回退本地最近交易日，前端必须标注：
 
@@ -211,7 +225,7 @@ POST /run/backtest/stream
 
 - `GET /ping`
 - `GET /health`
-- `GET /coverage/summary`
+- `GET /market/finance`
 - `POST /coverage/daily-bars`
 - `GET /realtime/market-snapshot`
 - `GET /market/commentary`
@@ -248,26 +262,15 @@ D:\New project 6\运行产物\签名密钥\a-stock-backtester-v017.key
 - `latest.json` 必须由本次真实 `.sig` 生成。
 - 不手改、不伪造、不复用旧 `latest.json` 或旧 `.sig`。
 - 覆盖安装后比较安装目录 sidecar 和工作区 sidecar SHA256。
-- GitHub Release 的 updater 资产名尽量用 ASCII，避免 `latest.json` URL 和安装包资产名不一致。
+- 覆盖安装只使用本轮构建产物；源码版本、Tauri 版本和安装包文件名不一致时，先修正版本并重新构建，不复用旧包。
+- GitHub Release 的 updater 安装包资产名必须用 ASCII，例如 `Astock-backtester_1.3.0_x64-setup.exe`；用 `scripts\write-latest-json.ps1 -AssetName 本地中文安装包名 -ReleaseAssetName ASCII资产名` 生成 `latest.json`，并确认 `latest.json.platforms.windows-x86_64.url` 指向真实上传的 ASCII 资产名。
+- `release-assets\latest.json` 是本地发布暂存文件，生成后用于上传 GitHub Release，不提交到仓库；发布完成或验证结束后本地可删除。
 
 硬坑：
 
 - `npm run tauri -- build --ci` 外层曾返回非零但实际安装包和签名已生成；不要只看外层 wrapper，必须看真实产物和后续验证。
 - 本机可用 cargo 不一定在 `.tools\cargo-home\bin`，实际常用路径是 `.tools\rustup-home\toolchains\stable-x86_64-pc-windows-msvc\bin\cargo.exe`。
 - 覆盖安装不等于 sidecar 已替换，必须停旧进程后比对 hash，再探测端点。
-- 如果刚清理过 `src-tauri/target`、`src-tauri/bin`、`dist`，下一次覆盖安装会重新跑 Vite、PyInstaller 和 Rust release 编译；这是分钟级耗时，不是卡死。`tauri build` 的 `beforeBuildCommand` 还会再次执行 `build` 和 `build:data-service`，不要重复手动跑太多轮。
-- `cargo metadata` 报 `program not found` 时，不要安装新 Rust，也不要去 C 盘找；在当前命令里注入项目工具链：
-
-```powershell
-$env:CARGO_HOME='D:\New project 6\.tools\cargo-home'
-$env:RUSTUP_HOME='D:\New project 6\.tools\rustup-home'
-$env:PATH='D:\New project 6\.tools\rustup-home\toolchains\stable-x86_64-pc-windows-msvc\bin;' + $env:PATH
-```
-
-- Tauri 2.11 的 NSIS bundler 即使项目里有 `.tools\nsis-3.12`，也会按 `useLocalToolsDir` 查 `src-tauri\target\.tauri\NSIS`，并可能去 GitHub 下载 `nsis-3.11.zip`。本机网络到 GitHub release 可能超时；若 `Verifying NSIS package` 后卡在下载，先预置缓存：
-  - 复制 `.tools\nsis-3.12` 到 `src-tauri\target\.tauri\NSIS`。
-  - 确保 `src-tauri\target\.tauri\NSIS\Plugins\x86-unicode\additional\nsis_tauri_utils.dll` 存在。
-  - 该 DLL 应来自 `https://github.com/tauri-apps/nsis-tauri-utils/releases/download/nsis_tauri_utils-v0.5.3/nsis_tauri_utils.dll`，SHA1 必须是 `75197FEE3C6A814FE035788D1C34EAD39349B860`。不匹配时 Tauri 会删缓存重下。
 
 ## 13. 验证命令
 
@@ -324,71 +327,3 @@ git branch --show-current
 - 无归属 untracked 文件
 
 只提交源码、测试、文档和必要版本文件。
-
-## 15. 近期踩坑记录
-
-这些是 2026-06-10 到 2026-06-12 这轮修复和交付里实际踩过的坑，后续 agent 先按这些避坑，不要重复试错。
-
-### 范围和目标漂移
-
-- 用户一旦明确说“不要回退”“只完成目标”，就不要再查 release 或执行回退流程。当前目标版本是 1.2.4；继续做 1.2.2/1.2.3 回退会偏离目标。
-- “不要动项目内容”在本仓通常表示不要改源码、测试、业务逻辑、构建脚本或运行数据。若用户只要求写 `AGENT必读.md`，就只编辑这一个文件。
-- `项目说明书.md` 是本地开发说明且被 `.gitignore` 忽略；`AGENT必读.md` 是 agent 接手入口。不要把两者职责混在一起。
-
-### Windows 编码和中文路径
-
-- 读 `AGENT必读.md`、`项目说明书.md` 等中文文件时必须显式 `-Encoding UTF8`，否则 PowerShell 输出可能乱码，容易误判文档内容。
-- Python here-string 里直接写中文路径，经过 PowerShell 管道后可能变成错误路径。启动 sidecar 探针时优先用 `Path("D:/New project 6") / "\u8fd0\u884c\u4ea7\u7269" / ...` 或 `subprocess.Popen([...])` 参数数组。
-- `D:\New project 6` 是真实根目录；不要在 `C:\Users\...\Documents\New project 6` Junction 路径下测试、构建或清理。
-
-### Sidecar 和安装验证
-
-- 覆盖安装前先停掉旧桌面端和旧 sidecar，否则安装目录里的 sidecar 可能没有真正替换。安装后必须比对工作区 sidecar 与安装目录 sidecar 的 SHA256。
-- `npm run tauri -- build --ci` 可能曾经外层非零但已生成安装包；判断构建结果要看安装包、`.sig` 时间戳以及安装后 hash 和接口探针。
-- 探针结束后要再查一次 `astock-data-service` 进程并停掉。上一轮就出现过探针进程仍在，最终交付前必须清掉。
-- 清理工作区构建产物时可以删 `.pyinstaller`、`.pytest_cache`、`dist`、`src-tauri/target`、`src-tauri/bin`、`src-tauri/gen`、`__pycache__`；不要删 `.tools`、`node_modules`、`.astock-cache`、`.reference`、`运行产物`。
-
-### 2026-06-13 覆盖安装为什么耗时
-
-- 这次先按最终交付要求清理了 `dist`、`src-tauri/bin`、`src-tauri/target` 和 `.pyinstaller`，用户随后要求覆盖安装，所以必须重新生成 sidecar、前端产物、Rust release 二进制和 NSIS 安装包。冷构建会明显慢，尤其是 PyInstaller 和 Rust release 编译。
-- `npm run tauri -- build --ci` 会先执行 `beforeBuildCommand`，再次跑 `npm run build` 和 `npm run build:data-service`。如果前面已经手动构建过，这是重复但符合 Tauri 打包流程；耗时不能误判为失败。
-- 初次 Tauri 打包失败点是 `cargo metadata` 找不到全局 `cargo`。正确处理是在本次命令环境注入 `.tools\rustup-home\toolchains\stable-x86_64-pc-windows-msvc\bin`，并设置 `CARGO_HOME` / `RUSTUP_HOME` 到项目 `.tools`，不要修改系统 PATH。
-- 第二个失败点是 NSIS 工具下载超时：Tauri 期望 `src-tauri\target\.tauri\NSIS`，不会直接使用 `.tools\nsis-3.12`。后续 agent 如果看到 `failed to bundle project timeout: global` 或卡在 `Downloading ... nsis-3.11.zip`，先按上一节预置 NSIS 缓存和 `nsis_tauri_utils.dll`，再重跑打包。
-- 版本号只有用户明确要求才更新；当前规则是统一维护 `1.2.4`，用本次签名安装包覆盖安装，然后用 hash 和接口探针证明安装目录已更新。
-- NSIS 静默安装可用：
-
-```powershell
-$installer = Get-ChildItem 'D:\New project 6\src-tauri\target\release\bundle\nsis' -Filter '*_x64-setup.exe' | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-Start-Process -FilePath $installer.FullName -ArgumentList @('/S', '/D=D:\New project 6\运行产物\桌面软件\A股策略回测工作台') -Wait -PassThru
-```
-
-- 探针不要把所有接口和多年全市场回测塞进一个脚本。先测 `/ping`、`/health`、`/coverage/summary`、`/coverage/daily-bars`，确认主仓最新日期；再单独测 `/realtime/market-snapshot`、`/market/commentary`、`/market/fupan`、`/market/zaopan`；最后只跑靠近主仓最新交易日的小窗口 `/run/backtest/stream`，验证 `result.latest_strategy_matches.signal_date/trade_date` 等于最新本地交易日。
-- 用 Python 启动安装目录 sidecar 探针时，`stdout/stderr` 建议设为 `subprocess.DEVNULL`。这次捕获管道后 `communicate()` 收尾曾阻塞，导致探针进程残留；每轮探针结束都要 `terminate/kill`，最终再用 `Get-Process` 查净。
-- 清理 `src-tauri/bin` 前必须先完成工作区 sidecar 与安装目录 sidecar 的 SHA256 比对；清理后工作区 sidecar 不存在，不能再补做 hash 对比。
-
-### 实时行情和红绿家数
-
-- `/realtime/market-snapshot` 慢不一定是“爬虫太重”，也可能是某个 provider 没有外层时间预算，拖住整个 `ThreadPoolExecutor`。红绿家数分支必须有外层超时并写 diagnostics。
-- 红绿家数不能只看接口成功或 `status=live`。必须检查 `breadth.total >= 3000` 或本地股票池比例，局部样本要判失败，不能伪装全市场 live。
-- `/market/commentary` 会依赖实时快照；实时快照超时会连带拖慢行情评价。排查时要同时测 `/realtime/market-snapshot` 和 `/market/commentary`。
-
-### 数据中心和覆盖检查
-
-- 数据中心“补全缺失数据”无股票输入时走 `/sync/full-market`，不是逐股 `/fetch/daily-bars`。不要把两个入口混成一个。
-- `/coverage/daily-bars` 默认无参数时不能全量读多年日线，否则本地服务会超时；默认路径应使用最近分区/轻量摘要。只有指定股票或日期范围时才读精确逐股缺口。
-- `/health` 已走轻量 `health_coverage()`，但 `_safe_coverage()` 仍可能需要精确覆盖统计。不要为了性能把所有 coverage 调用都粗暴替换成轻量摘要，否则会影响资金流独立行和精确缺口测试。
-- 最新日期补齐是否有效要看真实探针：`/sync/full-market` 是否能快速起任务、是否使用本地股票池、`start_date/end_date` 是否到最新交易日，并且要能取消 job。
-- 1.2.4 起，数据中心覆盖表缺口只信 `/coverage/summary` 的主仓精确结果；前端不能按 `imported_rows` 估算扣减缺口。`/fetch/capital-flow` 空股票列表只补主仓中 OHLC 完整且资金流缺失的股票。
-- `Warehouse.write_daily_bars()` 返回真实新增/变更行数；重复补全同一批数据应返回 0，并跳过无意义 parquet 重写。同一批或历史分区里的重复 `(symbol, trade_date)` 要压缩成一行，避免重试造成冗余。
-- `/identity` 临时诊断接口已废弃；sidecar 身份、进程和 hash 校验统一走 `/health`。后续不要恢复 `/identity`。
-
-### 回测候选和 NDJSON
-
-- user 模式候选正式来源是 `/run/backtest/stream` 最后一个 NDJSON `result.latest_strategy_matches.matches`，不是同花顺复盘、新闻汇总或本地旧快照。
-- `/run/backtest/stream` 不能用普通 JSON 方式判断。必须逐行解析 NDJSON，最后事件可以是 `result` 或真实错误；探针 payload 要有至少一个合法 entry group，否则只是在测请求体验证错误。
-
-### 清理和最终复查
-
-- 清理前先列出绝对路径，并确认路径以 `D:\New project 6` 开头。不要用模糊通配符清理 `运行产物`。
-- `git status --ignored --short` 里剩下 `.tools`、`node_modules`、`.astock-cache`、`.reference`、`运行产物` 是正常的，不是必须删除的临时文件。
-- `git diff --check` 在 Windows 上可能只报 LF/CRLF 提示；这不是 whitespace error。真正要关注的是命令退出码和是否有 trailing whitespace 等错误。

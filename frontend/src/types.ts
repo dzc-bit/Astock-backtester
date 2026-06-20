@@ -24,6 +24,7 @@ export type DataServiceHealth = {
   started_at?: string | null;
   instance_id?: string | null;
   coverage: DatasetCoverage[];
+  coverage_refreshing?: boolean;
 };
 
 export type DailyBarsCoverageItem = {
@@ -50,6 +51,7 @@ export type FetchResult = {
   status: "ok" | "partial";
   imported_rows: number;
   returned_rows?: number;
+  filled_missing_rows?: number;
   requested_symbols: string[];
   fetched_symbols: string[];
   missing_symbols: string[];
@@ -79,6 +81,9 @@ export type SyncJobStatus = {
   skipped_symbols?: number;
   imported_rows: number;
   returned_rows?: number;
+  filled_missing_rows?: number;
+  filled_daily_rows?: number;
+  filled_market_cap_rows?: number;
   current_symbol?: string | null;
   start_date: string;
   end_date: string;
@@ -220,6 +225,8 @@ export type ClsFinancePoolItem = {
 
 export type ClsFinanceEmotion = {
   market_degree?: number | null;
+  market_degree_source?: string | null;
+  market_degree_label?: string | null;
   shsz_balance?: string | null;
   shsz_balance_change?: string | null;
   breadth?: MarketBreadth | null;
@@ -385,7 +392,6 @@ export type BacktestResult = {
   equity_curve: EquityPoint[];
   trades: Trade[];
   latest_strategy_matches?: DailyStrategyMatches | null;
-  matched_stocks?: MatchedStock[];
   preflight_issues: Array<{ code: string; message: string; severity: "warning" | "error"; dataset?: string | null }>;
 };
 

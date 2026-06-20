@@ -153,6 +153,8 @@ def test_cls_finance_response_serializes_market_board_data():
         ],
         emotion=ClsFinanceEmotion(
             market_degree=56.0,
+            market_degree_source="ths-market-summary",
+            market_degree_label="同花顺大盘评级",
             breadth=MarketBreadth(up=3322, down=2049, flat=156, total=5527, source="cls-finance-emotion"),
             up_limit=130,
             open_limit=25,
@@ -176,6 +178,8 @@ def test_cls_finance_response_serializes_market_board_data():
     assert payload["source"] == "cls-finance"
     assert payload["anchors"][0]["name"] == "PCB"
     assert payload["emotion"]["market_degree"] == 56.0
+    assert payload["emotion"]["market_degree_source"] == "ths-market-summary"
+    assert payload["emotion"]["market_degree_label"] == "同花顺大盘评级"
     assert payload["up_pool"][0]["symbol"] == "601869"
 
 
@@ -190,6 +194,7 @@ def test_sync_job_status_tracks_batch_progress_and_cancellation():
         processed_symbols=3,
         imported_rows=12,
         returned_rows=18,
+        filled_missing_rows=7,
         skipped_symbols=1,
         start_date=date(2026, 6, 1),
         end_date=date(2026, 6, 5),
@@ -200,6 +205,7 @@ def test_sync_job_status_tracks_batch_progress_and_cancellation():
     assert status.status == "cancelled"
     assert status.processed_symbols == 3
     assert status.returned_rows == 18
+    assert status.filled_missing_rows == 7
     assert status.skipped_symbols == 1
     assert status.last_error == "000003: remote disconnected"
 

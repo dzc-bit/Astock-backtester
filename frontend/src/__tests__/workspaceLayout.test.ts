@@ -17,16 +17,16 @@ describe("workspace desktop layout", () => {
   });
 
   it("keeps realtime market index quotes in a compact row instead of stacking full width", () => {
-    expect(styles).toMatch(/\.market-news-layout\s*\{[^}]*grid-template-columns:\s*minmax\(620px,\s*1\.45fr\)\s*minmax\(360px,\s*0\.9fr\);/s);
+    expect(styles).toMatch(/\.market-news-layout,\s*\.market-insight-layout\s*\{[^}]*grid-template-columns:\s*minmax\(620px,\s*1\.45fr\)\s*minmax\(360px,\s*0\.9fr\);/s);
     expect(styles).toMatch(/\.index-quote\s*\{\s*grid-column:\s*auto;\s*\}/s);
   });
 
-  it("aligns the CLS finance panel width with the realtime market panel", () => {
-    const marketColumns = styles.match(/\.market-news-layout\s*\{(?<body>[^}]*)\}/s)?.groups?.body ?? "";
-    const insightColumns = styles.match(/\.market-insight-layout\s*\{(?<body>[^}]*)\}/s)?.groups?.body ?? "";
-
-    expect(marketColumns).toMatch(/grid-template-columns:\s*minmax\(620px,\s*1\.45fr\)\s*minmax\(360px,\s*0\.9fr\);/s);
-    expect(insightColumns).toMatch(/grid-template-columns:\s*minmax\(620px,\s*1\.45fr\)\s*minmax\(360px,\s*0\.9fr\);/s);
+  it("aligns the realtime, CLS finance, news, and summary panels to the same desktop columns", () => {
+    expect(styles).toMatch(
+      /\.market-news-layout,\s*\.market-insight-layout\s*\{[^}]*grid-template-columns:\s*minmax\(620px,\s*1\.45fr\)\s*minmax\(360px,\s*0\.9fr\);[^}]*align-items:\s*start;/s
+    );
+    expect(styles).toMatch(/\.cls-finance-panel,\s*\.news-summary-panel\s*\{[^}]*height:\s*390px;[^}]*max-height:\s*390px;/s);
+    expect(styles).not.toMatch(/\.market-insight-layout\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1\.12fr\)\s*minmax\(340px,\s*0\.88fr\);/s);
   });
 
   it("keeps the trades table inside the results overview height with its own scroll", () => {

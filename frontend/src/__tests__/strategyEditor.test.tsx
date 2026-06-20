@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "../App";
@@ -391,7 +391,7 @@ describe("A 股回测工作台界面", () => {
     expect(screen.getByRole("heading", { name: "收益概览" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "交易明细" })).toBeInTheDocument();
     expect(screen.getAllByText("市场热度").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("资金流向").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("大盘评分").length).toBeGreaterThan(0);
     expect(screen.getAllByText("风险提示").length).toBeGreaterThan(0);
     expect(await screen.findByText("今日实时行情")).toBeInTheDocument();
     expect(await screen.findByText("上证指数")).toBeInTheDocument();
@@ -402,6 +402,157 @@ describe("A 股回测工作台界面", () => {
     expect(await screen.findByRole("heading", { name: "资讯与事件" })).toBeInTheDocument();
     expect(screen.getAllByText("政策利好推动科技板块走强").length).toBeGreaterThan(0);
     expect(await screen.findByText("日线行情")).toBeInTheDocument();
+  });
+
+  it("shows the Tonghuashun score in the overview band instead of a capital-flow card", async () => {
+    apiMocks.loadClsFinance.mockResolvedValueOnce({
+      updated_at: "2026-06-09T07:05:00Z",
+      source: "cls-finance",
+      source_url: "https://www.cls.cn/finance",
+      tline: [],
+      anchors: [],
+      emotion: {
+        market_degree: 7.3,
+        market_degree_source: "ths-market-summary",
+        market_degree_label: "同花顺大盘评级",
+        up_limit: 130,
+        open_limit: 25
+      },
+      up_pool: [],
+      diagnostics: ["同花顺大盘评分读取成功：7.3"]
+    });
+
+    render(<App />);
+
+    await screen.findByText("日线行情");
+    await screen.findAllByText("7.3");
+    const overview = screen.getByLabelText("工作台概览");
+    expect(within(overview).getByText("大盘评分")).toBeInTheDocument();
+    expect(within(overview).getByText("7.3")).toBeInTheDocument();
+    expect(within(overview).getByText("同花顺大盘评级")).toBeInTheDocument();
+    expect(within(overview).queryByText("资金流向")).not.toBeInTheDocument();
+    expect(within(overview).queryByText("待导入")).not.toBeInTheDocument();
+  });
+
+  it("uses A-share red for high Tonghuashun score and green for low score in the overview band", async () => {
+    apiMocks.loadClsFinance.mockResolvedValueOnce({
+      updated_at: "2026-06-09T07:05:00Z",
+      source: "cls-finance",
+      source_url: "https://www.cls.cn/finance",
+      tline: [],
+      anchors: [],
+      emotion: {
+        market_degree: 6.7,
+        market_degree_source: "ths-market-summary",
+        market_degree_label: "同花顺大盘评级",
+        up_limit: 130,
+        open_limit: 25
+      },
+      up_pool: [],
+      diagnostics: []
+    });
+
+    const { unmount } = render(<App />);
+
+    await screen.findByText("日线行情");
+    await screen.findAllByText("6.7");
+    const highScoreCard = screen.getByLabelText("工作台概览").querySelector(".market-degree-card");
+    expect(highScoreCard).toHaveClass("market-degree-card-high");
+    expect(within(highScoreCard as HTMLElement).getByText("6.7")).toHaveClass("up-text");
+
+    unmount();
+    vi.clearAllMocks();
+    apiMocks.ensureDataService.mockResolvedValue({
+      running: true,
+      port: 9010,
+      base_url: "http://127.0.0.1:9010",
+      cache_dir: ".astock-cache",
+      message: "browser preview uses mock local service"
+    });
+    apiMocks.loadDataServiceHealth.mockResolvedValue({
+      ok: true,
+      cache_path: "C:\\cache",
+      port: 9010,
+      coverage: [
+        { dataset: "daily_bars", symbols: 2, start_date: "2024-01-02", end_date: "2024-01-08", missing_rows: 0 }
+      ]
+    });
+    apiMocks.loadDataServiceLogs.mockResolvedValue({ items: [] });
+    apiMocks.loadDailyBarsCoverage.mockResolvedValue({ items: [] });
+    apiMocks.loadRealtimeMarketSnapshot.mockResolvedValue({
+      status: "live",
+      source: "test",
+      updated_at: "2026-05-27T10:30:00Z",
+      indexes: [],
+      breadth: { up: 1200, down: 3600, flat: 200, total: 5000, source: "test" },
+      strong_sectors: [],
+      yesterday_strong_sectors: [],
+      message: "test"
+    });
+    apiMocks.loadRealtimeMarketSnapshotStream.mockImplementation(async (_baseUrl, handlers = {}) => {
+      const snapshot = await apiMocks.loadRealtimeMarketSnapshot();
+      handlers.onSnapshot?.(snapshot);
+      return snapshot;
+    });
+    apiMocks.loadMarketNews.mockResolvedValue({ updated_at: "2026-05-27T10:30:00Z", source: "test", items: [] });
+    apiMocks.loadMarketBriefing.mockImplementation((_baseUrl, kind) =>
+      Promise.resolve({ kind, updated_at: "2026-05-27T10:30:00Z", source: "test", summary: "", sections: [], diagnostics: [] })
+    );
+    apiMocks.loadNewsSummary.mockResolvedValue({ updated_at: "2026-05-27T10:30:00Z", source: "test", item_count: 0, themes: [], highlights: [], risks: [], diagnostics: [] });
+    apiMocks.loadRiskAlerts.mockResolvedValue({ updated_at: "2026-05-27T10:30:00Z", source: "test", diagnostics: [], items: [] });
+    apiMocks.loadRecommendedStrategies.mockResolvedValue({ items: [] });
+    apiMocks.loadClsFinance.mockResolvedValueOnce({
+      updated_at: "2026-06-09T07:05:00Z",
+      source: "cls-finance",
+      source_url: "https://www.cls.cn/finance",
+      tline: [],
+      anchors: [],
+      emotion: {
+        market_degree: 3.2,
+        market_degree_source: "ths-market-summary",
+        market_degree_label: "同花顺大盘评级",
+        up_limit: 40,
+        open_limit: 5
+      },
+      up_pool: [],
+      diagnostics: []
+    });
+
+    render(<App />);
+
+    await waitFor(() => {
+      const lowScoreCard = screen.getByLabelText("工作台概览").querySelector(".market-degree-card");
+      expect(lowScoreCard).toHaveClass("market-degree-card-low");
+      expect(within(lowScoreCard as HTMLElement).getByText("3.2")).toHaveClass("down-text");
+    });
+  });
+
+  it("does not use CLS market heat as the Tonghuashun overview score fallback", async () => {
+    apiMocks.loadClsFinance.mockResolvedValueOnce({
+      updated_at: "2026-06-09T07:05:00Z",
+      source: "cls-finance",
+      source_url: "https://www.cls.cn/finance",
+      tline: [],
+      anchors: [],
+      emotion: {
+        market_degree: 56,
+        market_degree_source: "cls-finance-emotion",
+        market_degree_label: "财联社市场热度",
+        up_limit: 130,
+        open_limit: 25
+      },
+      up_pool: [],
+      diagnostics: []
+    });
+
+    render(<App />);
+
+    await screen.findByText("日线行情");
+    await waitFor(() => expect(apiMocks.loadClsFinance).toHaveBeenCalled());
+    const overview = screen.getByLabelText("工作台概览");
+    const scoreCard = overview.querySelector(".market-degree-card");
+    expect(scoreCard).not.toHaveTextContent("56.0");
+    expect(within(scoreCard as HTMLElement).getByText("--")).toBeInTheDocument();
   });
 
   afterEach(() => {
@@ -866,6 +1017,35 @@ describe("A 股回测工作台界面", () => {
     expect(screen.queryByText(/今日实时红盘 3200/)).not.toBeInTheDocument();
   });
 
+  it("labels live breadth as realtime even when the breadth source is local-latest", async () => {
+    apiMocks.loadRealtimeMarketSnapshot.mockResolvedValue({
+      status: "live",
+      source: "ashare-sina+local",
+      updated_at: "2026-05-27T07:30:00Z",
+      indexes: [
+        {
+          symbol: "sh000001",
+          name: "上证指数",
+          last: 3120.5,
+          previous_close: 3100,
+          change: 20.5,
+          change_pct: 0.0066129,
+          source: "ashare-sina",
+          updated_at: "2026-05-27T07:30:00Z"
+        }
+      ],
+      breadth: { up: 1545, down: 3600, flat: 62, total: 5207, source: "local-latest" },
+      strong_sectors: [],
+      yesterday_strong_sectors: [],
+      message: "实时红绿家数已返回"
+    });
+
+    render(<App />);
+
+    expect(await screen.findByText("今日实时红盘 1545 / 全市场 5207")).toBeInTheDocument();
+    expect(screen.queryByText(/本地最近交易日\/非实时 红盘 1545/)).not.toBeInTheDocument();
+  });
+
   it("shows structured market data and independent commentary after market close", async () => {
     apiMocks.loadRealtimeMarketSnapshot.mockResolvedValue({
       status: "live",
@@ -1140,6 +1320,42 @@ describe("A 股回测工作台界面", () => {
     expect(strategyStartDateInput.max).toBe("2026-05-30");
     expect(strategyEndDateInput.max).toBe("2026-05-30");
     expect(screen.getByText(/可用范围 2024-01-02 至 2026-05-30/)).toBeInTheDocument();
+  });
+
+  it("runs backtests through the latest local daily coverage date until dates are edited", async () => {
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    vi.setSystemTime(new Date("2026-06-20T10:00:00+08:00"));
+    apiMocks.loadDataServiceHealth.mockResolvedValue({
+      ok: true,
+      cache_path: "C:\\cache",
+      port: 9010,
+      coverage: [
+        { dataset: "daily_bars", symbols: 5469, start_date: "2015-01-05", end_date: "2026-06-18", missing_rows: 2930 },
+        { dataset: "market_cap", symbols: 5469, start_date: "2015-01-05", end_date: "2026-06-18", missing_rows: 48959 }
+      ]
+    });
+
+    render(<App />);
+
+    await screen.findByText("日线行情");
+    await waitFor(() => expect(screen.getAllByLabelText("结束日期")[0]).toHaveValue("2026-06-18"));
+    expect(screen.getAllByLabelText("开始日期")[0]).toHaveValue("2026-06-12");
+    await user.click(screen.getByRole("button", { name: "运行历史回测" }));
+
+    expect(apiMocks.runBacktestStreamWithDataService).toHaveBeenCalledWith(
+      "http://127.0.0.1:9010",
+      expect.any(Object),
+      expect.objectContaining({
+        start_date: "2026-06-12",
+        end_date: "2026-06-18"
+      }),
+      expect.objectContaining({
+        onPhase: expect.any(Function),
+        onProgress: expect.any(Function),
+        onTrade: expect.any(Function),
+        onResult: expect.any(Function)
+      })
+    );
   });
 
   it("validates exit rules with exit-specific low-break conditions before running", async () => {

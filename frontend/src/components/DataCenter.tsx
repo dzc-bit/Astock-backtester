@@ -5,7 +5,6 @@ import {
   fetchCapitalFlow,
   fetchDailyBars,
   importDailyBars,
-  loadCoverageSummary,
   loadDailyBarsCoverage,
   loadDataServiceHealth,
   loadDataServiceLogs,
@@ -23,12 +22,36 @@ type Props = {
 
 type BusyAction = "refresh" | "fetch" | "capital-flow" | "sample" | "file" | "sync" | null;
 
-type PendingSyncFollowUp = {
-  jobId: string;
-  action: "fetch";
-  startDate: string;
-  endDate: string;
-} | null;
+const COVERAGE_REFRESH_RETRY_MS = 1200;
+const COVERAGE_REFRESH_MAX_ATTEMPTS = 150;
+const A_SHARE_HOLIDAY_RANGES: Record<number, Array<[string, string]>> = {
+  2024: [
+    ["2024-01-01", "2024-01-01"],
+    ["2024-02-09", "2024-02-17"],
+    ["2024-04-04", "2024-04-06"],
+    ["2024-05-01", "2024-05-05"],
+    ["2024-06-10", "2024-06-10"],
+    ["2024-09-15", "2024-09-17"],
+    ["2024-10-01", "2024-10-07"]
+  ],
+  2025: [
+    ["2025-01-01", "2025-01-01"],
+    ["2025-01-28", "2025-02-04"],
+    ["2025-04-04", "2025-04-06"],
+    ["2025-05-01", "2025-05-05"],
+    ["2025-05-31", "2025-06-02"],
+    ["2025-10-01", "2025-10-08"]
+  ],
+  2026: [
+    ["2026-01-01", "2026-01-03"],
+    ["2026-02-15", "2026-02-23"],
+    ["2026-04-04", "2026-04-06"],
+    ["2026-05-01", "2026-05-05"],
+    ["2026-06-19", "2026-06-21"],
+    ["2026-09-25", "2026-09-27"],
+    ["2026-10-01", "2026-10-07"]
+  ]
+};
 
 function formatLocalDate(date: Date): string {
   const year = date.getFullYear();
@@ -40,10 +63,20 @@ function formatLocalDate(date: Date): string {
 function previousBusinessDay(date: Date): Date {
   const next = new Date(date);
   next.setHours(0, 0, 0, 0);
-  while (next.getDay() === 0 || next.getDay() === 6) {
+  while (!isAShareTradingDay(next)) {
     next.setDate(next.getDate() - 1);
   }
   return next;
+}
+
+function isAShareTradingDay(date: Date): boolean {
+  if (date.getDay() === 0 || date.getDay() === 6) {
+    return false;
+  }
+  const text = formatLocalDate(date);
+  return !(A_SHARE_HOLIDAY_RANGES[date.getFullYear()] ?? []).some(
+    ([start, end]) => start <= text && text <= end
+  );
 }
 
 function recentBusinessDateRange(days = 5): { startDate: string; endDate: string } {
@@ -52,7 +85,7 @@ function recentBusinessDateRange(days = 5): { startDate: string; endDate: string
   let counted = 1;
   while (counted < days) {
     start.setDate(start.getDate() - 1);
-    if (start.getDay() !== 0 && start.getDay() !== 6) {
+    if (isAShareTradingDay(start)) {
       counted += 1;
     }
   }
@@ -66,7 +99,7 @@ function dailyBarsCoverage(coverage: DatasetCoverage[]): DatasetCoverage | undef
 function coverageFillDateRange(coverage: DatasetCoverage[]): { startDate: string; endDate: string } {
   const fallback = recentBusinessDateRange();
   const daily = dailyBarsCoverage(coverage);
-  if (daily?.end_date && daily.end_date < fallback.endDate) {
+  if (daily?.end_date && daily.symbols >= 100 && daily.end_date < fallback.endDate) {
     return { startDate: daily.end_date, endDate: fallback.endDate };
   }
   return fallback;
@@ -118,7 +151,24 @@ function syncFinishedMessage(job: SyncJobStatus): string {
   if (job.status === "cancelled") {
     return job.mode === "capital_flow_backfill" ? "资金流补齐已停止" : "全市场下载已停止";
   }
-  return `${job.mode === "capital_flow_backfill" ? "资金流补齐完成" : "全市场下载完成"}，导入 ${job.imported_rows} 行`;
+  const filledText = syncFilledText(job);
+  return `${job.mode === "capital_flow_backfill" ? "资金流补齐完成" : "全市场下载完成"}，写入 ${job.imported_rows} 行${filledText}`;
+}
+
+function syncFilledText(job: SyncJobStatus): string {
+  if (job.mode === "capital_flow_backfill") {
+    return "";
+  }
+  const parts: string[] = [];
+  const dailyRows = job.filled_daily_rows ?? 0;
+  const marketCapRows = job.filled_market_cap_rows ?? 0;
+  if (dailyRows > 0) {
+    parts.push(`补齐日线 ${dailyRows} 行`);
+  }
+  if (marketCapRows > 0) {
+    parts.push(`补齐市值 ${marketCapRows} 行`);
+  }
+  return parts.length > 0 ? `，${parts.join("，")}` : "";
 }
 
 function fieldText(value: unknown): string | null {
@@ -154,6 +204,14 @@ function latestCoverageEndDate(coverage: DatasetCoverage[]): string | null {
   return dates.at(-1) ?? null;
 }
 
+function isEmptyCoverageSnapshot(coverage: DatasetCoverage[]): boolean {
+  return coverage.length > 0 && coverage.every((item) => item.symbols === 0 && item.missing_rows === 0 && !item.start_date && !item.end_date);
+}
+
+function isPendingEmptyHealthCoverage(coverage: DatasetCoverage[], refreshing: boolean | undefined): boolean {
+  return Boolean(refreshing) && isEmptyCoverageSnapshot(coverage);
+}
+
 export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceReady }: Props) {
   const [service, setService] = useState<DataServiceStatus | null>(null);
   const [symbolsInput, setSymbolsInput] = useState("");
@@ -166,13 +224,16 @@ export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceRead
   const [syncJob, setSyncJob] = useState<SyncJobStatus | null>(null);
   const [message, setMessage] = useState("正在连接本地数据服务");
   const [busyAction, setBusyAction] = useState<BusyAction>(null);
-  const [syncBaseCoverage, setSyncBaseCoverage] = useState<DatasetCoverage[] | null>(null);
-  const [pendingSyncFollowUp, setPendingSyncFollowUp] = useState<PendingSyncFollowUp>(null);
+  const [coverageRefreshToken, setCoverageRefreshToken] = useState(0);
   const syncRunning = isSyncRunning(syncJob);
   const syncImportedRows = syncRunning && syncJob ? syncJob.imported_rows : 0;
   const busy = busyAction !== null || syncRunning;
   const recentSyncFailures = syncJob ? recentSyncFailureTexts(syncJob) : [];
-  const displayCoverage = syncBaseCoverage ?? coverage;
+  const displayCoverage = coverage;
+  const syncProgressNote =
+    syncImportedRows > 0
+      ? `已写入 ${syncImportedRows} 行${syncJob ? syncFilledText(syncJob) : ""}，等待覆盖刷新确认`
+      : null;
 
   const symbols = useMemo(
     () =>
@@ -225,19 +286,16 @@ export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceRead
       loadDataServiceHealth(activeService.base_url),
       loadDataServiceLogs(activeService.base_url)
     ]);
-    onCoverageChange(health.coverage);
+    const hasPendingEmptyCoverage = isPendingEmptyHealthCoverage(health.coverage, health.coverage_refreshing);
+    if (!hasPendingEmptyCoverage) {
+      onCoverageChange(health.coverage);
+    }
     setLogs(recentLogs.items);
-    return { ...applyCoverageDateRange(health.coverage), coverage: health.coverage };
-  };
-
-  const refreshCoverageSummary = async (activeService: DataServiceStatus) => {
-    const [summary, recentLogs] = await Promise.all([
-      loadCoverageSummary(activeService.base_url),
-      loadDataServiceLogs(activeService.base_url)
-    ]);
-    onCoverageChange(summary.coverage);
-    setLogs(recentLogs.items);
-    return { ...applyCoverageDateRange(summary.coverage), coverage: summary.coverage };
+    const range = hasPendingEmptyCoverage ? coverageFillDateRange(coverage) : applyCoverageDateRange(health.coverage);
+    if (health.coverage_refreshing) {
+      setCoverageRefreshToken((current) => current + 1);
+    }
+    return range;
   };
 
   const refreshAfterOperation = async (
@@ -246,38 +304,13 @@ export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceRead
     selectedStartDate = startDate,
     selectedEndDate = endDate
   ) => {
-    const range = await refreshCoverageSummary(activeService);
+    const range = await refreshServiceState(activeService);
     if (selectedSymbols.length > 0) {
       await refreshDetails(activeService, selectedSymbols, selectedStartDate, selectedEndDate);
     } else {
       setItems([]);
     }
     return range;
-  };
-
-  const startCapitalFlowBackfill = async (
-    activeService: DataServiceStatus,
-    selectedSymbols: string[],
-    selectedStartDate: string,
-    selectedEndDate: string,
-    baseCoverage: DatasetCoverage[]
-  ) => {
-    setSyncBaseCoverage(baseCoverage);
-    const result = await fetchCapitalFlow(activeService.base_url, selectedSymbols, selectedStartDate, selectedEndDate);
-    onCoverageChange(result.coverage);
-    if (result.job) {
-      setSyncJob(result.job);
-      setMessage(isSyncRunning(result.job) ? syncRunningMessage(result.job) : syncFinishedMessage(result.job));
-      if (!isSyncRunning(result.job)) {
-        await refreshAfterOperation(activeService, selectedSymbols, selectedStartDate, selectedEndDate);
-        setSyncBaseCoverage(null);
-      }
-      return;
-    }
-    setSyncJob(null);
-    setSyncBaseCoverage(null);
-    setMessage(operationMessage(result));
-    await refreshAfterOperation(activeService, selectedSymbols, selectedStartDate, selectedEndDate);
   };
 
   const refreshLogs = async (activeService: DataServiceStatus) => {
@@ -309,6 +342,43 @@ export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceRead
   }, [cacheDir]);
 
   useEffect(() => {
+    if (!service || coverageRefreshToken === 0) {
+      return;
+    }
+    let cancelled = false;
+    let attempts = 0;
+    let timer: number | undefined;
+    const pollCoverage = () => {
+      timer = window.setTimeout(() => {
+        attempts += 1;
+        void loadDataServiceHealth(service.base_url)
+          .then((health) => {
+            if (cancelled) {
+              return;
+            }
+            if (!isPendingEmptyHealthCoverage(health.coverage, health.coverage_refreshing)) {
+              onCoverageChange(health.coverage);
+              applyCoverageDateRange(health.coverage);
+            }
+            if (health.coverage_refreshing && attempts < COVERAGE_REFRESH_MAX_ATTEMPTS) {
+              pollCoverage();
+            }
+          })
+          .catch(() => {
+            // Keep the connected service usable; the next manual refresh will retry coverage.
+          });
+      }, COVERAGE_REFRESH_RETRY_MS);
+    };
+    pollCoverage();
+    return () => {
+      cancelled = true;
+      if (timer !== undefined) {
+        window.clearTimeout(timer);
+      }
+    };
+  }, [service, coverageRefreshToken, onCoverageChange, dateRangeTouched, startDate, endDate]);
+
+  useEffect(() => {
     const activeSyncJob = syncJob;
     if (!service || !activeSyncJob || !isSyncRunning(activeSyncJob)) {
       return;
@@ -327,24 +397,7 @@ export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceRead
               : syncFinishedMessage(result.job)
           );
           if (!isSyncRunning(result.job)) {
-            const range = await refreshAfterOperation(service);
-            setSyncBaseCoverage(null);
-            if (
-              result.job.status !== "cancelled"
-              && result.job.mode === "full_market_bootstrap"
-              && pendingSyncFollowUp?.jobId === result.job.job_id
-            ) {
-              setPendingSyncFollowUp(null);
-              await startCapitalFlowBackfill(
-                service,
-                [],
-                pendingSyncFollowUp.startDate,
-                range.endDate,
-                range.coverage
-              );
-            } else if (pendingSyncFollowUp?.jobId === result.job.job_id) {
-              setPendingSyncFollowUp(null);
-            }
+            await refreshAfterOperation(service);
           }
         })
         .catch((error: Error) => {
@@ -357,7 +410,7 @@ export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceRead
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [service, syncJob?.job_id, syncJob?.status, pendingSyncFollowUp]);
+  }, [service, syncJob?.job_id, syncJob?.status]);
 
   const handleRefreshDetails = async () => {
     if (!service) {
@@ -423,7 +476,17 @@ export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceRead
     setBusyAction("capital-flow");
     setMessage("\u6b63\u5728\u8865\u9f50\u8d44\u91d1\u6d41");
     try {
-      await startCapitalFlowBackfill(service, symbols, startDate, endDate, coverage);
+      const result = await fetchCapitalFlow(service.base_url, symbols, startDate, endDate);
+      setMessage(operationMessage(result));
+      onCoverageChange(result.coverage);
+      if (result.job) {
+        setSyncJob(result.job);
+        setMessage(isSyncRunning(result.job) ? syncRunningMessage(result.job) : syncFinishedMessage(result.job));
+        if (isSyncRunning(result.job)) {
+          return;
+        }
+      }
+      await refreshAfterOperation(service, symbols, startDate, endDate);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "\u8865\u9f50\u8d44\u91d1\u6d41\u5931\u8d25");
       let activeService = service;
@@ -500,30 +563,17 @@ export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceRead
       return;
     }
     setBusyAction(action);
-    setSyncBaseCoverage(coverage);
     setMessage(action === "fetch" ? "正在补全全市场缺失数据" : "正在下载全市场历史数据");
     try {
       const result = await startFullMarketSync(service.base_url, startDate, endDate);
       setSyncJob(result.job);
-      setPendingSyncFollowUp(
-        action === "fetch" && result.job.mode === "full_market_bootstrap"
-          ? { jobId: result.job.job_id, action, startDate, endDate }
-          : null
-      );
       if (result.job.status === "running") {
         setMessage(syncRunningMessage(result.job));
       } else {
         setMessage(syncFinishedMessage(result.job));
-        const range = await refreshAfterOperation(service);
-        setSyncBaseCoverage(null);
-        if (action === "fetch" && result.job.status !== "cancelled") {
-          setPendingSyncFollowUp(null);
-          await startCapitalFlowBackfill(service, [], startDate, range.endDate, range.coverage);
-        }
+        await refreshAfterOperation(service);
       }
     } catch (error) {
-      setSyncBaseCoverage(null);
-      setPendingSyncFollowUp(null);
       setMessage(error instanceof Error ? error.message : "全市场下载失败");
       await refreshLogs(service);
     } finally {
@@ -542,10 +592,6 @@ export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceRead
       setMessage(isSyncRunning(result.job) ? syncRunningMessage(result.job) : syncFinishedMessage(result.job));
       if (!isSyncRunning(result.job)) {
         await refreshAfterOperation(service);
-        setSyncBaseCoverage(null);
-        if (pendingSyncFollowUp?.jobId === result.job.job_id) {
-          setPendingSyncFollowUp(null);
-        }
       }
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "停止任务失败");
@@ -636,7 +682,10 @@ export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceRead
             <span>
               完成 {syncJob.completed_symbols}，跳过 {syncJob.skipped_symbols ?? 0}，失败 {syncJob.failed_symbols}
             </span>
-            <span>接口返回 {syncJob.returned_rows ?? 0} 行，新增 {syncJob.imported_rows} 行</span>
+            <span>
+              接口返回 {syncJob.returned_rows ?? 0} 行，写入 {syncJob.imported_rows} 行
+              {syncFilledText(syncJob)}
+            </span>
             {syncJob.current_symbol ? <span>当前 {syncJob.current_symbol}</span> : null}
             {syncJob.last_error ? <span>最近失败: {syncJob.last_error}</span> : null}
             {recentSyncFailures.length > 0 ? (
@@ -695,8 +744,8 @@ export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceRead
                     <td>{item.start_date ?? "-"} 至 {item.end_date ?? "-"}</td>
                     <td>
                       <span>{item.missing_rows}</span>
-                      {syncJob && item.dataset === (syncJob.mode === "capital_flow_backfill" ? "capital_flow" : "daily_bars") && syncImportedRows > 0 ? (
-                        <small className="coverage-progress-note">本次已补 {syncImportedRows} 行</small>
+                      {syncJob && item.dataset === (syncJob.mode === "capital_flow_backfill" ? "capital_flow" : "daily_bars") && syncProgressNote ? (
+                        <small className="coverage-progress-note">{syncProgressNote}</small>
                       ) : null}
                     </td>
                     <td>

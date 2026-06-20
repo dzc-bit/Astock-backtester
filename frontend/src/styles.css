@@ -225,20 +225,28 @@ body {
   background: linear-gradient(180deg, #ffffff, #effaf8);
 }
 
-.market-news-layout {
-  display: grid;
-  grid-template-columns: minmax(620px, 1.45fr) minmax(360px, 0.9fr);
-  gap: 16px;
-  padding: 18px 30px 0;
-  align-items: stretch;
+.market-degree-card-high {
+  border-color: rgba(217, 45, 32, 0.42);
+  background: linear-gradient(180deg, #ffffff, #fff4f2);
 }
 
+.market-degree-card-low {
+  border-color: rgba(7, 148, 85, 0.42);
+  background: linear-gradient(180deg, #ffffff, #effaf4);
+}
+
+.market-degree-card-neutral {
+  border-color: #cbd5e1;
+  background: linear-gradient(180deg, #ffffff, #f8fafc);
+}
+
+.market-news-layout,
 .market-insight-layout {
   display: grid;
   grid-template-columns: minmax(620px, 1.45fr) minmax(360px, 0.9fr);
   gap: 16px;
   padding: 18px 30px 0;
-  align-items: stretch;
+  align-items: start;
 }
 
 .market-dashboard,
@@ -454,7 +462,8 @@ body {
   flex-direction: column;
   min-width: 0;
   min-height: 0;
-  max-height: 360px;
+  height: 390px;
+  max-height: 390px;
   overflow: hidden;
 }
 
@@ -481,6 +490,7 @@ body {
   display: grid;
   grid-template-columns: minmax(0, 1.2fr) minmax(230px, 0.8fr);
   gap: 12px;
+  flex: 1;
   min-height: 0;
   overflow: hidden;
 }
@@ -492,7 +502,7 @@ body {
 
 .cls-finance-main {
   display: grid;
-  grid-template-rows: auto minmax(118px, 1fr) auto;
+  grid-template-rows: auto minmax(106px, 1fr) auto;
   gap: 8px;
   border: 1px solid #dbe4ee;
   border-radius: 8px;
@@ -553,7 +563,7 @@ body {
 
 .cls-finance-side {
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr);
   gap: 10px;
   overflow: hidden;
 }
@@ -597,9 +607,26 @@ body {
   align-content: flex-start;
   flex-wrap: wrap;
   gap: 7px;
+  max-height: 62px;
+  overflow: hidden;
+  padding-right: 3px;
+}
+
+.cls-finance-briefing-list {
+  display: grid;
+  gap: 10px;
   min-height: 0;
   overflow: auto;
-  padding-right: 3px;
+  padding-right: 4px;
+}
+
+.cls-finance-briefing-card {
+  gap: 9px;
+  padding: 11px;
+}
+
+.cls-finance-briefing-card .news-summary-topic-head h3 {
+  font-size: 16px;
 }
 
 .cls-anchor,
@@ -2745,12 +2772,15 @@ td small {
   text-align: right;
 }
 
-.matched-stock-reasons {
-  display: flex;
+.matched-stock-reason-text {
   flex: 1 1 100%;
-  flex-wrap: wrap;
-  gap: 7px;
   min-width: 0;
+  margin: 0;
+  color: #334155;
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
 }
 
 .matched-stocks-empty {

@@ -80,19 +80,17 @@ it("lists today's matched stocks after a strategy run", () => {
   expect(screen.getByText("今日 user 模式候选")).toBeInTheDocument();
   expect(screen.getByText("当日符合用户策略的个股")).toBeInTheDocument();
   expect(screen.getByText(`信号日 ${today} / 展示日 ${today} / 本地回测快照`)).toBeInTheDocument();
-  expect(screen.getByText("600519")).toBeInTheDocument();
-  expect(screen.getByText("贵州茅台")).toBeInTheDocument();
-  expect(screen.getByText("+2.13%")).toBeInTheDocument();
-  expect(screen.getByText("本地收盘价 1688.80")).toBeInTheDocument();
-  expect(screen.getByText("收盘价站上20日均线")).toBeInTheDocument();
-  expect(screen.getByText("主力净流入放大")).toBeInTheDocument();
+  const cards = screen.getAllByRole("article").filter((item) => item.className.includes("matched-stock-card"));
+  expect(cards[0]).toHaveTextContent("600519 贵州茅台");
+  expect(cards[0]).toHaveTextContent("理由：收盘价站上20日均线；主力净流入放大");
+  expect(cards[0]).not.toHaveTextContent("+2.13%");
+  expect(cards[0]).not.toHaveTextContent("本地收盘价");
 });
 
-it("prefers latest strategy matches over legacy matched stocks and sorts by rank score", () => {
+it("sorts latest strategy matches by rank score", () => {
   render(
     <ResultsOverview
       result={buildResult({
-        matched_stocks: [{ symbol: "OLD", name: "旧字段", close: 1, change_pct: 0, reasons: ["legacy"] }],
         latest_strategy_matches: {
           signal_date: "2026-06-03",
           trade_date: "2026-06-03",
@@ -107,25 +105,72 @@ it("prefers latest strategy matches over legacy matched stocks and sorts by rank
     />
   );
 
-  expect(screen.queryByText("OLD")).not.toBeInTheDocument();
   const cards = screen.getAllByRole("article").filter((item) => item.className.includes("matched-stock-card"));
   expect(cards[0]).toHaveTextContent("HIGH");
   expect(cards[0]).toHaveTextContent("评分 2.40");
 });
 
-it("does not display legacy matched stocks without latest strategy matches", () => {
+it("shows matched stocks as symbol name score and reasons without ambiguous gain chips", () => {
   render(
     <ResultsOverview
       result={buildResult({
-        matched_stocks: [{ symbol: "OLD", name: "legacy", close: 1, change_pct: 0, reasons: ["legacy"] }]
+        latest_strategy_matches: {
+          signal_date: "2026-05-25",
+          trade_date: "2026-05-25",
+          matches: [
+            {
+              symbol: "000518",
+              name: "四环生物",
+              close: 4.54,
+              change_pct: 9.93,
+              rank_score: 5.67,
+              reasons: ["close 4.54 broke prior 20d high 4.13", "2d volume ratio 1.81 in [1.20, 2.50]"]
+            }
+          ]
+        }
       })}
       onRun={vi.fn()}
       onOpenRiskAlerts={vi.fn()}
     />
   );
 
-  expect(screen.queryByText("OLD")).not.toBeInTheDocument();
-  expect(screen.queryByText("legacy")).not.toBeInTheDocument();
+  const card = screen.getByRole("article");
+  expect(card).toHaveTextContent("000518 四环生物");
+  expect(card).toHaveTextContent("评分 5.67");
+  expect(card).toHaveTextContent("理由：收盘价 4.54 突破前20日高点 4.13；2日量比 1.81 位于 [1.20, 2.50]");
+  expect(card).not.toHaveTextContent("+993.00%");
+  expect(card).not.toHaveTextContent("本地最近收盘价");
+  expect(card.querySelector(".matched-stock-reasons span")).toBeNull();
+});
+
+it("omits placeholder name when a latest strategy match has no stock name", () => {
+  render(
+    <ResultsOverview
+      result={buildResult({
+        latest_strategy_matches: {
+          signal_date: "2026-05-25",
+          trade_date: "2026-05-25",
+          matches: [
+            {
+              symbol: "000001",
+              name: null,
+              close: 10,
+              change_pct: 0,
+              rank_score: 1.23,
+              reasons: ["custom reason"]
+            }
+          ]
+        }
+      })}
+      onRun={vi.fn()}
+      onOpenRiskAlerts={vi.fn()}
+    />
+  );
+
+  const card = screen.getByRole("article");
+  expect(card).toHaveTextContent("000001");
+  expect(card).not.toHaveTextContent("000001 --");
+  expect(card).not.toHaveTextContent("--");
 });
 
 it("shows a friendly empty state when no stocks match today", () => {

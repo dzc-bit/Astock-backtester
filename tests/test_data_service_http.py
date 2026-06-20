@@ -70,17 +70,6 @@ def _fake_realtime_snapshot() -> RealtimeMarketSnapshot:
     )
 
 
-def test_data_service_prefers_http_daily_provider_before_akshare(tmp_path):
-    server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
-
-    try:
-        provider_names = [provider.name for provider in server.state.provider.providers]
-
-        assert provider_names == ["adata", "http", "akshare"]
-    finally:
-        server.server_close()
-
-
 def test_service_health_and_logs(tmp_path):
     server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -105,6 +94,14 @@ def test_service_health_and_logs(tmp_path):
         thread.join(timeout=5)
 
 
+def test_service_default_daily_provider_prefers_http_before_legacy_and_akshare(tmp_path):
+    server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
+
+    provider_names = [provider.name for provider in server.state.provider.providers]
+
+    assert provider_names == ["http", "adata", "akshare"]
+
+
 def test_service_health_returns_json_when_warehouse_coverage_fails(tmp_path):
     class BrokenWarehouse:
         def coverage(self):
@@ -120,6 +117,11 @@ def test_service_health_returns_json_when_warehouse_coverage_fails(tmp_path):
         health = _request_json("GET", f"http://127.0.0.1:{port}/health")
 
         assert health["ok"] is True
+        for _ in range(10):
+            if not health.get("coverage_refreshing"):
+                break
+            time.sleep(0.2)
+            health = _request_json("GET", f"http://127.0.0.1:{port}/health")
         assert health["coverage"][0]["symbols"] >= 1
     finally:
         server.shutdown()
@@ -140,16 +142,96 @@ def test_service_ping_is_lightweight(tmp_path):
         thread.join(timeout=5)
 
 
-def test_service_rejects_deprecated_identity_endpoint(tmp_path):
+def test_service_identity_is_lightweight_and_reports_process_identity(tmp_path):
+    class SlowWarehouse:
+        def coverage(self):
+            time.sleep(0.2)
+            return []
+
     server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
+    server.state.warehouse = SlowWarehouse()
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
         port = server.server_address[1]
+        started = time.perf_counter()
         response = _request_json("GET", f"http://127.0.0.1:{port}/identity")
+        elapsed = time.perf_counter() - started
 
-        assert response["code"] == "not_found"
-        assert response["message"] == "/identity"
+        assert elapsed < 0.2
+        assert response["ok"] is True
+        assert response["port"] == port
+        assert response["cache_path"] == str(tmp_path.resolve())
+        assert response["process_id"] == os.getpid()
+        assert isinstance(response["executable_path"], str)
+        assert isinstance(response["executable_sha256"], str)
+        assert len(response["executable_sha256"]) == 64
+        assert "coverage" not in response
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_service_health_returns_cached_snapshot_while_coverage_refresh_is_slow(tmp_path):
+    class SlowWarehouse:
+        def coverage(self):
+            time.sleep(0.4)
+            return [
+                DatasetCoverage(dataset="daily_bars", symbols=99, start_date=None, end_date=None),
+                DatasetCoverage(dataset="market_cap", symbols=0, start_date=None, end_date=None),
+                DatasetCoverage(dataset="capital_flow", symbols=0, start_date=None, end_date=None),
+            ]
+
+    server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
+    server.state.warehouse = SlowWarehouse()
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        started = time.perf_counter()
+        health = _request_json("GET", f"http://127.0.0.1:{port}/health")
+        elapsed = time.perf_counter() - started
+
+        assert elapsed < 0.3
+        assert health["ok"] is True
+        assert health["coverage"][0]["dataset"] == "daily_bars"
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_service_health_does_not_restart_coverage_refresh_when_snapshot_is_fresh(tmp_path):
+    class CountingWarehouse:
+        def __init__(self):
+            self.calls = 0
+
+        def coverage(self):
+            self.calls += 1
+            time.sleep(0.15)
+            return [
+                DatasetCoverage(dataset="daily_bars", symbols=99, start_date=None, end_date=None),
+                DatasetCoverage(dataset="market_cap", symbols=0, start_date=None, end_date=None),
+                DatasetCoverage(dataset="capital_flow", symbols=0, start_date=None, end_date=None),
+            ]
+
+    warehouse = CountingWarehouse()
+    server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
+    server.state.warehouse = warehouse
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        first = _request_json("GET", f"http://127.0.0.1:{port}/health")
+        assert first["coverage_refreshing"] is True
+        for _ in range(10):
+            time.sleep(0.05)
+            second = _request_json("GET", f"http://127.0.0.1:{port}/health")
+            if not second["coverage_refreshing"]:
+                break
+
+        assert second["coverage_refreshing"] is False
+        assert second["coverage"][0]["symbols"] == 99
+        assert warehouse.calls == 1
     finally:
         server.shutdown()
         thread.join(timeout=5)
@@ -169,9 +251,24 @@ def test_service_coverage_endpoint_returns_symbol_items(tmp_path):
         thread.join(timeout=5)
 
 
+def test_service_coverage_endpoint_skips_full_market_details_without_symbols(tmp_path):
+    server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
+    server.state.cache.write_daily_bars(sample_daily_bars())
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        response = _request_json("POST", f"http://127.0.0.1:{port}/coverage/daily-bars", {})
+
+        assert response["items"] == []
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
 def test_service_coverage_endpoint_filters_requested_symbols_and_dates(tmp_path):
     server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
-    server.state.warehouse.write_daily_bars(sample_daily_bars())
+    server.state.cache.write_daily_bars(sample_daily_bars())
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -184,29 +281,6 @@ def test_service_coverage_endpoint_filters_requested_symbols_and_dates(tmp_path)
 
         assert [item["symbol"] for item in response["items"]] == ["AAA"]
         assert response["items"][0]["missing_trade_dates"] == []
-    finally:
-        server.shutdown()
-        thread.join(timeout=5)
-
-
-def test_service_rejects_legacy_non_stream_backtest_endpoint(tmp_path, basic_strategy, basic_settings):
-    server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
-    server.state.cache.write_daily_bars(sample_daily_bars())
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        port = server.server_address[1]
-        response = _request_json(
-            "POST",
-            f"http://127.0.0.1:{port}/run/backtest",
-            {
-                "strategy": json.loads(basic_strategy.model_dump_json()),
-                "settings": json.loads(basic_settings.model_dump_json()),
-            },
-        )
-
-        assert response["code"] == "not_found"
-        assert response["message"] == "/run/backtest"
     finally:
         server.shutdown()
         thread.join(timeout=5)
@@ -295,10 +369,14 @@ def test_service_uses_provider_symbols_for_full_market_sync_when_not_supplied(tm
         thread.join(timeout=5)
 
 
-def test_service_prefers_local_warehouse_symbols_for_incremental_full_market_sync(tmp_path):
+def test_service_uses_local_warehouse_symbols_for_full_market_sync_before_provider_list(tmp_path):
     class SlowProvider:
+        def __init__(self):
+            self.list_called = False
+
         def list_symbols(self):
-            raise AssertionError("provider symbol discovery should not run when local daily symbols exist")
+            self.list_called = True
+            raise AssertionError("provider list_symbols should not run when local symbols exist")
 
     class FakeManager:
         def run_full_market(self, symbols, start_date, end_date):
@@ -306,23 +384,37 @@ def test_service_prefers_local_warehouse_symbols_for_incremental_full_market_syn
 
             from astock_backtester.models import SyncJobStatus
 
-            assert symbols == ["AAA", "BBB"]
+            assert symbols == ["000001", "000002"]
             return SyncJobStatus(
-                job_id="job-local",
+                job_id="job-local-symbols",
                 mode="full_market_bootstrap",
                 status="completed",
                 total_symbols=2,
                 completed_symbols=2,
                 failed_symbols=0,
-                imported_rows=2,
+                imported_rows=0,
                 start_date=date.fromisoformat(start_date),
                 end_date=date.fromisoformat(end_date),
             )
 
     server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
-    server.state.provider = SlowProvider()
+    server.state.warehouse.write_daily_bars(
+        pd.DataFrame(
+            {
+                "symbol": ["000002", "000001"],
+                "trade_date": ["2026-06-18", "2026-06-18"],
+                "open": [1.0, 1.0],
+                "high": [1.0, 1.0],
+                "low": [1.0, 1.0],
+                "close": [1.0, 1.0],
+                "volume": [1, 1],
+                "float_market_cap": [100.0, 100.0],
+            }
+        )
+    )
+    provider = SlowProvider()
+    server.state.provider = provider
     server.state.sync_manager = FakeManager()
-    server.state.warehouse.write_daily_bars(sample_daily_bars())
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -330,7 +422,64 @@ def test_service_prefers_local_warehouse_symbols_for_incremental_full_market_syn
         response = _request_json(
             "POST",
             f"http://127.0.0.1:{port}/sync/full-market",
-            {"start_date": "2024-01-09", "end_date": "2024-01-10"},
+            {"start_date": "2026-06-18", "end_date": "2026-06-18"},
+        )
+
+        assert response["job"]["status"] == "completed"
+        assert provider.list_called is False
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_service_uses_all_local_warehouse_symbols_for_recent_full_market_sync(tmp_path):
+    class SlowProvider:
+        def list_symbols(self):
+            raise AssertionError("provider list_symbols should not run when local symbols exist")
+
+    class FakeManager:
+        def run_full_market(self, symbols, start_date, end_date):
+            from datetime import date
+
+            from astock_backtester.models import SyncJobStatus
+
+            assert symbols == ["000001", "000002"]
+            return SyncJobStatus(
+                job_id="job-all-local-symbols",
+                mode="full_market_bootstrap",
+                status="completed",
+                total_symbols=2,
+                completed_symbols=2,
+                imported_rows=0,
+                start_date=date.fromisoformat(start_date),
+                end_date=date.fromisoformat(end_date),
+            )
+
+    server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
+    server.state.warehouse.write_daily_bars(
+        pd.DataFrame(
+            {
+                "symbol": ["000001", "000002"],
+                "trade_date": ["2026-06-18", "2026-06-17"],
+                "open": [1.0, 2.0],
+                "high": [1.0, 2.0],
+                "low": [1.0, 2.0],
+                "close": [1.0, 2.0],
+                "volume": [1, 1],
+                "float_market_cap": [100.0, 200.0],
+            }
+        )
+    )
+    server.state.provider = SlowProvider()
+    server.state.sync_manager = FakeManager()
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        response = _request_json(
+            "POST",
+            f"http://127.0.0.1:{port}/sync/full-market",
+            {"start_date": "2026-06-18", "end_date": "2026-06-18"},
         )
 
         assert response["job"]["status"] == "completed"
@@ -360,66 +509,6 @@ def test_service_coverage_endpoint_reads_warehouse_when_cache_is_empty(tmp_path)
         thread.join(timeout=5)
 
 
-def test_service_run_backtest_stream_uses_latest_warehouse_not_legacy_cache(tmp_path, basic_strategy, basic_settings):
-    old_cache_frame = sample_daily_bars()
-    latest_frame = old_cache_frame.copy()
-    latest_frame["trade_date"] = latest_frame["trade_date"] + pd.Timedelta(days=884)
-    latest_frame["listing_days"] = latest_frame["listing_days"] + 884
-    latest_frame["float_market_cap"] = 2_000_000_000.0
-
-    server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
-    server.state.cache.write_daily_bars(old_cache_frame)
-    server.state.warehouse.write_daily_bars(latest_frame)
-    settings = basic_settings.model_copy(
-        update={
-            "start_date": pd.Timestamp("2026-06-04").date(),
-            "end_date": pd.Timestamp("2026-06-10").date(),
-            "min_listing_days": 0,
-        }
-    )
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        port = server.server_address[1]
-        events = _request_ndjson(
-            f"http://127.0.0.1:{port}/run/backtest/stream",
-            {
-                "strategy": json.loads(basic_strategy.model_dump_json()),
-                "settings": json.loads(settings.model_dump_json()),
-            },
-        )
-
-        result = next(event["result"] for event in events if event["type"] == "result")
-        latest_matches = result["latest_strategy_matches"]
-        assert latest_matches["signal_date"] == "2026-06-10"
-        assert latest_matches["trade_date"] == "2026-06-10"
-    finally:
-        server.shutdown()
-        thread.join(timeout=5)
-
-
-def test_service_run_backtest_stream_does_not_fallback_to_legacy_cache_when_warehouse_empty(tmp_path, basic_strategy, basic_settings):
-    server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
-    server.state.cache.write_daily_bars(sample_daily_bars())
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        port = server.server_address[1]
-        events = _request_ndjson(
-            f"http://127.0.0.1:{port}/run/backtest/stream",
-            {
-                "strategy": json.loads(basic_strategy.model_dump_json()),
-                "settings": json.loads(basic_settings.model_dump_json()),
-            },
-        )
-
-        assert events[-1]["type"] == "error"
-        assert "主仓" in events[-1]["message"]
-    finally:
-        server.shutdown()
-        thread.join(timeout=5)
-
-
 def test_service_fetch_daily_bars_uses_configured_provider(tmp_path):
     class FakeProvider:
         def __init__(self):
@@ -432,7 +521,7 @@ def test_service_fetch_daily_bars_uses_configured_provider(tmp_path):
             return pd.DataFrame(
                 {
                     "symbol": [symbol],
-                        "trade_date": ["2026-05-29"],
+                    "trade_date": ["2026-05-26"],
                     "open": [10.0],
                     "high": [10.5],
                     "low": [9.8],
@@ -454,7 +543,7 @@ def test_service_fetch_daily_bars_uses_configured_provider(tmp_path):
                 "rows": [
                     {
                         "symbol": "000001",
-                        "trade_date": "2026-05-29",
+                        "trade_date": "2026-05-26",
                         "main_net_inflow": 1_500_000.0,
                     }
                 ],
@@ -481,9 +570,9 @@ def test_service_fetch_daily_bars_uses_configured_provider(tmp_path):
         assert response["requested_symbols"] == ["000001", "000002"]
         assert response["fetched_symbols"] == ["000001"]
         assert response["missing_symbols"] == ["000002"]
-        assert response["coverage"][0]["end_date"] == "2026-05-29"
+        assert response["coverage"][0]["end_date"] == "2026-05-26"
         stored = server.state.warehouse.read_daily_bars(symbols=["000001"])
-        assert stored["trade_date"].dt.strftime("%Y-%m-%d").tolist() == ["2026-05-29"]
+        assert stored["trade_date"].dt.strftime("%Y-%m-%d").tolist() == ["2026-05-26"]
     finally:
         server.shutdown()
         thread.join(timeout=5)
@@ -495,7 +584,7 @@ def test_service_fetch_daily_bars_merges_capital_flow_from_configured_crawler(tm
             return pd.DataFrame(
                 {
                     "symbol": [symbol],
-                    "trade_date": ["2026-05-29"],
+                    "trade_date": ["2026-05-26"],
                     "open": [10.0],
                     "high": [10.5],
                     "low": [9.8],
@@ -515,7 +604,7 @@ def test_service_fetch_daily_bars_merges_capital_flow_from_configured_crawler(tm
         def fetch_many_fund_flows(self, symbols, start_date, end_date, timeout=15):
             self.calls.append((symbols, start_date, end_date, timeout))
             return {
-                "rows": [{"symbol": "000001", "trade_date": "2026-05-29", "main_net_inflow": 8800000.0}],
+                "rows": [{"symbol": "000001", "trade_date": "2026-05-26", "main_net_inflow": 8800000.0}],
                 "failures": [],
                 "diagnostics": [],
             }
@@ -595,7 +684,7 @@ def test_service_fetch_capital_flow_backfills_existing_rows_and_reports_failures
         thread.join(timeout=5)
 
 
-def test_service_fetch_capital_flow_empty_symbols_starts_backfill_job_for_missing_warehouse_symbols(tmp_path):
+def test_service_fetch_capital_flow_empty_symbols_starts_backfill_job_for_local_missing_flow_only(tmp_path):
     class FakeProvider:
         def list_symbols(self):
             return ["000002", "000003"]
@@ -631,14 +720,14 @@ def test_service_fetch_capital_flow_empty_symbols_starts_backfill_job_for_missin
     server.state.warehouse.write_daily_bars(
         pd.DataFrame(
             {
-                "symbol": ["000001", "000002", "000003"],
-                "trade_date": pd.to_datetime(["2026-05-26", "2026-05-26", "2026-05-26"]),
-                "open": [10.0, 20.0, 30.0],
-                "high": [10.5, 20.5, 30.5],
-                "low": [9.8, 19.8, 29.8],
-                "close": [10.2, 20.2, 30.2],
-                "volume": [1000, 2000, 3000],
-                "main_net_inflow": [float("nan"), 2_000_000.0, 3_000_000.0],
+                "symbol": ["000001", "000002"],
+                "trade_date": pd.to_datetime(["2026-05-26", "2026-05-26"]),
+                "open": [10.0, 20.0],
+                "high": [10.5, 20.5],
+                "low": [9.8, 19.8],
+                "close": [10.2, 20.2],
+                "volume": [1000, 2000],
+                "main_net_inflow": [float("nan"), float("nan")],
             }
         )
     )
@@ -654,42 +743,44 @@ def test_service_fetch_capital_flow_empty_symbols_starts_backfill_job_for_missin
             {"symbols": [], "start_date": "2026-05-26", "end_date": "2026-05-29"},
         )
 
-        assert manager.calls == [(["000001"], "2026-05-26", "2026-05-29")]
+        assert manager.calls == [(["000001", "000002"], "2026-05-26", "2026-05-29")]
         assert response["job"]["mode"] == "capital_flow_backfill"
         assert response["job"]["status"] == "running"
         assert response["diagnostics"][0]["code"] == "capital_flow_backfill_job_started"
-        assert response["diagnostics"][0]["selection"] == "warehouse_missing_capital_flow"
     finally:
         server.shutdown()
         thread.join(timeout=5)
 
 
-def test_service_fetch_capital_flow_empty_symbols_returns_not_needed_when_no_missing_rows(tmp_path):
+def test_service_empty_capital_flow_backfill_falls_back_to_provider_symbols_without_local_rows(tmp_path):
     class FakeProvider:
         def list_symbols(self):
-            raise AssertionError("provider list should not be used when warehouse has no capital-flow gaps")
+            return ["000002", "000003"]
 
     class FakeSyncManager:
+        def __init__(self):
+            self.calls = []
+
         def start_capital_flow_backfill(self, symbols, start_date, end_date):
-            raise AssertionError("capital-flow job should not start without warehouse gaps")
+            from datetime import date
+
+            from astock_backtester.models import SyncJobStatus
+
+            self.calls.append((symbols, start_date, end_date))
+            return SyncJobStatus(
+                job_id="flow-job",
+                mode="capital_flow_backfill",
+                status="running",
+                total_symbols=len(symbols),
+                current_symbol=symbols[0],
+                start_date=date.fromisoformat(start_date),
+                end_date=date.fromisoformat(end_date),
+            )
 
     server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
+    manager = FakeSyncManager()
     server.state.provider = FakeProvider()
-    server.state.sync_manager = FakeSyncManager()
-    server.state.warehouse.write_daily_bars(
-        pd.DataFrame(
-            {
-                "symbol": ["000001", "000002"],
-                "trade_date": pd.to_datetime(["2026-05-26", "2026-05-26"]),
-                "open": [10.0, 20.0],
-                "high": [10.5, 20.5],
-                "low": [9.8, 19.8],
-                "close": [10.2, 20.2],
-                "volume": [1000, 2000],
-                "main_net_inflow": [1_000_000.0, 2_000_000.0],
-            }
-        )
-    )
+    server.state.sync_manager = manager
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -700,41 +791,8 @@ def test_service_fetch_capital_flow_empty_symbols_returns_not_needed_when_no_mis
             {"symbols": [], "start_date": "2026-05-26", "end_date": "2026-05-29"},
         )
 
-        assert response["status"] == "ok"
-        assert "job" not in response
-        assert response["requested_symbols"] == []
-        assert response["diagnostics"][0]["code"] == "capital_flow_backfill_not_needed"
-        assert response["diagnostics"][0]["selection"] == "warehouse_missing_capital_flow"
-    finally:
-        server.shutdown()
-        thread.join(timeout=5)
-
-
-def test_service_coverage_summary_returns_exact_warehouse_coverage(tmp_path):
-    server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
-    server.state.warehouse.write_daily_bars(
-        pd.DataFrame(
-            {
-                "symbol": ["000001", "000001", "000002"],
-                "trade_date": pd.to_datetime(["2026-06-05", "2026-06-08", "2026-06-05"]),
-                "open": [10.0, 10.1, 20.0],
-                "high": [10.5, 10.6, 20.5],
-                "low": [9.8, 9.9, 19.8],
-                "close": [10.2, 10.3, 20.2],
-                "volume": [1000, 1100, 2000],
-                "main_net_inflow": [1_000_000.0, float("nan"), float("nan")],
-            }
-        )
-    )
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        port = server.server_address[1]
-        response = _request_json("GET", f"http://127.0.0.1:{port}/coverage/summary")
-
-        datasets = {item["dataset"]: item for item in response["coverage"]}
-        assert datasets["daily_bars"]["missing_rows"] == 1
-        assert datasets["capital_flow"]["missing_rows"] == 2
+        assert manager.calls == [(["000002", "000003"], "2026-05-26", "2026-05-29")]
+        assert response["job"]["total_symbols"] == 2
     finally:
         server.shutdown()
         thread.join(timeout=5)
@@ -742,7 +800,7 @@ def test_service_coverage_summary_returns_exact_warehouse_coverage(tmp_path):
 
 def test_service_streams_backtest_trade_events_before_final_result(tmp_path, basic_strategy, basic_settings):
     server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
-    server.state.warehouse.write_daily_bars(sample_daily_bars())
+    server.state.cache.write_daily_bars(sample_daily_bars())
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -771,6 +829,83 @@ def test_service_streams_backtest_trade_events_before_final_result(tmp_path, bas
         assert latest_matches["signal_date"] == "2024-01-08"
         assert latest_matches["trade_date"] == "2024-01-08"
         assert isinstance(latest_matches["matches"], list)
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_service_backtest_stream_reads_only_custom_symbols_from_warehouse(tmp_path, basic_strategy, basic_settings):
+    class RecordingWarehouse(Warehouse):
+        def __init__(self, root):
+            super().__init__(root)
+            self.read_calls = []
+
+        def read_daily_bars(self, *args, **kwargs):
+            self.read_calls.append(kwargs)
+            return super().read_daily_bars(*args, **kwargs)
+
+    warehouse = RecordingWarehouse(tmp_path)
+    warehouse.write_daily_bars(sample_daily_bars())
+    server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
+    server.state.warehouse = warehouse
+    settings = basic_settings.model_copy(update={"stock_pool": "custom", "custom_symbols": ["AAA"]})
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        events = _request_ndjson(
+            f"http://127.0.0.1:{port}/run/backtest/stream",
+            {
+                "strategy": json.loads(basic_strategy.model_dump_json()),
+                "settings": json.loads(settings.model_dump_json()),
+            },
+        )
+
+        assert events[-1]["type"] == "result"
+        assert warehouse.read_calls[0]["symbols"] == ["AAA"]
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_service_backtest_stream_reads_warmup_history_before_requested_start(tmp_path, basic_strategy, basic_settings):
+    class RecordingWarehouse(Warehouse):
+        def __init__(self, root):
+            super().__init__(root)
+            self.read_calls = []
+
+        def read_daily_bars(self, *args, **kwargs):
+            self.read_calls.append(kwargs)
+            return super().read_daily_bars(*args, **kwargs)
+
+    warehouse = RecordingWarehouse(tmp_path)
+    warehouse.write_daily_bars(sample_daily_bars())
+    server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
+    server.state.warehouse = warehouse
+    settings = basic_settings.model_copy(
+        update={
+            "start_date": pd.Timestamp("2024-01-08").date(),
+            "end_date": pd.Timestamp("2024-01-08").date(),
+            "stock_pool": "custom",
+            "custom_symbols": ["AAA"],
+        }
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        events = _request_ndjson(
+            f"http://127.0.0.1:{port}/run/backtest/stream",
+            {
+                "strategy": json.loads(basic_strategy.model_dump_json()),
+                "settings": json.loads(settings.model_dump_json()),
+            },
+        )
+
+        assert events[-1]["type"] == "result"
+        assert warehouse.read_calls[0]["symbols"] == ["AAA"]
+        assert warehouse.read_calls[0]["start_date"] < "2024-01-08"
+        assert warehouse.read_calls[0]["end_date"] == "2024-01-08"
     finally:
         server.shutdown()
         thread.join(timeout=5)
@@ -1216,99 +1351,6 @@ def test_service_realtime_market_snapshot_prefers_cls_breadth_and_hot_plate(tmp_
         thread.join(timeout=5)
 
 
-def test_service_realtime_market_snapshot_reuses_cls_home_for_indexes_and_breadth(tmp_path):
-    class FakeResponse:
-        text = ""
-        encoding = "utf-8"
-
-        def __init__(self, payload=None, text=""):
-            self._payload = payload or {}
-            self.text = text
-
-        def raise_for_status(self):
-            return
-
-        def json(self):
-            return self._payload
-
-    requested_urls: list[str] = []
-
-    def requester(url, **kwargs):
-        requested_urls.append(url)
-        if "quote/index/home" in url:
-            return FakeResponse(
-                {
-                    "code": 200,
-                    "data": {
-                        "index_quote": [
-                            {
-                                "secu_code": "sh000001",
-                                "secu_name": "上证指数",
-                                "last_px": 4010.03,
-                                "preclose_px": 3959.337,
-                                "change_px": 50.69,
-                                "change": 0.0128,
-                            }
-                        ],
-                        "up_down_dis": {
-                            "rise_num": 3708,
-                            "fall_num": 1413,
-                            "flat_num": 86,
-                            "suspend_num": 12,
-                            "up_10": 155,
-                            "up_8": 125,
-                            "up_6": 355,
-                            "up_4": 1191,
-                            "up_2": 1882,
-                            "down_2": 759,
-                            "down_4": 369,
-                            "down_6": 147,
-                            "down_8": 75,
-                            "down_10": 63,
-                        },
-                    },
-                }
-            )
-        if "web_quote/plate/hot_plate" in url:
-            return FakeResponse(
-                {
-                    "code": 200,
-                    "data": {
-                        "industry": [
-                            {
-                                "secu_code": "cls82247",
-                                "secu_name": "电子化学品",
-                                "change": 0.0706,
-                                "up_stock": [{"secu_code": "sz300576", "secu_name": "容大感光", "change": 0.1594}],
-                            }
-                        ],
-                        "concept": [],
-                        "area": [],
-                    },
-                }
-            )
-        return FakeResponse({})
-
-    server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
-    server.state.warehouse.write_daily_bars(sample_daily_bars())
-    server.state.realtime_provider.requester = requester
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        port = server.server_address[1]
-        response = _request_json("GET", f"http://127.0.0.1:{port}/realtime/market-snapshot")
-
-        assert response["indexes"][0]["source"] == "cls-quote-index"
-        assert response["breadth"]["source"] == "cls-quote-breadth"
-        assert response["breadth"]["up"] == 3708
-        assert [url for url in requested_urls if "quote/index/home" in url] == [
-            "https://x-quote.cls.cn/quote/index/home"
-        ]
-    finally:
-        server.shutdown()
-        thread.join(timeout=5)
-
-
 def test_service_realtime_market_snapshot_prefers_ths_concept_quotes_over_industry_quotes(tmp_path):
     class FakeResponse:
         text = ""
@@ -1634,13 +1676,12 @@ def test_realtime_provider_uses_akshare_sector_fallback_when_eastmoney_sector_un
 def test_realtime_provider_times_out_slow_akshare_sector_before_eastmoney_backup(tmp_path):
     provider = RealtimeMarketProvider(Warehouse(tmp_path))
     provider.sector_source_timeout = 0.01
+    provider._fetch_cls_hot_plate_sectors = lambda diagnostics: []
     provider._fetch_ths_concept_section_rows = lambda: []
     provider._fetch_ths_industry_html_rows = lambda: []
     provider._fetch_sina_sectors = lambda: []
 
     def slow_akshare_rows(board_type):
-        if board_type == "industry":
-            return []
         time.sleep(0.2)
         return [{"f12": "BK1036", "f14": "akshare-sector-name", "f3": 9.9}]
 
@@ -1654,10 +1695,87 @@ def test_realtime_provider_times_out_slow_akshare_sector_before_eastmoney_backup
     sectors = provider._fetch_live_sectors(diagnostics)
     elapsed = time.perf_counter() - started_at
 
-    assert elapsed < 0.18
+    assert elapsed < 0.15
     assert sectors[0].name == "eastmoney-sector-name"
     assert sectors[0].source == "eastmoney-sector"
     assert any("akshare-sector" in item and "timeout" in item.lower() for item in diagnostics)
+
+
+def test_realtime_provider_times_out_slow_akshare_breadth_before_heavy_backup(tmp_path):
+    provider = RealtimeMarketProvider(Warehouse(tmp_path))
+    provider.breadth_source_timeout = 0.01
+    provider._latest_local_symbol_count = lambda: 5000
+    provider._coverage_symbol_count = lambda: 5000
+    provider._fetch_cls_breadth = lambda: None
+    provider._fetch_ths_market_summary_breadth = lambda: None
+    provider._fetch_sina_breadth = lambda: None
+    provider._fetch_tencent_breadth = lambda diagnostics: None
+
+    def slow_akshare_breadth(diagnostics):
+        time.sleep(0.2)
+        return MarketBreadth(up=4900, down=100, flat=0, total=5000, source="akshare-a-share-live")
+
+    provider._fetch_akshare_breadth = slow_akshare_breadth
+    provider._fetch_heavy_breadth = lambda diagnostics: MarketBreadth(
+        up=3200,
+        down=1600,
+        flat=200,
+        total=5000,
+        source="heavy-market-crawler",
+    )
+    diagnostics: list[str] = []
+
+    started_at = time.perf_counter()
+    breadth = provider._fetch_live_breadth(diagnostics)
+    elapsed = time.perf_counter() - started_at
+
+    assert elapsed < 0.15
+    assert breadth is not None
+    assert breadth.source == "heavy-market-crawler"
+    assert any("AKShare 实时个股" in item and ("timeout" in item.lower() or "超时" in item) for item in diagnostics)
+
+
+def test_realtime_provider_keeps_cls_hot_plate_on_request_timeout_only(tmp_path):
+    class FakeResponse:
+        def __init__(self, payload=None):
+            self._payload = payload or {}
+
+        def raise_for_status(self):
+            return
+
+        def json(self):
+            return self._payload
+
+    requested: list[tuple[str, float | None]] = []
+
+    def requester(url, **kwargs):
+        requested.append((url, kwargs.get("timeout")))
+        time.sleep(0.03)
+        return FakeResponse(
+            {
+                "data": {
+                    "industry": [
+                        {
+                            "secu_code": "cls82247",
+                            "secu_name": "cls-sector-name",
+                            "change": 0.035,
+                            "up_stock": [{"secu_code": "sz300576"}],
+                        }
+                    ],
+                    "concept": [],
+                    "area": [],
+                }
+            }
+        )
+
+    provider = RealtimeMarketProvider(Warehouse(tmp_path), requester=requester)
+    provider.sector_source_timeout = 0.01
+
+    sectors = provider._fetch_cls_hot_plate_sectors([])
+
+    assert sectors[0].name == "cls-sector-name"
+    assert sectors[0].source == "cls-hot-plate"
+    assert requested == [("https://x-quote.cls.cn/web_quote/plate/hot_plate", 0.01)]
 
 
 def test_realtime_provider_prefers_sina_sector_before_akshare_fallback(tmp_path, monkeypatch):
@@ -2043,6 +2161,64 @@ def test_realtime_provider_rejects_partial_live_breadth_with_diagnostics(tmp_pat
     assert any("全市场红绿家数不完整" in item for item in diagnostics)
 
 
+def test_realtime_provider_accepts_cls_quotation_breadth_without_extra_completeness_gate(tmp_path):
+    provider = RealtimeMarketProvider(Warehouse(tmp_path))
+    diagnostics: list[str] = []
+
+    provider._latest_local_symbol_count = lambda: 5500
+    provider._coverage_symbol_count = lambda: 5500
+    provider._fetch_cls_breadth = lambda: MarketBreadth(
+        up=101,
+        down=34,
+        flat=0,
+        total=135,
+        source="cls-quote-breadth",
+    )
+    provider._fetch_ths_market_summary_breadth = lambda: (_ for _ in ()).throw(
+        AssertionError("should not query slower breadth providers after CLS returns numbers")
+    )
+
+    breadth = provider._fetch_live_breadth(diagnostics)
+
+    assert breadth is not None
+    assert breadth.source == "cls-quote-breadth"
+    assert breadth.up == 101
+    assert breadth.down == 34
+    assert diagnostics == []
+
+
+def test_realtime_provider_returns_cls_breadth_before_slow_local_count_scan(tmp_path):
+    provider = RealtimeMarketProvider(Warehouse(tmp_path))
+    provider.breadth_time_budget = 0.05
+    diagnostics: list[str] = []
+
+    def slow_local_count():
+        time.sleep(0.2)
+        return 5500
+
+    provider._latest_local_symbol_count = slow_local_count
+    provider._coverage_symbol_count = slow_local_count
+    provider._fetch_cls_breadth = lambda: MarketBreadth(
+        up=101,
+        down=34,
+        flat=0,
+        total=135,
+        source="cls-quote-breadth",
+    )
+    provider._fetch_ths_market_summary_breadth = lambda: (_ for _ in ()).throw(
+        AssertionError("CLS breadth should return before local completeness scans")
+    )
+
+    started_at = time.perf_counter()
+    breadth = provider._fetch_live_breadth_with_budget(diagnostics)
+    elapsed = time.perf_counter() - started_at
+
+    assert elapsed < 0.15
+    assert breadth is not None
+    assert breadth.source == "cls-quote-breadth"
+    assert diagnostics == []
+
+
 def test_realtime_provider_rejects_breadth_below_local_pool_ratio(tmp_path):
     warehouse = Warehouse(tmp_path)
     provider = RealtimeMarketProvider(warehouse)
@@ -2403,6 +2579,104 @@ def test_realtime_provider_returns_breadth_without_waiting_for_slow_sector_sourc
     assert any("实时强势题材接口超时" in item for item in snapshot.diagnostics)
 
 
+def test_realtime_provider_returns_sectors_without_waiting_for_slow_breadth_sources(tmp_path):
+    warehouse = Warehouse(tmp_path)
+    provider = RealtimeMarketProvider(warehouse)
+    provider.breadth_time_budget = 0.02
+    provider.local_snapshot_time_budget = 0.02
+    provider._fetch_indexes = lambda: [
+        MarketIndexQuote(
+            symbol="sh000001",
+            name="上证指数",
+            last=3100.0,
+            previous_close=3080.0,
+            change=20.0,
+            change_pct=0.0064935,
+            source="fake-live",
+        )
+    ]
+
+    def slow_breadth(diagnostics):
+        time.sleep(0.2)
+        return MarketBreadth(up=3200, down=1700, flat=200, total=5100, source="slow-breadth")
+
+    provider._fetch_live_breadth = slow_breadth
+    provider._fetch_live_sectors = lambda diagnostics: [
+        SectorMover(name="快板块", change_pct=0.05, source="fast-sector")
+    ]
+
+    def local_snapshot(now):
+        return RealtimeMarketSnapshot(
+            status="stale",
+            source="local-latest",
+            updated_at=now,
+            indexes=[],
+            breadth=None,
+            strong_sectors=[],
+            yesterday_strong_sectors=[],
+            message="local",
+        )
+
+    provider._snapshot_from_local = local_snapshot
+
+    started_at = time.perf_counter()
+    snapshot = provider.market_snapshot()
+    elapsed = time.perf_counter() - started_at
+
+    assert elapsed < 0.15
+    assert snapshot.status == "stale"
+    assert snapshot.breadth is None
+    assert snapshot.strong_sectors[0].source == "fast-sector"
+    assert any("实时红绿家数接口超时" in item for item in snapshot.diagnostics)
+
+
+def test_realtime_provider_does_not_wait_for_slow_local_fallback_after_live_partial(tmp_path):
+    warehouse = Warehouse(tmp_path)
+    provider = RealtimeMarketProvider(warehouse)
+    provider.breadth_time_budget = 0.02
+    provider.local_snapshot_time_budget = 0.02
+    provider._fetch_indexes = lambda: [
+        MarketIndexQuote(
+            symbol="sh000001",
+            name="上证指数",
+            last=3100.0,
+            previous_close=3080.0,
+            change=20.0,
+            change_pct=0.0064935,
+            source="fake-live",
+        )
+    ]
+    provider._fetch_live_breadth = lambda diagnostics: None
+    provider._fetch_live_sectors = lambda diagnostics: [
+        SectorMover(name="快板块", change_pct=0.05, source="fast-sector")
+    ]
+
+    def slow_local_snapshot(now):
+        time.sleep(0.2)
+        return RealtimeMarketSnapshot(
+            status="stale",
+            source="local-latest",
+            updated_at=now,
+            indexes=[],
+            breadth=MarketBreadth(up=1, down=1, flat=0, total=2, source="local-latest"),
+            strong_sectors=[],
+            yesterday_strong_sectors=[],
+            message="local",
+        )
+
+    provider._snapshot_from_local = slow_local_snapshot
+
+    started_at = time.perf_counter()
+    snapshot = provider.market_snapshot()
+    elapsed = time.perf_counter() - started_at
+
+    assert elapsed < 0.15
+    assert snapshot.status == "stale"
+    assert snapshot.breadth is None
+    assert snapshot.strong_sectors[0].source == "fast-sector"
+    assert any("本地兜底行情快照超时" in item for item in snapshot.diagnostics)
+
+
 def test_realtime_provider_does_not_cache_stale_snapshot_with_local_fallback_sectors(tmp_path):
     warehouse = Warehouse(tmp_path)
     provider = RealtimeMarketProvider(warehouse)
@@ -2447,6 +2721,43 @@ def test_realtime_provider_does_not_cache_stale_snapshot_with_local_fallback_sec
     assert snapshot.breadth.source == "fast-breadth"
     assert snapshot.strong_sectors[0].source == "local-market-group"
     assert provider._last_successful_snapshot is None
+
+
+def test_realtime_provider_live_snapshot_does_not_build_local_fallback(tmp_path):
+    warehouse = Warehouse(tmp_path)
+    provider = RealtimeMarketProvider(warehouse)
+    provider._fetch_indexes = lambda: [
+        MarketIndexQuote(
+            symbol="sh000001",
+            name="上证指数",
+            last=3100.0,
+            previous_close=3080.0,
+            change=20.0,
+            change_pct=0.0064935,
+            source="fake-live",
+        )
+    ]
+    provider._fetch_live_breadth = lambda diagnostics: MarketBreadth(
+        up=3200,
+        down=1700,
+        flat=200,
+        total=5100,
+        source="fast-breadth",
+    )
+    provider._fetch_live_sectors = lambda diagnostics: [
+        SectorMover(name="电力", change_pct=0.024, leading_symbol="600001", source="ths-industry-html")
+    ]
+
+    def fail_local_snapshot(now):
+        raise AssertionError("live snapshot should not build local fallback")
+
+    provider._snapshot_from_local = fail_local_snapshot
+
+    snapshot = provider.market_snapshot()
+
+    assert snapshot.status == "live"
+    assert snapshot.strong_sectors[0].source == "ths-industry-html"
+    assert snapshot.yesterday_strong_sectors == []
 
 
 def test_service_realtime_market_snapshot_tracks_yesterday_strong_sectors_from_local_history(tmp_path):
@@ -3072,10 +3383,13 @@ def test_service_market_finance_returns_cls_market_board_payload(tmp_path):
                     ],
                 }
             )
+        if "q.10jqka.com.cn/index/index/board/all/" in url:
+            return FakeResponse(text="<html><body></body></html>")
         raise AssertionError(f"unexpected url: {url}")
 
     server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
     server.state.finance_provider.requester = requester
+    server.state.finance_provider.browser_cookie_getter = lambda: None
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -3091,6 +3405,169 @@ def test_service_market_finance_returns_cls_market_board_payload(tmp_path):
         assert response["emotion"]["breadth"]["up"] == 3322
         assert response["up_pool"][0]["symbol"] == "601869"
         assert response["up_pool"][0]["plates"][0]["name"] == "光纤光缆"
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_service_market_finance_prefers_ths_market_degree_for_score_card(tmp_path):
+    class FakeResponse:
+        encoding = "utf-8"
+
+        def __init__(self, payload=None, text=""):
+            self._payload = payload or {}
+            self.text = text
+
+        def raise_for_status(self):
+            return
+
+        def json(self):
+            return self._payload
+
+    def requester(url, **kwargs):
+        if "quote/index/tline" in url:
+            return FakeResponse({"code": 200, "data": []})
+        if "v3/transaction/anchor" in url:
+            return FakeResponse({"errno": 0, "data": []})
+        if "quote/index/basic" in url:
+            return FakeResponse({"code": 200, "data": {}})
+        if "v2/quote/a/stock/emotion" in url:
+            return FakeResponse(
+                {
+                    "code": 200,
+                    "data": {
+                        "market_degree": "56",
+                        "up_ratio_num": "130",
+                        "up_open_num": "25",
+                    },
+                }
+            )
+        if "quote/index/up_down_analysis" in url:
+            return FakeResponse({"code": 200, "data": []})
+        if "q.10jqka.com.cn/api.php?t=indexflash" in url:
+            return FakeResponse(text='{"dppj_data": 7.3}')
+        raise AssertionError(f"unexpected url: {url}")
+
+    server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
+    server.state.finance_provider.requester = requester
+    server.state.finance_provider.browser_cookie_getter = lambda: None
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        response = _request_json("GET", f"http://127.0.0.1:{port}/market/finance")
+
+        assert response["emotion"]["market_degree"] == 7.3
+        assert response["emotion"]["market_degree_source"] == "ths-market-summary"
+        assert response["emotion"]["market_degree_label"] == "同花顺大盘评级"
+        assert response["emotion"]["up_limit"] == 130
+        assert any("同花顺大盘评分" in item for item in response["diagnostics"])
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_service_market_finance_uses_browser_cookie_for_ths_indexflash(tmp_path):
+    class FakeResponse:
+        encoding = "utf-8"
+
+        def __init__(self, payload=None, text=""):
+            self._payload = payload or {}
+            self.text = text
+
+        def raise_for_status(self):
+            return
+
+        def json(self):
+            return self._payload
+
+    seen_cookies = []
+
+    def requester(url, **kwargs):
+        if "quote/index/tline" in url:
+            return FakeResponse({"code": 200, "data": []})
+        if "v3/transaction/anchor" in url:
+            return FakeResponse({"errno": 0, "data": []})
+        if "quote/index/basic" in url:
+            return FakeResponse({"code": 200, "data": {}})
+        if "v2/quote/a/stock/emotion" in url:
+            return FakeResponse({"code": 200, "data": {}})
+        if "quote/index/up_down_analysis" in url:
+            return FakeResponse({"code": 200, "data": []})
+        if "q.10jqka.com.cn/index/index/board" in url:
+            return FakeResponse(text="<html><body>board</body></html>")
+        if "q.10jqka.com.cn/api.php?t=indexflash" in url:
+            cookie = kwargs.get("headers", {}).get("Cookie") or ""
+            seen_cookies.append(cookie)
+            if cookie == "v=browser-cookie":
+                return FakeResponse(text='{"dppj_data": 7.8}')
+            raise AssertionError(f"missing cookie on indexflash request: {cookie!r}")
+        raise AssertionError(f"unexpected url: {url}")
+
+    server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
+    server.state.finance_provider.requester = requester
+    server.state.finance_provider.browser_cookie_getter = lambda: "v=browser-cookie"
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        response = _request_json("GET", f"http://127.0.0.1:{port}/market/finance")
+
+        assert response["emotion"]["market_degree"] == 7.8
+        assert response["emotion"]["market_degree_source"] == "ths-market-summary"
+        assert seen_cookies == ["v=browser-cookie"]
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_service_market_finance_does_not_parse_html_tag_numbers_as_ths_score(tmp_path):
+    class FakeResponse:
+        encoding = "utf-8"
+
+        def __init__(self, payload=None, text=""):
+            self._payload = payload or {}
+            self.text = text
+
+        def raise_for_status(self):
+            return
+
+        def json(self):
+            return self._payload
+
+    class ForbiddenResponse(FakeResponse):
+        def raise_for_status(self):
+            raise RuntimeError("403 forbidden")
+
+    def requester(url, **kwargs):
+        if "quote/index/tline" in url:
+            return FakeResponse({"code": 200, "data": []})
+        if "v3/transaction/anchor" in url:
+            return FakeResponse({"errno": 0, "data": []})
+        if "quote/index/basic" in url:
+            return FakeResponse({"code": 200, "data": {}})
+        if "v2/quote/a/stock/emotion" in url:
+            return FakeResponse({"code": 200, "data": {}})
+        if "quote/index/up_down_analysis" in url:
+            return FakeResponse({"code": 200, "data": []})
+        if "q.10jqka.com.cn/api.php?t=indexflash" in url:
+            return ForbiddenResponse(text="<h1>Nginx forbidden.</h1>")
+        if "q.10jqka.com.cn/index/index/board" in url:
+            return FakeResponse(text='<html><body><h3>大盘评级</h3><div id="dppj"></div><p>投资建议</p></body></html>')
+        raise AssertionError(f"unexpected url: {url}")
+
+    server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
+    server.state.finance_provider.requester = requester
+    server.state.finance_provider.browser_cookie_getter = lambda: None
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        response = _request_json("GET", f"http://127.0.0.1:{port}/market/finance")
+
+        assert response["emotion"]["market_degree"] is None
+        assert response["emotion"]["market_degree_source"] is None
+        assert any("403 forbidden" in item for item in response["diagnostics"])
     finally:
         server.shutdown()
         thread.join(timeout=5)

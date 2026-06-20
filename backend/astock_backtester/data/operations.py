@@ -33,58 +33,11 @@ def _date_range(start_date: pd.Timestamp, end_date: pd.Timestamp) -> set[pd.Time
     return a_share_trade_dates(start_date, end_date)
 
 
-def _latest_trade_date(start_date: str, end_date: str) -> pd.Timestamp | None:
-    trade_dates = _date_range(pd.Timestamp(start_date), pd.Timestamp(end_date))
-    return max(trade_dates) if trade_dates else None
-
-
-def _daily_bar_shortfall_diagnostics(
-    frame: pd.DataFrame,
-    requested_symbols: Sequence[str],
-    start_date: str,
-    end_date: str,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
-    latest_expected = _latest_trade_date(start_date, end_date)
-    if latest_expected is None or frame.empty or "symbol" not in frame or "trade_date" not in frame:
-        return [], [], []
-    normalized = frame.copy()
-    normalized["symbol"] = normalized["symbol"].astype(str)
-    normalized["trade_date"] = pd.to_datetime(normalized["trade_date"], errors="coerce")
-    diagnostics: list[dict[str, Any]] = []
-    failures: list[dict[str, Any]] = []
-    symbols: list[str] = []
-    for symbol in requested_symbols:
-        data = normalized.loc[normalized["symbol"] == str(symbol)]
-        if data.empty:
-            continue
-        latest_available = data["trade_date"].dropna().max()
-        if pd.isna(latest_available):
-            continue
-        latest_available = pd.Timestamp(latest_available).normalize()
-        if latest_available >= latest_expected:
-            continue
-        latest_text = latest_available.date().isoformat()
-        expected_text = latest_expected.date().isoformat()
-        message = f"daily bars only reached {latest_text}; requested latest trade date is {expected_text}"
-        diagnostics.append(
-            {
-                "code": "date_coverage_shortfall",
-                "source": "daily_bars_fetcher",
-                "symbol": str(symbol),
-                "latest_trade_date": latest_text,
-                "requested_latest_trade_date": expected_text,
-                "message": message,
-            }
-        )
-        failures.append(
-            {
-                "symbol": str(symbol),
-                "code": "date_coverage_shortfall",
-                "error": message,
-            }
-        )
-        symbols.append(str(symbol))
-    return diagnostics, failures, sorted(set(symbols))
+def effective_a_share_date_range(start_date: str, end_date: str) -> tuple[str, str] | None:
+    trade_dates = sorted(a_share_trade_dates(pd.Timestamp(start_date), pd.Timestamp(end_date)))
+    if not trade_dates:
+        return None
+    return trade_dates[0].date().isoformat(), trade_dates[-1].date().isoformat()
 
 
 def build_daily_bars_coverage(
@@ -98,11 +51,6 @@ def build_daily_bars_coverage(
     requested_end_date = pd.Timestamp(end_date) if end_date else None
     bars = pd.DataFrame()
     used_warehouse = False
-    warehouse_read_failed = False
-    if warehouse is not None and not symbols and start_date is None and end_date is None:
-        latest_coverage = _latest_daily_bars_coverage(warehouse)
-        if latest_coverage.items:
-            return latest_coverage
     if warehouse is not None:
         try:
             bars = warehouse.read_daily_bars(symbols=symbols, start_date=start_date, end_date=end_date)
@@ -110,8 +58,7 @@ def build_daily_bars_coverage(
         except Exception:
             bars = pd.DataFrame()
             used_warehouse = False
-            warehouse_read_failed = True
-    if bars.empty and (warehouse is None or warehouse_read_failed):
+    if bars.empty:
         bars = cache.read_daily_bars()
     if bars.empty:
         return DailyBarsCoverageResponse(items=[])
@@ -157,67 +104,19 @@ def build_daily_bars_coverage(
     return DailyBarsCoverageResponse(items=items)
 
 
-def _latest_daily_bars_coverage(warehouse: Warehouse) -> DailyBarsCoverageResponse:
-    read_latest = getattr(warehouse, "read_latest_daily_bars", None)
-    if not callable(read_latest):
-        return DailyBarsCoverageResponse(items=[])
-    try:
-        bars = read_latest(days=1)
-    except Exception:
-        return DailyBarsCoverageResponse(items=[])
-    if bars.empty or "symbol" not in bars or "trade_date" not in bars:
-        return DailyBarsCoverageResponse(items=[])
-    bars = bars.copy()
-    bars["trade_date"] = pd.to_datetime(bars["trade_date"], errors="coerce")
-    bars = bars.dropna(subset=["trade_date"])
-    if bars.empty:
-        return DailyBarsCoverageResponse(items=[])
-
-    items: list[DailyBarsCoverageItem] = []
-    for symbol, frame in bars.groupby("symbol", sort=True):
-        frame = frame.sort_values("trade_date")
-        start = frame["trade_date"].min().date()
-        end = frame["trade_date"].max().date()
-        missing_capital_flow_dates = []
-        if "main_net_inflow" in frame:
-            missing_capital_flow_dates = [
-                item.date()
-                for item in frame.loc[frame["main_net_inflow"].isna(), "trade_date"].tolist()
-            ]
-        missing_market_cap_dates = []
-        if "float_market_cap" in frame:
-            missing_market_cap_dates = [
-                item.date()
-                for item in frame.loc[frame["float_market_cap"].isna(), "trade_date"].tolist()
-            ]
-        items.append(
-            DailyBarsCoverageItem(
-                symbol=str(symbol),
-                start_date=start,
-                end_date=end,
-                rows=int(len(frame)),
-                missing_trade_dates=[],
-                missing_capital_flow_dates=missing_capital_flow_dates,
-                missing_market_cap_dates=missing_market_cap_dates,
-            )
-        )
-    return DailyBarsCoverageResponse(items=items)
-
-
 def import_daily_bars_into_cache(
     cache: LocalCache,
     frame: pd.DataFrame,
     source: str,
     warehouse: Warehouse | None = None,
 ) -> DataOperationResult:
-    imported_rows = int(len(frame))
     cache.write_daily_bars(frame)
     if warehouse is not None:
-        imported_rows = warehouse.write_daily_bars(frame)
+        warehouse.write_daily_bars(frame)
     coverage = _safe_coverage(cache, warehouse)
     return DataOperationResult(
         status="ok",
-        imported_rows=imported_rows,
+        imported_rows=int(len(frame)),
         coverage=coverage,
         logs=[ServiceLogEntry(level="info", message=f"Imported daily bars from {source}")],
     )
@@ -233,9 +132,42 @@ def fetch_daily_bars_into_cache(
     capital_flow_fetcher: CapitalFlowFetcher | None = None,
 ) -> DataOperationResult:
     requested_symbols = [str(symbol) for symbol in symbols]
-    frame = fetcher(requested_symbols, start_date, end_date)
+    effective_range = effective_a_share_date_range(start_date, end_date)
+    if effective_range is None:
+        coverage = _safe_coverage(cache, warehouse)
+        return DataOperationResult(
+            status="ok",
+            imported_rows=0,
+            requested_symbols=requested_symbols,
+            fetched_symbols=[],
+            missing_symbols=[],
+            skipped_symbols=requested_symbols,
+            coverage=coverage,
+            logs=[ServiceLogEntry(level="info", message="Requested date range contains no A-share trading days")],
+            diagnostics=[
+                {
+                    "code": "no_a_share_trade_dates",
+                    "source": "trading_calendar",
+                    "start_date": start_date,
+                    "end_date": end_date,
+                }
+            ],
+        )
+    effective_start_date, effective_end_date = effective_range
+    frame = fetcher(requested_symbols, effective_start_date, effective_end_date)
     logs = [ServiceLogEntry(level="info", message=f"Fetched {len(frame)} daily bar rows")]
     diagnostics: list[dict[str, Any]] = []
+    if (effective_start_date, effective_end_date) != (start_date, end_date):
+        diagnostics.append(
+            {
+                "code": "a_share_trade_date_range_clipped",
+                "source": "trading_calendar",
+                "requested_start_date": start_date,
+                "requested_end_date": end_date,
+                "start_date": effective_start_date,
+                "end_date": effective_end_date,
+            }
+        )
     failures: list[dict[str, Any]] = []
     capital_flow_missing_symbols: list[str] = []
     if not frame.empty and capital_flow_fetcher is not None:
@@ -243,8 +175,8 @@ def fetch_daily_bars_into_cache(
             frame=frame,
             fetcher=capital_flow_fetcher,
             requested_symbols=requested_symbols,
-            start_date=start_date,
-            end_date=end_date,
+            start_date=effective_start_date,
+            end_date=effective_end_date,
             only_missing=False,
         )
         logs.extend(merge_logs)
@@ -256,8 +188,8 @@ def fetch_daily_bars_into_cache(
                     "code": "capital_flow_crawler_unfilled_main_net_inflow",
                     "source": "capital_flow_crawler",
                     "symbols": capital_flow_missing_symbols,
-                    "start_date": start_date,
-                    "end_date": end_date,
+                    "start_date": effective_start_date,
+                    "end_date": effective_end_date,
                     "message": "Capital-flow crawler did not fill main_net_inflow for all fetched daily-bar rows",
                 }
             )
@@ -269,27 +201,15 @@ def fetch_daily_bars_into_cache(
             )
     if frame.empty:
         fetched_symbols: list[str] = []
-        imported_rows = 0
     else:
         cache.write_daily_bars(frame)
-        imported_rows = int(len(frame))
         if warehouse is not None:
-            imported_rows = warehouse.write_daily_bars(frame)
+            warehouse.write_daily_bars(frame)
         fetched_symbols = sorted(frame["symbol"].astype(str).unique().tolist())
-    daily_shortfall_diagnostics, daily_shortfall_failures, daily_shortfall_symbols = _daily_bar_shortfall_diagnostics(
-        frame,
-        requested_symbols,
-        start_date,
-        end_date,
-    )
-    if daily_shortfall_diagnostics:
-        diagnostics.extend(daily_shortfall_diagnostics)
-        failures.extend(daily_shortfall_failures)
     missing_symbols = sorted(
         {
             *(symbol for symbol in requested_symbols if symbol not in fetched_symbols),
             *capital_flow_missing_symbols,
-            *daily_shortfall_symbols,
         }
     )
     if capital_flow_fetcher is not None and frame.empty:
@@ -302,13 +222,6 @@ def fetch_daily_bars_into_cache(
         )
     if missing_symbols:
         logs.append(ServiceLogEntry(level="warning", message=f"Missing symbols: {', '.join(missing_symbols)}"))
-    if daily_shortfall_symbols:
-        logs.append(
-            ServiceLogEntry(
-                level="warning",
-                message=f"Daily-bar coverage shortfall for symbols: {', '.join(daily_shortfall_symbols)}",
-            )
-        )
     if failures:
         failed_symbols = sorted({str(item.get("symbol", "")) for item in failures if item.get("symbol")})
         if failed_symbols:
@@ -321,7 +234,7 @@ def fetch_daily_bars_into_cache(
     coverage = _safe_coverage(cache, warehouse)
     return DataOperationResult(
         status="partial" if missing_symbols or failures else "ok",
-        imported_rows=imported_rows,
+        imported_rows=int(len(frame)),
         requested_symbols=requested_symbols,
         fetched_symbols=fetched_symbols,
         missing_symbols=missing_symbols,
@@ -342,13 +255,46 @@ def fetch_capital_flow_into_cache(
     refresh_coverage: bool = True,
 ) -> DataOperationResult:
     requested_symbols = [str(symbol) for symbol in symbols]
-    frame = _read_existing_daily_bars(cache, warehouse, requested_symbols, start_date, end_date)
+    effective_range = effective_a_share_date_range(start_date, end_date)
+    if effective_range is None:
+        coverage = _safe_coverage(cache, warehouse) if refresh_coverage else []
+        return DataOperationResult(
+            status="ok",
+            imported_rows=0,
+            returned_rows=0,
+            requested_symbols=requested_symbols,
+            fetched_symbols=[],
+            missing_symbols=[],
+            skipped_symbols=requested_symbols,
+            coverage=coverage,
+            logs=[ServiceLogEntry(level="info", message="Requested date range contains no A-share trading days")],
+            diagnostics=[
+                {
+                    "code": "no_a_share_trade_dates",
+                    "source": "trading_calendar",
+                    "start_date": start_date,
+                    "end_date": end_date,
+                }
+            ],
+        )
+    effective_start_date, effective_end_date = effective_range
+    frame = _read_existing_daily_bars(cache, warehouse, requested_symbols, effective_start_date, effective_end_date)
     logs: list[ServiceLogEntry] = []
     diagnostics: list[dict[str, Any]] = []
+    if (effective_start_date, effective_end_date) != (start_date, end_date):
+        diagnostics.append(
+            {
+                "code": "a_share_trade_date_range_clipped",
+                "source": "trading_calendar",
+                "requested_start_date": start_date,
+                "requested_end_date": end_date,
+                "start_date": effective_start_date,
+                "end_date": effective_end_date,
+            }
+        )
     failures: list[dict[str, Any]] = []
 
-    skipped_symbols = _symbols_with_complete_capital_flow(frame, requested_symbols, start_date, end_date)
-    _migrate_existing_daily_bars_to_warehouse(frame, warehouse, skipped_symbols, start_date, end_date)
+    skipped_symbols = _symbols_with_complete_capital_flow(frame, requested_symbols, effective_start_date, effective_end_date)
     fetch_symbols = sorted(symbol for symbol in requested_symbols if symbol not in set(skipped_symbols))
     if not fetch_symbols:
         coverage = _safe_coverage(cache, warehouse) if refresh_coverage else []
@@ -365,6 +311,7 @@ def fetch_capital_flow_into_cache(
                 ServiceLogEntry(level="info", message="Capital-flow coverage already complete for requested rows"),
             ],
             diagnostics=[
+                *diagnostics,
                 {
                     "code": "capital_flow_backfill_not_needed",
                     "source": "capital_flow_crawler",
@@ -377,8 +324,8 @@ def fetch_capital_flow_into_cache(
     rows, fetch_logs, fetch_diagnostics, failures = _fetch_capital_flow_rows(
         fetcher=capital_flow_fetcher,
         requested_symbols=fetch_symbols,
-        start_date=start_date,
-        end_date=end_date,
+        start_date=effective_start_date,
+        end_date=effective_end_date,
     )
     logs.extend(fetch_logs)
     diagnostics.extend(fetch_diagnostics)
@@ -420,8 +367,8 @@ def fetch_capital_flow_into_cache(
     standalone_frame = _standalone_daily_bars_from_capital_flow_rows(
         rows,
         fetch_symbols,
-        start_date=start_date,
-        end_date=end_date,
+        start_date=effective_start_date,
+        end_date=effective_end_date,
         existing_frame=frame,
     )
     standalone_rows = int(len(standalone_frame))
@@ -616,27 +563,6 @@ def _capital_flow_incomplete_failures(
 
 def _diagnostics_include_not_needed(diagnostics: Sequence[dict[str, Any]]) -> bool:
     return any(isinstance(item, dict) and item.get("code") == "capital_flow_backfill_not_needed" for item in diagnostics)
-
-
-def _migrate_existing_daily_bars_to_warehouse(
-    frame: pd.DataFrame,
-    warehouse: Warehouse | None,
-    symbols: Sequence[str],
-    start_date: str,
-    end_date: str,
-) -> None:
-    if warehouse is None or frame.empty or not symbols:
-        return
-    selected = {str(symbol) for symbol in symbols}
-    migrate_frame = frame.copy()
-    migrate_frame["symbol"] = migrate_frame["symbol"].astype(str)
-    migrate_frame["trade_date"] = pd.to_datetime(migrate_frame["trade_date"], errors="coerce")
-    migrate_frame = migrate_frame.loc[migrate_frame["symbol"].isin(selected)]
-    migrate_frame = migrate_frame.loc[migrate_frame["trade_date"] >= pd.Timestamp(start_date)]
-    migrate_frame = migrate_frame.loc[migrate_frame["trade_date"] <= pd.Timestamp(end_date)]
-    if migrate_frame.empty:
-        return
-    warehouse.write_daily_bars(migrate_frame)
 
 
 def _read_existing_daily_bars(
@@ -1021,7 +947,9 @@ def _count_merged_main_net_inflow(before: pd.DataFrame, after: pd.DataFrame, *, 
 def _safe_coverage(cache: LocalCache, warehouse: Warehouse | None) -> list[DatasetCoverage]:
     if warehouse is not None:
         try:
-            return warehouse.coverage()
+            coverage = warehouse.coverage()
+            if any(item.symbols > 0 for item in coverage):
+                return coverage
         except Exception:
             pass
     try:
@@ -1045,9 +973,8 @@ def build_service_health(
     started_at: datetime | str | None = None,
     instance_id: str | None = None,
 ) -> ServiceHealth:
-    health_coverage = getattr(warehouse, "health_coverage", None)
     try:
-        coverage = health_coverage() if callable(health_coverage) else warehouse.coverage()
+        coverage = warehouse.coverage()
     except Exception:
         coverage = []
     if not any(item.symbols > 0 for item in coverage):
