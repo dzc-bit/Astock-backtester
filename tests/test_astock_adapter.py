@@ -62,7 +62,7 @@ def test_http_fetcher_maps_astock_data_sources_to_daily_bars():
         if "fflow/daykline/get" in url:
             return {"data": {"klines": ["2024-01-02,2000,1,2,3,4", "2024-01-03,3000,1,2,3,4"]}}
         if "api/qt/stock/get" in url:
-            return {"data": {"f117": 8_800_000_000, "f189": "20200101"}}
+            return {"data": {"f58": "贵州茅台", "f117": 8_800_000_000, "f189": "20200101"}}
         raise AssertionError(f"unexpected url: {url}")
 
     fetcher = HttpAStockFetcher(json_get=fake_json_get)
@@ -78,6 +78,7 @@ def test_http_fetcher_maps_astock_data_sources_to_daily_bars():
     assert result["volume"].tolist() == [1000, 1500]
     assert result["main_net_inflow"].tolist() == [2000.0, 3000.0]
     assert result["float_market_cap"].tolist() == [8_800_000_000, 8_800_000_000]
+    assert result["name"].tolist() == ["贵州茅台", "贵州茅台"]
     assert result["listing_days"].min() > 1000
 
 

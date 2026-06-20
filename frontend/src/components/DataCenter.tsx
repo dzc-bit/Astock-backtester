@@ -23,7 +23,7 @@ type Props = {
 type BusyAction = "refresh" | "fetch" | "capital-flow" | "sample" | "file" | "sync" | null;
 
 const COVERAGE_REFRESH_RETRY_MS = 1200;
-const COVERAGE_REFRESH_MAX_ATTEMPTS = 30;
+const COVERAGE_REFRESH_MAX_ATTEMPTS = 150;
 const A_SHARE_HOLIDAY_RANGES: Record<number, Array<[string, string]>> = {
   2024: [
     ["2024-01-01", "2024-01-01"],

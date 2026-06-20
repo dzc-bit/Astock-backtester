@@ -78,7 +78,7 @@ function MatchedStocksPanel({ dailyMatches }: { dailyMatches?: DailyStrategyMatc
           {items.slice(0, 12).map((stock) => (
             <article className="matched-stock-card" key={`${stock.symbol}-${stock.trade_date ?? ""}`}>
               <div className="matched-stock-id">
-                <strong>{stock.symbol} {stock.name || "--"}</strong>
+                <strong>{stock.name ? `${stock.symbol} ${stock.name}` : stock.symbol}</strong>
               </div>
               <div className="matched-stock-quote">
                 {stock.rank_score != null ? <small>评分 {stock.rank_score.toFixed(2)}</small> : null}

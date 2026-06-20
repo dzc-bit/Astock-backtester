@@ -245,7 +245,7 @@ class SyncJobManager:
                 if frames:
                     pending_frames.extend(frames)
                     pending_rows += sum(int(len(frame)) for frame in frames)
-                    if batch_failed or pending_rows >= self.full_market_write_batch_rows:
+                    if batch_failed or pending_rows >= self.full_market_write_batch_rows or len(batch) >= self.full_market_batch_size:
                         pending_rows = self._flush_full_market_frames(job_id, pending_frames, snapshot)
                 if self._finish_cancelled(job_id):
                     if pending_frames:

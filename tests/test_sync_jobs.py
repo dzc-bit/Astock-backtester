@@ -104,7 +104,7 @@ def test_full_market_job_can_run_asynchronously_and_report_progress(tmp_path):
     assert warehouse.read_daily_bars()["symbol"].nunique() == 3
 
 
-def test_full_market_job_uses_large_write_batches_for_daily_incremental_import(tmp_path):
+def test_full_market_job_flushes_each_symbol_batch_for_visible_progress(tmp_path):
     class CountingWarehouse(Warehouse):
         def __init__(self, cache_root):
             super().__init__(cache_root)
@@ -116,7 +116,9 @@ def test_full_market_job_uses_large_write_batches_for_daily_incremental_import(t
 
     warehouse = CountingWarehouse(tmp_path)
     manager = SyncJobManager(warehouse=warehouse, provider=FakeProvider())
-    symbols = [f"{index:06d}" for index in range(251)]
+    manager.full_market_batch_size = 25
+    manager.full_market_write_batch_rows = 25_000
+    symbols = [f"{index:06d}" for index in range(51)]
 
     status = manager.start_full_market(
         symbols=symbols,
@@ -134,8 +136,8 @@ def test_full_market_job_uses_large_write_batches_for_daily_incremental_import(t
 
     assert eventually is not None
     assert eventually.status == "completed"
-    assert eventually.imported_rows == 251
-    assert warehouse.write_batches == [251]
+    assert eventually.imported_rows == 51
+    assert warehouse.write_batches == [25, 25, 1]
 
 
 def test_async_full_market_job_flushes_successful_rows_after_a_batch_failure(tmp_path):

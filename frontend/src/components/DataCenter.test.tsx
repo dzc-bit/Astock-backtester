@@ -241,6 +241,99 @@ describe("DataCenter", () => {
     expect(apiMocks.loadDataServiceHealth).toHaveBeenCalledTimes(10);
   });
 
+  it("keeps polling after sync completion until the refreshed coverage snapshot arrives", async () => {
+    const user = setupUser();
+    const oldCoverage = [
+      { dataset: "daily_bars", symbols: 5469, start_date: "2015-01-05", end_date: "2026-06-18", missing_rows: 2930 },
+      { dataset: "market_cap", symbols: 5469, start_date: "2015-01-05", end_date: "2026-06-18", missing_rows: 48959 }
+    ];
+    const refreshedCoverage = [
+      { dataset: "daily_bars", symbols: 5469, start_date: "2015-01-05", end_date: "2026-06-18", missing_rows: 2704 },
+      { dataset: "market_cap", symbols: 5469, start_date: "2015-01-05", end_date: "2026-06-18", missing_rows: 48718 }
+    ];
+    const onCoverageChange = vi.fn();
+    apiMocks.loadDataServiceHealth.mockReset();
+    apiMocks.loadDataServiceHealth
+      .mockResolvedValueOnce({ ok: true, cache_path: "C:\\cache", port: 9011, coverage: oldCoverage })
+      .mockResolvedValueOnce({
+        ok: true,
+        cache_path: "C:\\cache",
+        port: 9011,
+        coverage: oldCoverage,
+        coverage_refreshing: true
+      });
+    for (let index = 0; index < 35; index += 1) {
+      apiMocks.loadDataServiceHealth.mockResolvedValueOnce({
+        ok: true,
+        cache_path: "C:\\cache",
+        port: 9011,
+        coverage: oldCoverage,
+        coverage_refreshing: true
+      });
+    }
+    apiMocks.loadDataServiceHealth.mockResolvedValueOnce({
+      ok: true,
+      cache_path: "C:\\cache",
+      port: 9011,
+      coverage: refreshedCoverage,
+      coverage_refreshing: false
+    });
+    apiMocks.startFullMarketSync.mockResolvedValue({
+      job: {
+        job_id: "slow-coverage-sync",
+        mode: "full_market_bootstrap",
+        status: "running",
+        total_symbols: 5532,
+        completed_symbols: 2600,
+        failed_symbols: 0,
+        processed_symbols: 2600,
+        skipped_symbols: 0,
+        imported_rows: 60,
+        returned_rows: 60,
+        filled_missing_rows: 15,
+        current_symbol: "000001",
+        start_date: "2026-06-12",
+        end_date: "2026-06-18",
+        errors: []
+      }
+    });
+    apiMocks.loadSyncJob.mockResolvedValue({
+      job: {
+        job_id: "slow-coverage-sync",
+        mode: "full_market_bootstrap",
+        status: "completed",
+        total_symbols: 5532,
+        completed_symbols: 5532,
+        failed_symbols: 0,
+        processed_symbols: 5532,
+        skipped_symbols: 0,
+        imported_rows: 60,
+        returned_rows: 60,
+        filled_missing_rows: 15,
+        current_symbol: null,
+        start_date: "2026-06-12",
+        end_date: "2026-06-18",
+        errors: []
+      }
+    });
+
+    render(<DataCenter cacheDir=".astock-cache" coverage={oldCoverage} onCoverageChange={onCoverageChange} />);
+
+    await screen.findByText(/http:\/\/127\.0\.0\.1:9011/);
+    await user.click(screen.getByRole("button", { name: "补全缺失数据" }));
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1100);
+    });
+    await waitFor(() => expect(apiMocks.loadSyncJob).toHaveBeenCalledWith("http://127.0.0.1:9011", "slow-coverage-sync"));
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(42 * 1200);
+    });
+
+    await waitFor(() => expect(onCoverageChange).toHaveBeenLastCalledWith(refreshedCoverage));
+  });
+
   it("shows recent service logs when a fetch fails", async () => {
     const user = setupUser();
     apiMocks.fetchDailyBars.mockRejectedValue(new Error("HTTP 400: request_failed - boom"));

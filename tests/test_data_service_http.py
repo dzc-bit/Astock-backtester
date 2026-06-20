@@ -200,6 +200,43 @@ def test_service_health_returns_cached_snapshot_while_coverage_refresh_is_slow(t
         thread.join(timeout=5)
 
 
+def test_service_health_does_not_restart_coverage_refresh_when_snapshot_is_fresh(tmp_path):
+    class CountingWarehouse:
+        def __init__(self):
+            self.calls = 0
+
+        def coverage(self):
+            self.calls += 1
+            time.sleep(0.15)
+            return [
+                DatasetCoverage(dataset="daily_bars", symbols=99, start_date=None, end_date=None),
+                DatasetCoverage(dataset="market_cap", symbols=0, start_date=None, end_date=None),
+                DatasetCoverage(dataset="capital_flow", symbols=0, start_date=None, end_date=None),
+            ]
+
+    warehouse = CountingWarehouse()
+    server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
+    server.state.warehouse = warehouse
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        first = _request_json("GET", f"http://127.0.0.1:{port}/health")
+        assert first["coverage_refreshing"] is True
+        for _ in range(10):
+            time.sleep(0.05)
+            second = _request_json("GET", f"http://127.0.0.1:{port}/health")
+            if not second["coverage_refreshing"]:
+                break
+
+        assert second["coverage_refreshing"] is False
+        assert second["coverage"][0]["symbols"] == 99
+        assert warehouse.calls == 1
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
 def test_service_coverage_endpoint_returns_symbol_items(tmp_path):
     server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -350,6 +387,69 @@ def test_service_uses_provider_symbols_for_full_market_sync_when_not_supplied(tm
 
         assert response["job"]["status"] == "completed"
         assert response["job"]["total_symbols"] == 2
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_service_uses_local_warehouse_symbols_for_full_market_sync_before_provider_list(tmp_path):
+    class SlowProvider:
+        def __init__(self):
+            self.list_called = False
+
+        def list_symbols(self):
+            self.list_called = True
+            raise AssertionError("provider list_symbols should not run when local symbols exist")
+
+    class FakeManager:
+        def run_full_market(self, symbols, start_date, end_date):
+            from datetime import date
+
+            from astock_backtester.models import SyncJobStatus
+
+            assert symbols == ["000001", "000002"]
+            return SyncJobStatus(
+                job_id="job-local-symbols",
+                mode="full_market_bootstrap",
+                status="completed",
+                total_symbols=2,
+                completed_symbols=2,
+                failed_symbols=0,
+                imported_rows=0,
+                start_date=date.fromisoformat(start_date),
+                end_date=date.fromisoformat(end_date),
+            )
+
+    server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
+    server.state.warehouse.write_daily_bars(
+        pd.DataFrame(
+            {
+                "symbol": ["000002", "000001"],
+                "trade_date": ["2026-06-18", "2026-06-18"],
+                "open": [1.0, 1.0],
+                "high": [1.0, 1.0],
+                "low": [1.0, 1.0],
+                "close": [1.0, 1.0],
+                "volume": [1, 1],
+                "float_market_cap": [100.0, 100.0],
+            }
+        )
+    )
+    provider = SlowProvider()
+    server.state.provider = provider
+    server.state.sync_manager = FakeManager()
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        response = _request_json(
+            "POST",
+            f"http://127.0.0.1:{port}/sync/full-market",
+            {"start_date": "2026-06-18", "end_date": "2026-06-18"},
+        )
+
+        assert response["job"]["status"] == "completed"
+        assert provider.list_called is False
     finally:
         server.shutdown()
         thread.join(timeout=5)
@@ -729,6 +829,49 @@ def test_service_backtest_stream_reads_only_custom_symbols_from_warehouse(tmp_pa
 
         assert events[-1]["type"] == "result"
         assert warehouse.read_calls[0]["symbols"] == ["AAA"]
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_service_backtest_stream_reads_warmup_history_before_requested_start(tmp_path, basic_strategy, basic_settings):
+    class RecordingWarehouse(Warehouse):
+        def __init__(self, root):
+            super().__init__(root)
+            self.read_calls = []
+
+        def read_daily_bars(self, *args, **kwargs):
+            self.read_calls.append(kwargs)
+            return super().read_daily_bars(*args, **kwargs)
+
+    warehouse = RecordingWarehouse(tmp_path)
+    warehouse.write_daily_bars(sample_daily_bars())
+    server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
+    server.state.warehouse = warehouse
+    settings = basic_settings.model_copy(
+        update={
+            "start_date": pd.Timestamp("2024-01-08").date(),
+            "end_date": pd.Timestamp("2024-01-08").date(),
+            "stock_pool": "custom",
+            "custom_symbols": ["AAA"],
+        }
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        events = _request_ndjson(
+            f"http://127.0.0.1:{port}/run/backtest/stream",
+            {
+                "strategy": json.loads(basic_strategy.model_dump_json()),
+                "settings": json.loads(settings.model_dump_json()),
+            },
+        )
+
+        assert events[-1]["type"] == "result"
+        assert warehouse.read_calls[0]["symbols"] == ["AAA"]
+        assert warehouse.read_calls[0]["start_date"] < "2024-01-08"
+        assert warehouse.read_calls[0]["end_date"] == "2024-01-08"
     finally:
         server.shutdown()
         thread.join(timeout=5)
@@ -3212,6 +3355,7 @@ def test_service_market_finance_returns_cls_market_board_payload(tmp_path):
 
     server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
     server.state.finance_provider.requester = requester
+    server.state.finance_provider.browser_cookie_getter = lambda: None
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:

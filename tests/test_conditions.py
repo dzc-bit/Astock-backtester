@@ -58,6 +58,21 @@ def test_market_cap_between_uses_signal_day_value():
     assert "float market cap" in result.reason
 
 
+def test_turnover_between_accepts_percent_unit_values():
+    row = pd.Series({"turnover_rate": 4.5})
+    node = ConditionNode(
+        id="turnover",
+        condition_id="turnover_between",
+        params={"min": 0.02, "max": 0.08},
+    )
+
+    result = evaluate_condition(node, row, pd.DataFrame([row]))
+
+    assert result.passed is True
+    assert result.observed_value == 0.045
+    assert "turnover 4.50%" in result.reason
+
+
 def test_capital_flow_rolling_sum_is_date_bound():
     df = enriched_frame()
     row = df[(df["symbol"] == "AAA") & (df["trade_date"] == pd.Timestamp("2024-01-04"))].iloc[0]

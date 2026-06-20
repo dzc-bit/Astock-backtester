@@ -145,6 +145,36 @@ it("shows matched stocks as symbol name score and reasons without ambiguous gain
   expect(card.querySelector(".matched-stock-reasons span")).toBeNull();
 });
 
+it("omits placeholder name when a latest strategy match has no stock name", () => {
+  render(
+    <ResultsOverview
+      result={buildResult({
+        latest_strategy_matches: {
+          signal_date: "2026-05-25",
+          trade_date: "2026-05-25",
+          matches: [
+            {
+              symbol: "000001",
+              name: null,
+              close: 10,
+              change_pct: 0,
+              rank_score: 1.23,
+              reasons: ["custom reason"]
+            }
+          ]
+        }
+      })}
+      onRun={vi.fn()}
+      onOpenRiskAlerts={vi.fn()}
+    />
+  );
+
+  const card = screen.getByRole("article");
+  expect(card).toHaveTextContent("000001");
+  expect(card).not.toHaveTextContent("000001 --");
+  expect(card).not.toHaveTextContent("--");
+});
+
 it("does not display legacy matched stocks without latest strategy matches", () => {
   render(
     <ResultsOverview

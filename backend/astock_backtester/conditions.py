@@ -186,6 +186,8 @@ def _close_below_ma(node: ConditionNode, row: pd.Series, frame: pd.DataFrame) ->
 
 def _turnover_between(node: ConditionNode, row: pd.Series, frame: pd.DataFrame) -> ConditionResult:
     value = float(row["turnover_rate"])
+    if value > 1:
+        value = value / 100
     minimum = float(node.params["min"])
     maximum = float(node.params["max"])
     return ConditionResult(

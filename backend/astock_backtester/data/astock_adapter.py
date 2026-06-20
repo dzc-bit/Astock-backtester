@@ -108,6 +108,9 @@ class HttpAStockFetcher:
         info = self._try_fetch_eastmoney_stock_info(code)
         flow_by_date = {item["date"]: item["main_net"] for item in self._try_fetch_eastmoney_fund_flow_120d(code)}
         bars["main_net_inflow"] = bars["trade_date"].dt.strftime("%Y-%m-%d").map(flow_by_date)
+        name = str(info.get("name") or "").strip()
+        if name:
+            bars["name"] = name
         float_market_cap = _to_float(info.get("float_mcap"), float("nan"))
         if float_market_cap > 0:
             bars["float_market_cap"] = float_market_cap

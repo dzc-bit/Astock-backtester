@@ -44,6 +44,8 @@ from astock_backtester.recommended_strategies import recommended_strategies
 
 
 HEALTH_COVERAGE_WAIT_SECONDS = 0.1
+HEALTH_COVERAGE_REFRESH_TTL_SECONDS = 60.0
+BACKTEST_WARMUP_CALENDAR_DAYS = 120
 
 
 class DataServiceState:
@@ -80,6 +82,7 @@ class DataServiceState:
         self._coverage_lock = Lock()
         self._coverage_refreshing = False
         self._coverage_snapshot = self._empty_coverage()
+        self._coverage_refreshed_at: datetime | None = None
         self.log("info", "local data service started")
 
     def log(self, level: str, message: str) -> None:
@@ -155,9 +158,19 @@ class DataServiceState:
             coverage_refreshing=coverage_refreshing,
         )
 
-    def _start_coverage_refresh(self) -> Event | None:
+    def _has_fresh_coverage_snapshot(self) -> bool:
+        if not any(item.symbols > 0 for item in self._coverage_snapshot):
+            return False
+        if self._coverage_refreshed_at is None:
+            return False
+        age = (datetime.now(timezone.utc) - self._coverage_refreshed_at).total_seconds()
+        return age < HEALTH_COVERAGE_REFRESH_TTL_SECONDS
+
+    def _start_coverage_refresh(self, *, force: bool = False) -> Event | None:
         with self._coverage_lock:
             if self._coverage_refreshing:
+                return None
+            if not force and self._has_fresh_coverage_snapshot():
                 return None
             self._coverage_refreshing = True
         finished = Event()
@@ -167,6 +180,7 @@ class DataServiceState:
                 coverage = self._read_coverage_snapshot()
                 with self._coverage_lock:
                     self._coverage_snapshot = [item.model_copy(deep=True) for item in coverage]
+                    self._coverage_refreshed_at = datetime.now(timezone.utc)
             finally:
                 with self._coverage_lock:
                     self._coverage_refreshing = False
@@ -193,6 +207,21 @@ class DataServiceState:
             DatasetCoverage(dataset="capital_flow", symbols=0, start_date=None, end_date=None),
             DatasetCoverage(dataset="market_cap", symbols=0, start_date=None, end_date=None),
         ]
+
+    def sync_symbols(self, start_date: str | None, end_date: str | None) -> list[str]:
+        try:
+            frame = self.warehouse.read_daily_bars(
+                start_date=start_date,
+                end_date=end_date,
+                require_ohlc=True,
+            )
+            if not frame.empty and "symbol" in frame:
+                symbols = sorted(str(symbol) for symbol in frame["symbol"].dropna().astype(str).unique())
+                if symbols:
+                    return symbols
+        except Exception:
+            pass
+        return self.provider.list_symbols()
 
 
 def _retained_realtime_snapshot(provider: Any, exc: Exception):
@@ -221,6 +250,11 @@ def _require_ohlc_rows(frame: pd.DataFrame) -> pd.DataFrame:
     if frame.empty or not all(column in frame for column in ohlc_columns):
         return pd.DataFrame()
     return frame.dropna(subset=ohlc_columns).reset_index(drop=True)
+
+
+def _backtest_read_start_date(settings: BacktestSettings) -> str:
+    start = pd.Timestamp(settings.start_date) - pd.Timedelta(days=BACKTEST_WARMUP_CALENDAR_DAYS)
+    return start.date().isoformat()
 
 
 class DataServiceServer(ThreadingHTTPServer):
@@ -277,7 +311,7 @@ class DataServiceHandler(BaseHTTPRequestHandler):
         symbols = settings.custom_symbols if settings.stock_pool == "custom" else None
         frame = self.server.state.warehouse.read_daily_bars(
             symbols=symbols,
-            start_date=str(settings.start_date),
+            start_date=_backtest_read_start_date(settings),
             end_date=str(settings.end_date),
             require_ohlc=True,
         )
@@ -443,21 +477,23 @@ class DataServiceHandler(BaseHTTPRequestHandler):
                 )
                 return
             if self.path == "/sync/full-market":
-                symbols = payload.get("symbols") or self.server.state.provider.list_symbols()
+                start_date = payload.get("start_date", "2015-01-01")
+                end_date = payload["end_date"]
+                symbols = payload.get("symbols") or self.server.state.sync_symbols(start_date, end_date)
                 if not symbols:
                     raise ValueError("No symbols available for full-market sync.")
                 start_method = getattr(self.server.state.sync_manager, "start_full_market", None)
                 if callable(start_method):
                     job = start_method(
                         symbols=symbols,
-                        start_date=payload.get("start_date", "2015-01-01"),
-                        end_date=payload["end_date"],
+                        start_date=start_date,
+                        end_date=end_date,
                     )
                 else:
                     job = self.server.state.sync_manager.run_full_market(
                         symbols=symbols,
-                        start_date=payload.get("start_date", "2015-01-01"),
-                        end_date=payload["end_date"],
+                        start_date=start_date,
+                        end_date=end_date,
                     )
                 self.server.state.log(
                     "info",
@@ -480,7 +516,7 @@ class DataServiceHandler(BaseHTTPRequestHandler):
                 )
                 for entry in result.logs:
                     self.server.state.log(entry.level, entry.message)
-                self.server.state._start_coverage_refresh()
+                self.server.state._start_coverage_refresh(force=True)
                 self._send_json(result.model_dump(mode="json"))
                 return
             if self.path == "/fetch/daily-bars":
@@ -495,7 +531,7 @@ class DataServiceHandler(BaseHTTPRequestHandler):
                 )
                 for entry in result.logs:
                     self.server.state.log(entry.level, entry.message)
-                self.server.state._start_coverage_refresh()
+                self.server.state._start_coverage_refresh(force=True)
                 self._send_json(result.model_dump(mode="json"))
                 return
             if self.path == "/fetch/capital-flow":
@@ -555,7 +591,7 @@ class DataServiceHandler(BaseHTTPRequestHandler):
                 )
                 for entry in result.logs:
                     self.server.state.log(entry.level, entry.message)
-                self.server.state._start_coverage_refresh()
+                self.server.state._start_coverage_refresh(force=True)
                 self._send_json(result.model_dump(mode="json"))
                 return
             if self.path.startswith("/sync/jobs/") and self.path.endswith("/cancel"):
