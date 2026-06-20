@@ -7,9 +7,9 @@ Date: 2026-06-08
 This report covers the standalone capital-flow crawler added in
 `backend/astock_backtester/data/capital_flow_crawler.py`.
 
-The crawler is included in the 1.1.1 backend as a low-level provider/crawler boundary. It reads Eastmoney public XHR as the primary source and can switch to a controlled Baidu public fallback when Eastmoney disconnects or under-covers the requested range. It returns structured Python data plus per-symbol `failures` and `diagnostics`. The crawler itself does not write `LocalCache` or `Warehouse`.
+The crawler is included in the backend as a low-level provider/crawler boundary. It reads Eastmoney public XHR as the primary source and can switch to a controlled Baidu public fallback when Eastmoney disconnects or under-covers the requested range. It returns structured Python data plus per-symbol `failures` and `diagnostics`. The crawler itself does not write `LocalCache` or `Warehouse`.
 
-In 1.1.1 the higher-level data service now owns the write boundary:
+The higher-level data service owns the write boundary:
 
 - `POST /fetch/daily-bars` fetches daily bars through the normal provider chain, then uses the capital-flow crawler as the primary `main_net_inflow` source before writing the merged frame.
 - `POST /fetch/capital-flow` backfills missing `main_net_inflow` values. It can write capital-flow-only rows before OHLCV rows exist, so funds can be imported independently of daily K-line data.
@@ -256,7 +256,7 @@ All failures were remote disconnects.
 
 ## Current Conclusion
 
-The crawler can parse and batch-process Eastmoney capital-flow payloads. It is now used in 1.1.1 as the backend capital-flow provider for data-center backfills, while still staying out of direct warehouse writes. The local tests cover:
+The crawler can parse and batch-process Eastmoney capital-flow payloads. It is used as the backend capital-flow provider for data-center backfills, while still staying out of direct warehouse writes. The local tests cover:
 
 - request construction
 - `secid` mapping
