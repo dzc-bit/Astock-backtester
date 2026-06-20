@@ -151,10 +151,24 @@ function syncFinishedMessage(job: SyncJobStatus): string {
   if (job.status === "cancelled") {
     return job.mode === "capital_flow_backfill" ? "资金流补齐已停止" : "全市场下载已停止";
   }
-  const filledText = job.filled_missing_rows && job.filled_missing_rows > 0
-    ? `，确认补缺 ${job.filled_missing_rows} 行`
-    : "";
+  const filledText = syncFilledText(job);
   return `${job.mode === "capital_flow_backfill" ? "资金流补齐完成" : "全市场下载完成"}，写入 ${job.imported_rows} 行${filledText}`;
+}
+
+function syncFilledText(job: SyncJobStatus): string {
+  if (job.mode === "capital_flow_backfill") {
+    return "";
+  }
+  const parts: string[] = [];
+  const dailyRows = job.filled_daily_rows ?? 0;
+  const marketCapRows = job.filled_market_cap_rows ?? 0;
+  if (dailyRows > 0) {
+    parts.push(`补齐日线 ${dailyRows} 行`);
+  }
+  if (marketCapRows > 0) {
+    parts.push(`补齐市值 ${marketCapRows} 行`);
+  }
+  return parts.length > 0 ? `，${parts.join("，")}` : "";
 }
 
 function fieldText(value: unknown): string | null {
@@ -213,13 +227,12 @@ export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceRead
   const [coverageRefreshToken, setCoverageRefreshToken] = useState(0);
   const syncRunning = isSyncRunning(syncJob);
   const syncImportedRows = syncRunning && syncJob ? syncJob.imported_rows : 0;
-  const syncFilledMissingRows = syncRunning && syncJob ? syncJob.filled_missing_rows ?? 0 : 0;
   const busy = busyAction !== null || syncRunning;
   const recentSyncFailures = syncJob ? recentSyncFailureTexts(syncJob) : [];
   const displayCoverage = coverage;
   const syncProgressNote =
     syncImportedRows > 0
-      ? `已写入 ${syncImportedRows} 行${syncFilledMissingRows > 0 ? `，确认补缺 ${syncFilledMissingRows} 行` : ""}，等待覆盖刷新确认`
+      ? `已写入 ${syncImportedRows} 行${syncJob ? syncFilledText(syncJob) : ""}，等待覆盖刷新确认`
       : null;
 
   const symbols = useMemo(
@@ -671,7 +684,7 @@ export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceRead
             </span>
             <span>
               接口返回 {syncJob.returned_rows ?? 0} 行，写入 {syncJob.imported_rows} 行
-              {syncJob.filled_missing_rows && syncJob.filled_missing_rows > 0 ? `，确认补缺 ${syncJob.filled_missing_rows} 行` : ""}
+              {syncFilledText(syncJob)}
             </span>
             {syncJob.current_symbol ? <span>当前 {syncJob.current_symbol}</span> : null}
             {syncJob.last_error ? <span>最近失败: {syncJob.last_error}</span> : null}

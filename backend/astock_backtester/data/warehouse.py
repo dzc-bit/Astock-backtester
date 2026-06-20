@@ -130,6 +130,51 @@ class Warehouse:
             frame = _require_ohlc_rows(frame)
         return frame.sort_values(["symbol", "trade_date"]).reset_index(drop=True)
 
+    def read_daily_symbols(
+        self,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        require_ohlc: bool = False,
+    ) -> list[str]:
+        paths = self._partition_paths_for_range(start_date, end_date)
+        if not paths:
+            return []
+        symbols: set[str] = set()
+        for path in paths:
+            try:
+                available_columns = set(pq.ParquetFile(path).schema_arrow.names)
+            except Exception:
+                continue
+            selected_columns = ["symbol"]
+            if start_date or end_date:
+                selected_columns.append("trade_date")
+            if require_ohlc:
+                selected_columns.extend(OHLC_COLUMNS)
+            selected_columns = [column for column in selected_columns if column in available_columns]
+            if "symbol" not in selected_columns:
+                continue
+            if (start_date or end_date) and "trade_date" not in selected_columns:
+                continue
+            if require_ohlc and not all(column in selected_columns for column in OHLC_COLUMNS):
+                continue
+
+            frame = self._safe_read_parquet(path, columns=selected_columns)
+            if frame.empty:
+                continue
+            if start_date or end_date:
+                frame["trade_date"] = pd.to_datetime(frame["trade_date"], errors="coerce")
+                frame = frame.dropna(subset=["trade_date"])
+                if start_date:
+                    frame = frame[frame["trade_date"] >= pd.Timestamp(start_date)]
+                if end_date:
+                    frame = frame[frame["trade_date"] <= pd.Timestamp(end_date)]
+            if require_ohlc:
+                frame = _require_ohlc_rows(frame)
+            if frame.empty:
+                continue
+            symbols.update(str(symbol) for symbol in frame["symbol"].dropna().astype(str).unique())
+        return sorted(symbol for symbol in symbols if symbol)
+
     def read_latest_daily_bars(self, days: int = 2) -> pd.DataFrame:
         paths = sorted(self.daily_bars_root.glob("year=*/daily_bars.parquet"), reverse=True)
         if not paths:

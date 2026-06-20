@@ -181,6 +181,8 @@ class SyncJobStatus(BaseModel):
     imported_rows: int = 0
     returned_rows: int = 0
     filled_missing_rows: int = 0
+    filled_daily_rows: int = 0
+    filled_market_cap_rows: int = 0
     current_symbol: str | None = None
     start_date: date
     end_date: date

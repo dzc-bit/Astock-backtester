@@ -27,6 +27,16 @@ class DailyCompletenessSnapshot:
 
 
 @dataclass
+class FilledMissingRows:
+    daily_rows: int = 0
+    market_cap_rows: int = 0
+
+    @property
+    def total(self) -> int:
+        return self.daily_rows + self.market_cap_rows
+
+
+@dataclass
 class SyncJobManager:
     warehouse: Warehouse
     provider: object
@@ -69,12 +79,15 @@ class SyncJobManager:
                 frame = self.provider.fetch_daily_bars(symbol, effective_start_date, effective_end_date)
                 if not frame.empty:
                     status.returned_rows += int(len(frame))
-                    status.filled_missing_rows += self._count_full_market_filled_missing_rows(
+                    filled = self._count_full_market_filled_missing_rows(
                         frame,
                         effective_start_date,
                         effective_end_date,
                         snapshot,
                     )
+                    status.filled_missing_rows += filled.total
+                    status.filled_daily_rows += filled.daily_rows
+                    status.filled_market_cap_rows += filled.market_cap_rows
                     self.warehouse.write_daily_bars(frame)
                     status.imported_rows += int(len(frame))
                     status.completed_symbols += 1
@@ -321,7 +334,7 @@ class SyncJobManager:
         frames.clear()
         returned_rows = int(len(merged))
         current = self.get_job(job_id)
-        filled_missing_rows = self._count_full_market_filled_missing_rows(
+        filled = self._count_full_market_filled_missing_rows(
             merged,
             current.start_date.isoformat() if current else None,
             current.end_date.isoformat() if current else None,
@@ -334,7 +347,9 @@ class SyncJobManager:
                 job_id,
                 imported_rows=current.imported_rows + returned_rows,
                 returned_rows=current.returned_rows + returned_rows,
-                filled_missing_rows=current.filled_missing_rows + filled_missing_rows,
+                filled_missing_rows=current.filled_missing_rows + filled.total,
+                filled_daily_rows=current.filled_daily_rows + filled.daily_rows,
+                filled_market_cap_rows=current.filled_market_cap_rows + filled.market_cap_rows,
             )
         return 0
 
@@ -344,12 +359,12 @@ class SyncJobManager:
         start_date: str | None,
         end_date: str | None,
         snapshot: DailyCompletenessSnapshot | None = None,
-    ) -> int:
+    ) -> FilledMissingRows:
         if frame.empty:
-            return 0
+            return FilledMissingRows()
         normalized = normalize_daily_bars(frame)
         if normalized.empty or not {"symbol", "trade_date"}.issubset(normalized.columns):
-            return 0
+            return FilledMissingRows()
         normalized["trade_date"] = pd.to_datetime(normalized["trade_date"], errors="coerce")
         normalized = normalized.dropna(subset=["symbol", "trade_date"])
         if start_date:
@@ -358,29 +373,31 @@ class SyncJobManager:
             normalized = normalized[normalized["trade_date"] <= pd.Timestamp(end_date)]
         normalized = normalized.drop_duplicates(["symbol", "trade_date"], keep="last")
         if normalized.empty:
-            return 0
+            return FilledMissingRows()
         if snapshot is None:
             snapshot = self._daily_completeness_snapshot(start_date, end_date) if start_date and end_date else None
         existing_by_pair = snapshot.existing_by_pair if snapshot else {}
 
-        filled_rows = 0
+        filled = FilledMissingRows()
         for _, row in normalized.iterrows():
             pair = (str(row["symbol"]), pd.Timestamp(row["trade_date"]).normalize())
             existing_row = existing_by_pair.get(pair)
             has_new_ohlc = all(column in row.index and pd.notna(row[column]) for column in OHLC_COLUMNS)
             new_market_cap = row.get("float_market_cap", pd.NA)
             if existing_row is None:
-                if has_new_ohlc or pd.notna(new_market_cap):
-                    filled_rows += 1
+                if has_new_ohlc:
+                    filled.daily_rows += 1
                     existing_by_pair[pair] = row
                 continue
             has_existing_ohlc = all(column in existing_row.index and pd.notna(existing_row[column]) for column in OHLC_COLUMNS)
             existing_market_cap = existing_row.get("float_market_cap", pd.NA)
-            if (not has_existing_ohlc and has_new_ohlc) or (pd.isna(existing_market_cap) and pd.notna(new_market_cap)):
-                filled_rows += 1
+            if not has_existing_ohlc and has_new_ohlc:
+                filled.daily_rows += 1
+            if has_existing_ohlc and pd.isna(existing_market_cap) and pd.notna(new_market_cap):
+                filled.market_cap_rows += 1
             if has_new_ohlc or pd.notna(new_market_cap):
                 existing_by_pair[pair] = row.combine_first(existing_row)
-        return filled_rows
+        return filled
 
     def _run_capital_flow_job(self, job_id: str, symbols: list[str], start_date: str, end_date: str) -> None:
         try:

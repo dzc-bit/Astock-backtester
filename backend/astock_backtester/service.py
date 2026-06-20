@@ -210,15 +210,18 @@ class DataServiceState:
 
     def sync_symbols(self, start_date: str | None, end_date: str | None) -> list[str]:
         try:
-            frame = self.warehouse.read_daily_bars(
-                start_date=start_date,
-                end_date=end_date,
-                require_ohlc=True,
-            )
-            if not frame.empty and "symbol" in frame:
-                symbols = sorted(str(symbol) for symbol in frame["symbol"].dropna().astype(str).unique())
-                if symbols:
-                    return symbols
+            symbols = self.warehouse.read_daily_symbols(require_ohlc=True)
+            if symbols:
+                return symbols
+        except AttributeError:
+            try:
+                frame = self.warehouse.read_daily_bars(require_ohlc=True)
+                if not frame.empty and "symbol" in frame:
+                    symbols = sorted(str(symbol) for symbol in frame["symbol"].dropna().astype(str).unique())
+                    if symbols:
+                        return symbols
+            except Exception:
+                pass
         except Exception:
             pass
         return self.provider.list_symbols()

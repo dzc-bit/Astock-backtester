@@ -59,6 +59,33 @@ def test_warehouse_reads_only_year_partitions_overlapping_requested_dates(tmp_pa
     assert read_paths
 
 
+def test_warehouse_reads_daily_symbols_without_dropping_symbols_missing_recent_dates(tmp_path):
+    warehouse = Warehouse(tmp_path)
+    warehouse.write_daily_bars(
+        pd.DataFrame(
+            {
+                "symbol": ["000001", "000002", "000003"],
+                "trade_date": ["2026-06-18", "2026-06-17", "2026-06-18"],
+                "open": [1.0, 2.0, float("nan")],
+                "high": [1.0, 2.0, float("nan")],
+                "low": [1.0, 2.0, float("nan")],
+                "close": [1.0, 2.0, float("nan")],
+                "volume": [1, 1, 1],
+            }
+        )
+    )
+
+    all_symbols = warehouse.read_daily_symbols(require_ohlc=True)
+    latest_symbols = warehouse.read_daily_symbols(
+        start_date="2026-06-18",
+        end_date="2026-06-18",
+        require_ohlc=True,
+    )
+
+    assert all_symbols == ["000001", "000002"]
+    assert latest_symbols == ["000001"]
+
+
 def test_warehouse_merges_rows_by_symbol_and_trade_date(tmp_path):
     warehouse = Warehouse(tmp_path)
     warehouse.write_daily_bars(_bars())

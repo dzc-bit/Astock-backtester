@@ -82,6 +82,8 @@ export type SyncJobStatus = {
   imported_rows: number;
   returned_rows?: number;
   filled_missing_rows?: number;
+  filled_daily_rows?: number;
+  filled_market_cap_rows?: number;
   current_symbol?: string | null;
   start_date: string;
   end_date: string;

@@ -298,6 +298,8 @@ def test_full_market_job_fetches_symbols_with_missing_market_cap(tmp_path):
     assert status.completed_symbols == 1
     assert status.imported_rows == 1
     assert status.filled_missing_rows == 1
+    assert status.filled_daily_rows == 0
+    assert status.filled_market_cap_rows == 1
     loaded = warehouse.read_daily_bars(symbols=["000001"], start_date="2026-06-18", end_date="2026-06-18")
     assert loaded["float_market_cap"].tolist() == [100.0]
 
@@ -345,8 +347,57 @@ def test_full_market_job_separates_imported_rows_from_filled_missing_rows(tmp_pa
 
     assert status.imported_rows == 2
     assert status.filled_missing_rows == 1
+    assert status.filled_daily_rows == 1
+    assert status.filled_market_cap_rows == 0
     loaded = warehouse.read_daily_bars(symbols=["000001"], start_date="2026-06-17", end_date="2026-06-18")
     assert loaded["trade_date"].dt.strftime("%Y-%m-%d").tolist() == ["2026-06-17", "2026-06-18"]
+
+
+def test_full_market_job_reports_daily_and_market_cap_fills_separately(tmp_path):
+    class TwoSymbolProvider(FakeProvider):
+        def fetch_daily_bars(self, symbol, start_date, end_date):
+            return pd.DataFrame(
+                {
+                    "symbol": [symbol],
+                    "trade_date": ["2026-06-18"],
+                    "open": [1.0],
+                    "high": [1.0],
+                    "low": [1.0],
+                    "close": [1.0],
+                    "volume": [1],
+                    "float_market_cap": [100.0],
+                    "total_market_cap": [120.0],
+                }
+            )
+
+    warehouse = Warehouse(tmp_path)
+    warehouse.write_daily_bars(
+        pd.DataFrame(
+            {
+                "symbol": ["000002"],
+                "trade_date": ["2026-06-18"],
+                "open": [2.0],
+                "high": [2.0],
+                "low": [2.0],
+                "close": [2.0],
+                "volume": [1],
+                "float_market_cap": [float("nan")],
+                "total_market_cap": [float("nan")],
+            }
+        )
+    )
+    manager = SyncJobManager(warehouse=warehouse, provider=TwoSymbolProvider())
+
+    status = manager.run_full_market(
+        symbols=["000001", "000002"],
+        start_date="2026-06-18",
+        end_date="2026-06-18",
+    )
+
+    assert status.imported_rows == 2
+    assert status.filled_daily_rows == 1
+    assert status.filled_market_cap_rows == 1
+    assert status.filled_missing_rows == 2
 
 
 def test_async_full_market_job_reuses_completeness_snapshot_for_gap_counts(tmp_path):
@@ -386,6 +437,8 @@ def test_async_full_market_job_reuses_completeness_snapshot_for_gap_counts(tmp_p
     assert eventually.status == "completed"
     assert eventually.imported_rows == 3
     assert eventually.filled_missing_rows == 3
+    assert eventually.filled_daily_rows == 3
+    assert eventually.filled_market_cap_rows == 0
     assert warehouse.read_daily_calls == 1
 
 

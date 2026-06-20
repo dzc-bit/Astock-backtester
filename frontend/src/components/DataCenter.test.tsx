@@ -291,6 +291,8 @@ describe("DataCenter", () => {
         imported_rows: 60,
         returned_rows: 60,
         filled_missing_rows: 15,
+        filled_daily_rows: 9,
+        filled_market_cap_rows: 6,
         current_symbol: "000001",
         start_date: "2026-06-12",
         end_date: "2026-06-18",
@@ -310,6 +312,8 @@ describe("DataCenter", () => {
         imported_rows: 60,
         returned_rows: 60,
         filled_missing_rows: 15,
+        filled_daily_rows: 9,
+        filled_market_cap_rows: 6,
         current_symbol: null,
         start_date: "2026-06-12",
         end_date: "2026-06-18",
@@ -448,6 +452,8 @@ describe("DataCenter", () => {
         failed_symbols: 0,
         imported_rows: 25,
         filled_missing_rows: 8,
+        filled_daily_rows: 3,
+        filled_market_cap_rows: 5,
         current_symbol: "000002",
         start_date: "2026-06-01",
         end_date: "2026-06-05",
@@ -463,7 +469,7 @@ describe("DataCenter", () => {
     const rows = screen.getAllByRole("row");
     expect(within(rows[1]).getByText("100")).toBeInTheDocument();
     expect(screen.queryByText("75")).not.toBeInTheDocument();
-    expect(screen.getByText("已写入 25 行，确认补缺 8 行，等待覆盖刷新确认")).toBeInTheDocument();
+    expect(screen.getByText("已写入 25 行，补齐日线 3 行，补齐市值 5 行，等待覆盖刷新确认")).toBeInTheDocument();
   });
 
   it("keeps capital-flow missing rows authoritative while syncing", async () => {
@@ -501,6 +507,8 @@ describe("DataCenter", () => {
         skipped_symbols: 0,
         imported_rows: 25,
         filled_missing_rows: 11,
+        filled_daily_rows: 0,
+        filled_market_cap_rows: 0,
         returned_rows: 30,
         current_symbol: "000003",
         start_date: "2026-06-01",
@@ -520,7 +528,7 @@ describe("DataCenter", () => {
     expect(within(rows[1]).getByText("100")).toBeInTheDocument();
     expect(within(rows[2]).getByText("60")).toBeInTheDocument();
     expect(screen.queryByText("35")).not.toBeInTheDocument();
-    expect(screen.getByText("已写入 25 行，确认补缺 11 行，等待覆盖刷新确认")).toBeInTheDocument();
+    expect(screen.getByText("已写入 25 行，等待覆盖刷新确认")).toBeInTheDocument();
   });
 
   it("does not refresh health immediately after starting an async capital-flow backfill", async () => {

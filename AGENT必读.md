@@ -29,7 +29,7 @@ git branch --show-current
 https://github.com/dzc-bit/Astock-backtester.git
 ```
 
-保护已有未提交修改。不要覆盖无关文件，不要清理、删除、迁移 `D:\New project 6\运行产物`。版本号统一跟随桌面端当前版本，当前为 `1.2.4`，除非用户明确要求改版本。
+保护已有未提交修改。不要覆盖无关文件，不要清理、删除、迁移 `D:\New project 6\运行产物`。版本号统一跟随桌面端当前版本，当前为 `1.3.0`，除非用户明确要求改版本。
 
 ## 2. 绝对不要碰错边界
 
@@ -170,7 +170,9 @@ docs/capital-flow-crawler-report.md
 
 `/coverage/daily-bars` 必须使用 A 股交易日历。不要用普通工作日直接判断缺失交易日。
 
-数据中心的“补全缺失数据”默认是全市场补齐：股票代码为空时走 `/sync/full-market`；只有用户显式输入股票代码时，才走指定股票 `/fetch/daily-bars`。覆盖表的 `missing_rows` 只能来自刷新后的真实仓库 coverage，前端绝不能用本次 `imported_rows` 抵扣或估算缺失行，否则会出现“任务没补完却显示缺失为 0”的错误。同步进度里 `imported_rows` 表示接口返回并写入/合并的行，不等于缺口减少；如需展示实际补缺，使用后端 `filled_missing_rows`，并标注“等待覆盖刷新确认”。
+数据中心的“补全缺失数据”默认是全市场补齐：股票代码为空时走 `/sync/full-market`；只有用户显式输入股票代码时，才走指定股票 `/fetch/daily-bars`。覆盖表的 `missing_rows` 只能来自刷新后的真实仓库 coverage，前端绝不能用本次 `imported_rows` 抵扣或估算缺失行，否则会出现“任务没补完却显示缺失为 0”的错误。同步进度里 `imported_rows` 表示接口返回并写入/合并的行，不等于缺口减少；全市场日线任务的实际补缺必须拆分展示后端 `filled_daily_rows` 和 `filled_market_cap_rows`，`filled_missing_rows` 仅保留为兼容总数，不能当成单一日线缺口。
+
+全市场日线同步的股票池必须优先来自本地仓库全量 OHLC 股票集合，不能用本次补齐日期范围过滤后的股票集合。否则缺最新交易日 OHLC 的股票会在任务创建时被排除，出现覆盖表显示仍有缺口但同步任务总数小于本地股票数的问题。
 
 全市场日线同步的跳过条件必须同时满足 OHLC 完整和 `float_market_cap` 完整。不能因为某只股票 OHLC 已有就跳过它的市值缺口；市值缺口应随 `/sync/full-market` 或指定 `/fetch/daily-bars` 的日线补齐一并修复。后端计算 `filled_missing_rows` 时应复用任务开始时的仓库完整性快照，避免每个写入批次重复扫仓拖慢数据中心。
 

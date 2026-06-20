@@ -455,6 +455,63 @@ def test_service_uses_local_warehouse_symbols_for_full_market_sync_before_provid
         thread.join(timeout=5)
 
 
+def test_service_uses_all_local_warehouse_symbols_for_recent_full_market_sync(tmp_path):
+    class SlowProvider:
+        def list_symbols(self):
+            raise AssertionError("provider list_symbols should not run when local symbols exist")
+
+    class FakeManager:
+        def run_full_market(self, symbols, start_date, end_date):
+            from datetime import date
+
+            from astock_backtester.models import SyncJobStatus
+
+            assert symbols == ["000001", "000002"]
+            return SyncJobStatus(
+                job_id="job-all-local-symbols",
+                mode="full_market_bootstrap",
+                status="completed",
+                total_symbols=2,
+                completed_symbols=2,
+                imported_rows=0,
+                start_date=date.fromisoformat(start_date),
+                end_date=date.fromisoformat(end_date),
+            )
+
+    server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
+    server.state.warehouse.write_daily_bars(
+        pd.DataFrame(
+            {
+                "symbol": ["000001", "000002"],
+                "trade_date": ["2026-06-18", "2026-06-17"],
+                "open": [1.0, 2.0],
+                "high": [1.0, 2.0],
+                "low": [1.0, 2.0],
+                "close": [1.0, 2.0],
+                "volume": [1, 1],
+                "float_market_cap": [100.0, 200.0],
+            }
+        )
+    )
+    server.state.provider = SlowProvider()
+    server.state.sync_manager = FakeManager()
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        response = _request_json(
+            "POST",
+            f"http://127.0.0.1:{port}/sync/full-market",
+            {"start_date": "2026-06-18", "end_date": "2026-06-18"},
+        )
+
+        assert response["job"]["status"] == "completed"
+        assert response["job"]["total_symbols"] == 2
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
 def test_service_coverage_endpoint_reads_warehouse_when_cache_is_empty(tmp_path):
     server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
     server.state.warehouse.write_daily_bars(sample_daily_bars())
