@@ -35,6 +35,15 @@ REQUIRED_BASE_COLUMNS = {
 
 BOARD_LOT_SIZE = 100
 
+CANDIDATE_SCORE_WEIGHTS = {
+    "volume_ratio": 0.25,
+    "return": 0.25,
+    "main_net_inflow": 0.20,
+    "turnover_rate": 0.15,
+    "volume": 0.10,
+    "market_cap": 0.05,
+}
+
 CAPITAL_FLOW_CONDITIONS = {
     "capital_flow_n_day_sum_at_least",
     "capital_flow_today_at_least",
@@ -262,6 +271,57 @@ def _stable_symbol_tiebreaker(row: pd.Series) -> float:
     return int.from_bytes(digest, "big") / float(2**64 - 1)
 
 
+def _normalise_candidate_scores(values: list[float], *, higher_is_better: bool = True) -> list[float]:
+    if not values:
+        return []
+    numeric_values = [0.0 if pd.isna(value) else float(value) for value in values]
+    lowest = min(numeric_values)
+    highest = max(numeric_values)
+    if highest == lowest:
+        return [0.5 for _ in numeric_values]
+    scores = [(value - lowest) / (highest - lowest) for value in numeric_values]
+    if higher_is_better:
+        return scores
+    return [1.0 - score for score in scores]
+
+
+def _market_cap_balance_score(rows: list[pd.Series]) -> list[float]:
+    caps = [_numeric_value(row, "float_market_cap") for row in rows]
+    if not caps:
+        return []
+    positive_caps = [cap for cap in caps if cap > 0]
+    if not positive_caps:
+        return [0.5 for _ in caps]
+    median_cap = pd.Series(positive_caps).median()
+    distances = [abs(cap - median_cap) if cap > 0 else median_cap for cap in caps]
+    return _normalise_candidate_scores(distances, higher_is_better=False)
+
+
+def _score_entry_candidates(candidates: list[tuple[pd.Series, list[str]]]) -> list[tuple[pd.Series, list[str], float]]:
+    rows = [candidate[0] for candidate in candidates]
+    score_columns = {
+        "volume_ratio": [_max_numeric_prefix(row, "volume_ratio_") for row in rows],
+        "return": [_max_numeric_prefix(row, "return_") for row in rows],
+        "main_net_inflow": [_numeric_value(row, "main_net_inflow") for row in rows],
+        "turnover_rate": [_numeric_value(row, "turnover_rate") for row in rows],
+        "volume": [_numeric_value(row, "volume") for row in rows],
+        "market_cap": _market_cap_balance_score(rows),
+    }
+    normalised = {
+        key: values if key == "market_cap" else _normalise_candidate_scores(values)
+        for key, values in score_columns.items()
+    }
+    scored: list[tuple[pd.Series, list[str], float]] = []
+    for index, (row, reasons) in enumerate(candidates):
+        score = sum(
+            CANDIDATE_SCORE_WEIGHTS[key] * normalised[key][index]
+            for key in CANDIDATE_SCORE_WEIGHTS
+            if index < len(normalised[key])
+        )
+        scored.append((row, reasons, round(score * 100, 4)))
+    return scored
+
+
 def _optional_string(row: pd.Series, column: str) -> str | None:
     if column not in row.index:
         return None
@@ -425,7 +485,7 @@ def _candidate_rank(row: pd.Series) -> tuple[float, float, float, float, float, 
 
 def _build_daily_strategy_matches(
     signal_date: pd.Timestamp,
-    candidates: list[tuple[pd.Series, list[str]]],
+    candidates: list[tuple[pd.Series, list[str], float]],
 ) -> DailyStrategyMatches:
     signal_day = pd.Timestamp(signal_date).date()
     matches = [
@@ -437,9 +497,9 @@ def _build_daily_strategy_matches(
             close=float(row["close"]),
             change_pct=_optional_float(row, "change_pct"),
             reasons=list(reasons),
-            rank_score=_candidate_rank(row)[0],
+            rank_score=rank_score,
         )
-        for row, reasons in candidates
+        for row, reasons, rank_score in candidates
     ]
     return DailyStrategyMatches(signal_date=signal_day, trade_date=signal_day, matches=matches)
 
@@ -449,7 +509,7 @@ def _scan_entry_candidates(
     data: pd.DataFrame,
     strategy: StrategyConfig,
     settings: BacktestSettings,
-) -> list[tuple[pd.Series, list[str]]]:
+) -> list[tuple[pd.Series, list[str], float]]:
     candidates: list[tuple[pd.Series, list[str]]] = []
     candidate_rows = today[today["_passes_entry_prefilter"]]
     for _, row in candidate_rows.iterrows():
@@ -466,8 +526,12 @@ def _scan_entry_candidates(
         if entry_ok:
             candidates.append((row, market_reasons + entry_reasons))
 
-    candidates.sort(key=lambda candidate: _candidate_rank(candidate[0]), reverse=True)
-    return candidates
+    scored_candidates = _score_entry_candidates(candidates)
+    scored_candidates.sort(
+        key=lambda candidate: (candidate[2], *_candidate_rank(candidate[0])),
+        reverse=True,
+    )
+    return scored_candidates
 
 
 def _build_metrics(
@@ -699,8 +763,11 @@ def run_backtest(
         if next_date is not None and len(open_positions) < settings.max_positions:
             current_market_value = _mark_to_market_with_last_close(open_positions, today_by_symbol, last_close_by_symbol)
             current_equity = cash + current_market_value
-            for row, reasons in candidates[: settings.max_daily_buys]:
+            opened_today = 0
+            for row, reasons, _rank_score in candidates:
                 if len(open_positions) >= settings.max_positions:
+                    break
+                if opened_today >= settings.max_daily_buys:
                     break
                 buy_tuple = rows_by_date_symbol.get(next_date, {}).get(str(row["symbol"]))
                 if buy_tuple is None:
@@ -743,6 +810,7 @@ def run_backtest(
                     continue
                 buy_amount = shares * cost_per_share
                 cash -= buy_amount
+                opened_today += 1
                 opened_trade = Trade(
                     symbol=str(row["symbol"]),
                     buy_signal_date=pd.Timestamp(signal_date).date(),

@@ -162,7 +162,7 @@ def test_backtest_result_reports_latest_trade_day_strategy_matches_without_daily
     assert str(first_match.trade_date) == "2024-01-03"
     assert first_match.close == 11.0
     assert first_match.change_pct == 0.03
-    assert first_match.rank_score == 1.5
+    assert first_match.rank_score == 67.5
     assert any("float market cap" in reason for reason in first_match.reasons)
 
 
@@ -498,6 +498,146 @@ def test_backtest_candidate_selection_is_not_biased_to_low_symbol_codes():
 
     assert result.trades
     assert result.trades[0].symbol == "300001"
+
+
+def test_backtest_candidate_selection_prefers_balanced_internal_score():
+    dates = pd.to_datetime(["2024-01-02", "2024-01-03", "2024-01-04"])
+    rows = []
+    for symbol, name, volume_ratio, return_2d, turnover_rate, volume, main_net_inflow, market_cap in [
+        ("600001", "Spike", 9.0, 0.01, 0.01, 1_000, 10_000, 1_000_000_000),
+        ("600002", "Balanced", 3.0, 0.09, 0.09, 9_000, 90_000, 5_000_000_000),
+    ]:
+        for date in dates:
+            rows.append(
+                {
+                    "symbol": symbol,
+                    "name": name,
+                    "trade_date": date,
+                    "open": 10.0,
+                    "high": 10.2,
+                    "low": 9.8,
+                    "close": 10.0,
+                    "change_pct": return_2d,
+                    "volume": volume,
+                    "is_suspended": False,
+                    "listing_days": 500,
+                    "float_market_cap": market_cap,
+                    "main_net_inflow": main_net_inflow,
+                    "market_rising_ratio": 1.0,
+                    "volume_ratio_2d": volume_ratio,
+                    "return_2d": return_2d,
+                    "turnover_rate": turnover_rate,
+                    "ma_3": 10.0,
+                }
+            )
+    strategy = StrategyConfig(
+        name="balanced-ranking",
+        market_filters=[
+            ConditionNode(id="market", condition_id="market_rising_ratio_at_least", params={"min_ratio": 0.5})
+        ],
+        entry_groups=[
+            ConditionGroup(
+                id="entry",
+                operator=ConditionOperator.AND,
+                conditions=[
+                    ConditionNode(
+                        id="cap",
+                        condition_id="market_cap_between",
+                        params={"min": 500_000_000, "max": 10_000_000_000},
+                    ),
+                    ConditionNode(
+                        id="volume",
+                        condition_id="volume_ratio_between",
+                        params={"window": 2, "min": 1.0, "max": 10.0},
+                    ),
+                ],
+            )
+        ],
+        exit_rules=[],
+    )
+    settings = BacktestSettings(
+        start_date=dates[0].date(),
+        end_date=dates[-1].date(),
+        initial_cash=100_000,
+        max_positions=1,
+        max_daily_buys=1,
+        min_listing_days=0,
+    )
+
+    result = run_backtest(pd.DataFrame(rows), strategy, settings)
+
+    assert result.trades
+    assert result.trades[0].symbol == "600002"
+    assert result.latest_strategy_matches is not None
+    assert [match.symbol for match in result.latest_strategy_matches.matches] == ["600002", "600001"]
+    assert result.latest_strategy_matches.matches[0].rank_score > result.latest_strategy_matches.matches[1].rank_score
+
+
+def test_backtest_continues_past_blocked_top_candidates_to_fill_daily_buys():
+    dates = pd.to_datetime(["2024-01-02", "2024-01-03", "2024-01-04"])
+    rows = []
+    for symbol, volume_ratio, open_price, pre_close in [
+        ("600001", 9.0, 11.0, 10.0),
+        ("600002", 5.0, 10.0, 10.0),
+    ]:
+        for date in dates:
+            rows.append(
+                {
+                    "symbol": symbol,
+                    "trade_date": date,
+                    "open": open_price if date == dates[1] else 10.0,
+                    "high": 11.0 if symbol == "600001" and date == dates[1] else 10.2,
+                    "low": 9.8,
+                    "close": 10.0,
+                    "pre_close": pre_close,
+                    "volume": 5_000,
+                    "is_suspended": False,
+                    "listing_days": 500,
+                    "float_market_cap": 2_000_000_000,
+                    "main_net_inflow": 0.0,
+                    "market_rising_ratio": 1.0,
+                    "volume_ratio_2d": volume_ratio,
+                    "return_2d": 0.02,
+                    "turnover_rate": 0.02,
+                    "ma_3": 10.0,
+                }
+            )
+    strategy = StrategyConfig(
+        name="fill-after-blocked",
+        market_filters=[
+            ConditionNode(id="market", condition_id="market_rising_ratio_at_least", params={"min_ratio": 0.5})
+        ],
+        entry_groups=[
+            ConditionGroup(
+                id="entry",
+                operator=ConditionOperator.AND,
+                conditions=[
+                    ConditionNode(
+                        id="cap",
+                        condition_id="market_cap_between",
+                        params={"min": 1_000_000_000, "max": 3_000_000_000},
+                    )
+                ],
+            )
+        ],
+        exit_rules=[],
+    )
+    settings = BacktestSettings(
+        start_date=dates[0].date(),
+        end_date=dates[-1].date(),
+        initial_cash=100_000,
+        max_positions=1,
+        max_daily_buys=1,
+        min_listing_days=0,
+        limit_up_blocks_buy=True,
+    )
+    events = []
+
+    result = run_backtest(pd.DataFrame(rows), strategy, settings, on_event=lambda event: events.append(event))
+
+    assert [trade.symbol for trade in result.trades if trade.shares > 0] == ["600002"]
+    blocked = [event["trade"] for event in events if event["type"] == "trade_blocked"]
+    assert [trade.symbol for trade in blocked] == ["600001"]
 
 
 def test_backtest_emits_progress_and_open_trade_events_before_close(basic_strategy, basic_settings):
