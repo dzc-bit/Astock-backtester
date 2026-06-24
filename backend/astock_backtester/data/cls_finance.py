@@ -377,6 +377,7 @@ def _read_ths_browser_cookie() -> str | None:
     if node is None:
         return None
     worker = _resolve_ths_cookie_worker()
+    startup_kwargs = _subprocess_startup_kwargs()
     try:
         if worker is not None:
             completed = subprocess.run(
@@ -386,6 +387,7 @@ def _read_ths_browser_cookie() -> str | None:
                 capture_output=True,
                 text=True,
                 timeout=8,
+                **startup_kwargs,
             )
         else:
             script = _ths_browser_cookie_script()
@@ -396,6 +398,7 @@ def _read_ths_browser_cookie() -> str | None:
                 capture_output=True,
                 text=True,
                 timeout=8,
+                **startup_kwargs,
             )
     except Exception:
         return None
@@ -403,6 +406,18 @@ def _read_ths_browser_cookie() -> str | None:
     if completed.returncode != 0 or "v=" not in cookie:
         return None
     return cookie
+
+
+def _subprocess_startup_kwargs() -> dict[str, object]:
+    if sys.platform != "win32":
+        return {}
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startupinfo.wShowWindow = subprocess.SW_HIDE
+    return {
+        "creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000),
+        "startupinfo": startupinfo,
+    }
 
 
 def _sidecar_runtime_dir() -> Path | None:

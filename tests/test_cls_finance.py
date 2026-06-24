@@ -3,7 +3,11 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from astock_backtester.data.cls_finance import _resolve_node_executable, _resolve_ths_cookie_worker
+from astock_backtester.data.cls_finance import (
+    _resolve_node_executable,
+    _resolve_ths_cookie_worker,
+    _subprocess_startup_kwargs,
+)
 
 
 def test_resolves_ths_cookie_runtime_next_to_frozen_sidecar(tmp_path, monkeypatch):
@@ -19,3 +23,13 @@ def test_resolves_ths_cookie_runtime_next_to_frozen_sidecar(tmp_path, monkeypatc
 
     assert _resolve_node_executable() == str(node)
     assert _resolve_ths_cookie_worker() == worker
+
+
+def test_ths_cookie_worker_hides_console_on_windows(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "win32")
+
+    kwargs = _subprocess_startup_kwargs()
+
+    assert kwargs["creationflags"] == 0x08000000
+    assert kwargs["startupinfo"].dwFlags & 1
+    assert kwargs["startupinfo"].wShowWindow == 0

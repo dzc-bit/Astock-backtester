@@ -1,6 +1,8 @@
 use serde::Deserialize;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -437,6 +439,16 @@ fn packaged_service_relative_path() -> PathBuf {
     PathBuf::from("bin").join("astock-data-service.exe")
 }
 
+#[cfg(windows)]
+pub fn hidden_process_creation_flags() -> u32 {
+    0x08000000
+}
+
+#[cfg(not(windows))]
+pub fn hidden_process_creation_flags() -> u32 {
+    0
+}
+
 fn packaged_service_path(app: &AppHandle) -> Result<PathBuf, String> {
     let resource_dir = app
         .path()
@@ -557,6 +569,10 @@ impl DataServiceManager {
             return Err("packaged localhost data service was not found".to_string());
         };
         command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped());
+        #[cfg(windows)]
+        {
+            command.creation_flags(hidden_process_creation_flags());
+        }
         let mut child = command
             .spawn()
             .map_err(|err| format!("failed to start localhost data service: {err}"))?;
@@ -611,7 +627,7 @@ mod tests {
     use super::{
         build_service_args, cached_service_matches, choose_populated_cache_dir, health_request,
         file_sha256, packaged_service_relative_path, read_service_lock, service_health_request,
-        locked_service_expected_identity, require_recreated_service_lock, service_lock_path, should_use_packaged_service,
+        hidden_process_creation_flags, locked_service_expected_identity, require_recreated_service_lock, service_lock_path, should_use_packaged_service,
         stop_child_after_start_failure, try_create_service_lock, runtime_data_candidates_from,
         validate_service_health, workspace_cache_candidates_from_root, ServiceLockPayload,
     };
@@ -889,6 +905,26 @@ mod tests {
     fn packaged_service_relative_path_targets_bundled_sidecar() {
         let path = packaged_service_relative_path();
         assert_eq!(path, std::path::PathBuf::from("bin").join("astock-data-service.exe"));
+    }
+
+    #[test]
+    fn windows_sidecar_processes_are_started_without_visible_console() {
+        if cfg!(windows) {
+            assert_eq!(hidden_process_creation_flags(), 0x08000000);
+        } else {
+            assert_eq!(hidden_process_creation_flags(), 0);
+        }
+    }
+
+    #[test]
+    fn service_spawn_applies_hidden_process_flags() {
+        let source = include_str!("service_manager.rs");
+        let needle = [".creation_flags", "(hidden_process_creation_flags())"].concat();
+
+        assert!(
+            source.contains(&needle),
+            "data service sidecar spawn should suppress Windows console windows"
+        );
     }
 
     #[test]

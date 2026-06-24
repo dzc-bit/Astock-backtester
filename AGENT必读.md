@@ -262,6 +262,7 @@ D:\New project 6\运行产物\签名密钥\a-stock-backtester-v017.key
 - `latest.json` 必须由本次真实 `.sig` 生成。
 - 不手改、不伪造、不复用旧 `latest.json` 或旧 `.sig`。
 - 覆盖安装后比较安装目录 sidecar 和工作区 sidecar SHA256。
+- 桌面端 release 主程序必须使用 Windows GUI subsystem（`windows_subsystem = "windows"`），启动 `astock-data-service.exe` 时必须加 `CREATE_NO_WINDOW`；同花顺评分用 Node/jsdom 生成 cookie 时也必须隐藏 `node.exe` 控制台窗口。用户双击桌面端不应看到黑色命令行窗口。
 - 覆盖安装只使用本轮构建产物；源码版本、Tauri 版本和安装包文件名不一致时，先修正版本并重新构建，不复用旧包。
 - GitHub Release 的 updater 安装包资产名必须用 ASCII，例如 `Astock-backtester_1.3.0_x64-setup.exe`；用 `scripts\write-latest-json.ps1 -AssetName 本地中文安装包名 -ReleaseAssetName ASCII资产名` 生成 `latest.json`，并确认 `latest.json.platforms.windows-x86_64.url` 指向真实上传的 ASCII 资产名。
 - `release-assets\latest.json` 是本地发布暂存文件，生成后用于上传 GitHub Release，不提交到仓库；发布完成或验证结束后本地可删除。

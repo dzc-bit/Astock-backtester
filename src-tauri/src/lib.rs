@@ -94,4 +94,14 @@ mod tests {
         assert_eq!(window["label"].as_str(), Some("main"));
         assert_eq!(window["create"].as_bool(), Some(false));
     }
+
+    #[test]
+    fn release_windows_binary_uses_gui_subsystem() {
+        let main_rs = include_str!("main.rs");
+
+        assert!(
+            main_rs.contains(r#"cfg_attr(all(not(debug_assertions), target_os = "windows"), windows_subsystem = "windows")"#),
+            "release Windows builds should not allocate a console window"
+        );
+    }
 }
