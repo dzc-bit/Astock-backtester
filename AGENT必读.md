@@ -1,6 +1,6 @@
 # AGENT 必读
 
-新 agent 只需要读这一份即可开始。`README.md` 和 `docs/*` 只作补充背景，不是接手前置条件。`项目说明书.md` 是本地开发说明，不上传 GitHub，也不作为 agent 接手依据。
+新 agent 只需要读这一份即可开始。`README.md` 和 `docs/*` 只作补充背景，不是接手前置条件。`项目说明书.md`、`应用创新类项目报告.md` 和 `演示文档操作提醒.md` 都是本地人工材料，不上传 GitHub，也不作为 agent 接手依据。
 
 这份文档把前面花了很久才踩明白的坑收进来：路径、未提交改动、实时行情完整性、爬虫边界、资金流位置、A 股交易日历、签名更新、安装后 sidecar 验证和临时产物清理。
 
@@ -29,7 +29,7 @@ git branch --show-current
 https://github.com/dzc-bit/Astock-backtester.git
 ```
 
-保护已有未提交修改。不要覆盖无关文件，不要清理、删除、迁移 `D:\New project 6\运行产物`。版本号统一跟随桌面端当前版本，当前为 `1.3.0`，除非用户明确要求改版本。
+保护已有未提交修改。不要覆盖无关文件，不要清理、删除、迁移 `D:\New project 6\运行产物`。版本号统一跟随桌面端当前版本，当前为 `1.3.1`，除非用户明确要求改版本。
 
 ## 2. 绝对不要碰错边界
 
@@ -37,6 +37,7 @@ https://github.com/dzc-bit/Astock-backtester.git
 - 不改无关模块，不做顺手重构。
 - 不清理整个 `运行产物`。
 - 不提交私钥、安装包、`.sig`、临时 `latest.json`、探针脚本、日志或运行数据。
+- 不提交本地人工说明和演示材料：`项目说明书.md`、`应用创新类项目报告.md`、`演示文档操作提醒.md`。
 - 前端只消费后端结构化响应，不写上游 URL、爬虫逻辑或字段清洗规则。
 - 清理临时文件时不要直接执行 `git clean -fdX` 或等价的一把梭命令，因为它会把 `.tools`、`node_modules`、`src-tauri\bin`、`src-tauri\target` 和 `运行产物` 这类仍需保留的本地工具、构建产物或用户数据也列入删除范围；只点名删除 `.pytest_cache`、`.ruff_cache`、`.tmp`、`.pyinstaller`、`__pycache__` 等明确临时缓存。
 
@@ -327,4 +328,4 @@ git branch --show-current
 - 临时 `latest.json`
 - 无归属 untracked 文件
 
-只提交源码、测试、文档和必要版本文件。
+只提交源码、测试、文档和必要版本文件。提交前额外确认 `项目说明书.md`、`应用创新类项目报告.md`、`演示文档操作提醒.md` 仍为 ignored/untracked，不能进入 GitHub。

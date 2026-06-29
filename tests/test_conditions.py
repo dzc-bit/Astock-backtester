@@ -32,11 +32,14 @@ def test_registry_contains_core_first_version_conditions():
 
     assert "market_cap_between" in ids
     assert "capital_flow_n_day_sum_at_least" in ids
+    assert "capital_flow_n_day_sum_at_most" in ids
     assert "capital_flow_today_at_least" in ids
+    assert "capital_flow_today_at_most" in ids
     assert "capital_flow_n_day_positive_count_at_least" in ids
     assert "market_rising_ratio_at_least" in ids
     assert "close_above_ma" in ids
     assert "macd_histogram_at_least" in ids
+    assert "macd_dead_cross" in ids
     assert "volume_ratio_between" in ids
     assert "past_return_between" in ids
     assert "breakout_above_n_day_high" in ids
@@ -191,6 +194,53 @@ def test_macd_histogram_condition_evaluates_registered_indicator():
     assert "MACD histogram" in result.reason
 
 
+def test_macd_dead_cross_condition_uses_prior_signal_cross():
+    df = pd.DataFrame(
+        {
+            "symbol": ["AAA", "AAA", "AAA"],
+            "trade_date": pd.to_datetime(["2024-01-02", "2024-01-03", "2024-01-04"]),
+            "macd_dif": [0.08, 0.04, -0.02],
+            "macd_dea": [0.03, 0.04, 0.01],
+        }
+    )
+    row = df[df["trade_date"] == pd.Timestamp("2024-01-04")].iloc[0]
+    node = ConditionNode(id="macd-dead", condition_id="macd_dead_cross", params={})
+
+    result = evaluate_condition(node, row, df)
+
+    assert result.passed is True
+    assert result.observed_value is not None
+    assert "MACD dead cross" in result.reason
+
+
+def test_capital_flow_outflow_conditions_support_today_and_rolling_sum():
+    df = pd.DataFrame(
+        {
+            "symbol": ["AAA", "AAA", "AAA"],
+            "trade_date": pd.to_datetime(["2024-01-02", "2024-01-03", "2024-01-04"]),
+            "main_net_inflow": [800_000.0, -1_200_000.0, -900_000.0],
+            "main_net_inflow_sum_3d": [float("nan"), float("nan"), -1_300_000.0],
+        }
+    )
+    row = df[df["trade_date"] == pd.Timestamp("2024-01-04")].iloc[0]
+
+    today = evaluate_condition(
+        ConditionNode(id="flow-today-out", condition_id="capital_flow_today_at_most", params={"max": 0}),
+        row,
+        df,
+    )
+    rolling = evaluate_condition(
+        ConditionNode(id="flow-rolling-out", condition_id="capital_flow_n_day_sum_at_most", params={"window": 3, "max": 0}),
+        row,
+        df,
+    )
+
+    assert today.passed is True
+    assert today.observed_value == -900_000
+    assert rolling.passed is True
+    assert rolling.observed_value == -1_300_000
+
+
 def test_past_return_between_supports_prior_gain_ranges():
     df = enriched_frame()
     row = df[(df["symbol"] == "AAA") & (df["trade_date"] == pd.Timestamp("2024-01-04"))].iloc[0]
@@ -297,6 +347,28 @@ def test_user_written_exit_condition_supports_breaking_prior_low_text():
     assert result.normalized_text == "突破20日最低"
     assert "跌破20日低点" in result.examples
     assert exit_condition_examples()
+
+
+def test_user_written_exit_condition_supports_return_dead_cross_and_capital_outflow_text():
+    weak_return = validate_exit_condition_text("近五日涨幅小于3%")
+    dead_cross = validate_exit_condition_text("MACD死叉")
+    rolling_outflow = validate_exit_condition_text("近3日主力净流出")
+    today_outflow = validate_exit_condition_text("资金流出")
+
+    assert weak_return.ok is True
+    assert weak_return.condition is not None
+    assert weak_return.condition.condition_id == "past_return_at_most"
+    assert weak_return.condition.params == {"window": 5, "max": 0.03}
+    assert dead_cross.ok is True
+    assert dead_cross.condition is not None
+    assert dead_cross.condition.condition_id == "macd_dead_cross"
+    assert rolling_outflow.ok is True
+    assert rolling_outflow.condition is not None
+    assert rolling_outflow.condition.condition_id == "capital_flow_n_day_sum_at_most"
+    assert rolling_outflow.condition.params == {"window": 3, "max": 0.0}
+    assert today_outflow.ok is True
+    assert today_outflow.condition is not None
+    assert today_outflow.condition.condition_id == "capital_flow_today_at_most"
 
 
 def test_user_written_exit_condition_has_exit_specific_error_message():

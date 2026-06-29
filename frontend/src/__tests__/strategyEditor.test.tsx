@@ -21,7 +21,8 @@ const apiMocks = vi.hoisted(() => ({
   loadSyncJob: vi.fn(),
   runBacktestStreamWithDataService: vi.fn(),
   runConfiguredBacktest: vi.fn(),
-  validateConditionExpression: vi.fn()
+  validateConditionExpression: vi.fn(),
+  validateStockSymbols: vi.fn()
 }));
 
 vi.mock("../api", () => apiMocks);
@@ -84,6 +85,13 @@ describe("A 股回测工作台界面", () => {
     });
     apiMocks.loadDailyBarsCoverage.mockResolvedValue({
       items: []
+    });
+    apiMocks.validateStockSymbols.mockResolvedValue({
+      ok: true,
+      valid_symbols: ["600519", "000001"],
+      invalid_symbols: [],
+      normalized_symbols: ["600519", "000001"],
+      source: "local-warehouse"
     });
     apiMocks.loadDataServiceHealth.mockResolvedValue({
       ok: true,
@@ -649,6 +657,52 @@ describe("A 股回测工作台界面", () => {
     expect(marketCapRules).toHaveLength(1);
   });
 
+  it("places clickable entry templates under entry rules without the less-than-12 template", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByText("日线行情");
+    const entryRules = screen.getByRole("heading", { name: "入场规则" }).closest(".entry-rules-panel");
+    expect(entryRules).not.toBeNull();
+    expect(entryRules).toHaveTextContent("入场条件模板");
+    expect(entryRules).toHaveTextContent("点击可套用");
+    expect(entryRules).toHaveTextContent("收盘价站上20日均线");
+    expect(entryRules).toHaveTextContent("近5日涨幅0%到12%");
+    expect(entryRules).not.toHaveTextContent("近5日涨幅小于12%");
+
+    await user.click(within(entryRules as HTMLElement).getByRole("button", { name: "套用入场条件：收盘价站上20日均线" }));
+    expect(screen.getByLabelText("新增条件表达式")).toHaveValue("收盘价站上20日均线");
+  });
+
+  it("keeps exit templates beside the exit rule editor and applies them to the exit input", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByText("日线行情");
+    const exitRules = screen.getByRole("heading", { name: "离场规则" }).closest(".exit-rules-panel");
+    expect(exitRules).not.toBeNull();
+    expect(exitRules).toHaveTextContent("离场条件模板");
+    expect(exitRules).toHaveTextContent("点击可套用");
+    expect(exitRules).toHaveTextContent("收盘价跌破3日均线");
+    expect(exitRules).toHaveTextContent("跌破20日低点");
+    expect(exitRules).toHaveTextContent("近5日涨幅小于3%");
+    expect(exitRules).toHaveTextContent("MACD死叉");
+    expect(exitRules).toHaveTextContent("近3日主力净流出");
+    expect(exitRules).not.toHaveTextContent("近5日涨幅0%到12%");
+
+    await user.click(within(exitRules as HTMLElement).getByRole("button", { name: "套用离场条件：MACD死叉" }));
+    expect(screen.getByLabelText("新增离场条件表达式")).toHaveValue("MACD死叉");
+  });
+
+  it("labels position size as a total portfolio cap", async () => {
+    render(<App />);
+
+    await screen.findByText("日线行情");
+
+    expect(screen.getByLabelText("总仓位上限（%）")).toBeInTheDocument();
+    expect(screen.queryByLabelText("单股仓位（%）")).not.toBeInTheDocument();
+  });
+
   it("uses controlled selectors to build strategy and backtest settings", async () => {
     const user = userEvent.setup();
     render(<App />);
@@ -930,14 +984,14 @@ describe("A 股回测工作台界面", () => {
     expect(screen.getByLabelText("固定持仓天数").tagName).toBe("INPUT");
   });
 
-  it("lets the user set single-stock position sizing and shows it in the trades table", async () => {
+  it("lets the user set total position cap and shows it in the trades table", async () => {
     const user = userEvent.setup();
     render(<App />);
 
     await screen.findByRole("heading", { name: "A股策略回测工作台" });
     await user.selectOptions(screen.getByLabelText("仓位模式"), "fixed_ratio");
-    await user.clear(screen.getByLabelText("单股仓位（%）"));
-    await user.type(screen.getByLabelText("单股仓位（%）"), "20");
+    await user.clear(screen.getByLabelText("总仓位上限（%）"));
+    await user.type(screen.getByLabelText("总仓位上限（%）"), "20");
     await user.click(screen.getByRole("button", { name: "运行历史回测" }));
 
     expect(apiMocks.runBacktestStreamWithDataService).toHaveBeenCalledWith(
@@ -1322,6 +1376,28 @@ describe("A 股回测工作台界面", () => {
     expect(screen.getByText(/可用范围 2024-01-02 至 2026-05-30/)).toBeInTheDocument();
   });
 
+  it("checks custom stock symbols before running and blocks unreal A-share codes", async () => {
+    const user = userEvent.setup();
+    apiMocks.runBacktestStreamWithDataService.mockClear();
+    apiMocks.validateStockSymbols.mockResolvedValueOnce({
+      ok: false,
+      valid_symbols: ["600519"],
+      invalid_symbols: ["999999"],
+      normalized_symbols: ["600519", "999999"],
+      source: "local-warehouse"
+    });
+    render(<App />);
+
+    await screen.findByText("日线行情");
+    await user.selectOptions(screen.getByLabelText("股票池"), "custom");
+    await user.type(screen.getByLabelText("自选代码"), "600519,999999");
+    await user.click(screen.getByRole("button", { name: "运行历史回测" }));
+
+    expect(apiMocks.validateStockSymbols).toHaveBeenCalledWith("http://127.0.0.1:9010", ["600519", "999999"]);
+    expect(await screen.findByRole("alert")).toHaveTextContent("自选代码包含无效股票代码：999999");
+    expect(apiMocks.runBacktestStreamWithDataService).not.toHaveBeenCalled();
+  });
+
   it("runs backtests through the latest local daily coverage date until dates are edited", async () => {
     const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
     vi.setSystemTime(new Date("2026-06-20T10:00:00+08:00"));
@@ -1475,6 +1551,51 @@ describe("A 股回测工作台界面", () => {
     const exitRules = screen.getByRole("heading", { name: "离场规则" }).closest(".exit-rules-panel");
     expect(exitRules).not.toBeNull();
     expect(exitRules?.textContent?.match(/卖出触发：收盘价跌破3日均线/g) ?? []).toHaveLength(1);
+  });
+
+  it("clears stale exit success messages when the next exit validation fails", async () => {
+    const user = userEvent.setup();
+    apiMocks.validateConditionExpression.mockImplementation(async (_baseUrl, text, mode) => {
+      if (text === "MACD死叉" && mode === "exit") {
+        return {
+          ok: true,
+          normalized_text: text,
+          errors: [],
+          examples: ["MACD死叉"],
+          condition: {
+            id: "custom-macd-dead-cross",
+            condition_id: "macd_dead_cross",
+            enabled: true,
+            params: {},
+            data_lag_days: 0,
+            expression: text
+          }
+        };
+      }
+      return {
+        ok: false,
+        normalized_text: text,
+        condition: null,
+        errors: [{ code: "unrecognized_exit_condition", message: "无法识别离场条件，请参考样例改写。" }],
+        examples: ["MACD死叉"]
+      };
+    });
+    render(<App />);
+
+    await screen.findByText("日线行情");
+    await user.clear(screen.getByLabelText("新增离场条件表达式"));
+    await user.type(screen.getByLabelText("新增离场条件表达式"), "MACD死叉");
+    await user.click(screen.getByRole("button", { name: "校验离场条件" }));
+    await screen.findByText(/离场可识别/);
+    await user.click(screen.getByRole("button", { name: "添加离场条件" }));
+    expect(screen.getByText("已加入离场条件。")).toBeInTheDocument();
+
+    await user.clear(screen.getByLabelText("新增离场条件表达式"));
+    await user.type(screen.getByLabelText("新增离场条件表达式"), "近五日涨幅大于100%");
+    await user.click(screen.getByRole("button", { name: "校验离场条件" }));
+
+    expect(await screen.findByText("无法识别离场条件，请参考样例改写。")).toBeInTheDocument();
+    expect(screen.queryByText("已加入离场条件。")).not.toBeInTheDocument();
   });
 
   it("shows exit rules as readable sell rules without backend parser fields", async () => {

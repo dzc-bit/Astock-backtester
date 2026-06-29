@@ -1,3 +1,4 @@
+import { invoke } from "@tauri-apps/api/core";
 import { ExternalLink, FileText, Sunrise, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { ReactNode, RefObject } from "react";
@@ -80,8 +81,37 @@ function hasMeaningfulTableValue(value: string | null | undefined): boolean {
   return normalized.length > 0 && normalized !== "--" && normalized !== "-";
 }
 
-function hasSourceUrl(briefing: MarketBriefingResponse): briefing is MarketBriefingResponse & { source_url: string } {
-  return Boolean(briefing.source_url?.trim());
+function isTauriRuntime(): boolean {
+  return Boolean((window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__);
+}
+
+function isTonghuashunArticleUrl(url: string | null | undefined): url is string {
+  const normalizedUrl = url?.trim();
+  if (!normalizedUrl) {
+    return false;
+  }
+  try {
+    const parsed = new URL(normalizedUrl);
+    return parsed.protocol === "https:" && parsed.hostname === "stock.10jqka.com.cn" && parsed.pathname.endsWith(".shtml");
+  } catch {
+    return false;
+  }
+}
+
+function sourceArticleUrl(briefing: MarketBriefingResponse): string | null {
+  const sourceUrl = briefing.source_url?.trim();
+  return isTonghuashunArticleUrl(sourceUrl) ? sourceUrl : null;
+}
+
+async function openOriginalArticleUrl(url: string): Promise<void> {
+  if (!isTonghuashunArticleUrl(url)) {
+    return;
+  }
+  if (isTauriRuntime()) {
+    await invoke("open_ths_original_url", { url });
+    return;
+  }
+  window.open(url, "_blank", "noopener,noreferrer");
 }
 
 function linkUrlOrSource(linkUrl: string | null | undefined, briefing: MarketBriefingResponse): string | null {
@@ -89,8 +119,7 @@ function linkUrlOrSource(linkUrl: string | null | undefined, briefing: MarketBri
   if (normalizedLink) {
     return normalizedLink;
   }
-  const sourceUrl = briefing.source_url?.trim();
-  return sourceUrl || null;
+  return sourceArticleUrl(briefing);
 }
 
 function BriefingCard({
@@ -112,6 +141,7 @@ function BriefingCard({
   onOpen: () => void;
   openButtonRef: RefObject<HTMLButtonElement>;
 }) {
+  const originalUrl = briefing ? sourceArticleUrl(briefing) : null;
   return (
     <article className={`ths-briefing-card ${accentClass}`}>
       <div className="ths-briefing-icon" aria-hidden="true">
@@ -135,10 +165,18 @@ function BriefingCard({
                 >
                   查看全文
                 </button>
-                {hasSourceUrl(briefing) ? (
-                  <a href={briefing.source_url} target="_blank" rel="noreferrer" aria-label={`打开${title}原文`}>
+                {originalUrl ? (
+                  <button
+                    className="icon-button ths-source-link"
+                    type="button"
+                    onClick={() => {
+                      void openOriginalArticleUrl(originalUrl);
+                    }}
+                    aria-label={`打开同花顺原文：${title}`}
+                    title="打开同花顺原文"
+                  >
                     <ExternalLink size={15} aria-hidden="true" />
-                  </a>
+                  </button>
                 ) : (
                   <button
                     className="icon-button ths-disabled-link"
@@ -227,6 +265,7 @@ function BriefingDialog({
   onClose: () => void;
 }) {
   const closeButtonRef = useRef<HTMLButtonElement>(null);
+  const originalUrl = sourceArticleUrl(briefing);
 
   useEffect(() => {
     closeButtonRef.current?.focus();
@@ -257,11 +296,17 @@ function BriefingDialog({
         <div className="ths-briefing-modal-meta">
           <span>来源 {briefing.source}</span>
           <span>更新 {formatTime(briefing.updated_at)}</span>
-          {hasSourceUrl(briefing) ? (
-            <a href={briefing.source_url} target="_blank" rel="noreferrer">
+          {originalUrl ? (
+            <button
+              className="secondary-button compact"
+              type="button"
+              onClick={() => {
+                void openOriginalArticleUrl(originalUrl);
+              }}
+            >
               打开同花顺原文
               <ExternalLink size={14} aria-hidden="true" />
-            </a>
+            </button>
           ) : (
             <button className="secondary-button compact" type="button" disabled aria-label="暂无同花顺原文链接">
               暂无原文链接

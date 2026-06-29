@@ -275,6 +275,34 @@ def test_market_briefing_provider_expands_article_links_into_full_text_sections(
     assert "今日机器人板块午后持续冲高" in (response.sections[1].content or "")
     assert "明日重点观察成交额能否继续放大" in (response.sections[1].content or "")
     assert response.sections[1].links[0].url == "http://stock.10jqka.com.cn/20260605/c677247169.shtml"
+    assert response.source_url == "https://stock.10jqka.com.cn/20260605/c677247169.shtml"
+
+
+def test_market_briefing_provider_uses_article_detail_url_as_original_source():
+    index_html = """
+    <html><body>
+      <div id="fpzj">A股复盘摘要</div>
+      <div class="fp_item_hd"><h2>同花顺解盘</h2></div>
+      <div class="fp_item_cnt">
+        <a href="/20260605/c677247169.shtml" title="A股收评：机器人走强">A股收评</a>
+      </div>
+    </body></html>
+    """
+    detail_html = """
+    <html><body>
+      <h1>A股收评：机器人走强</h1>
+      <article><p>今日机器人板块午后持续冲高。</p></article>
+    </body></html>
+    """
+
+    def requester(url: str, **kwargs):
+        if url.endswith("c677247169.shtml"):
+            return FakeHtmlResponse(detail_html)
+        return FakeHtmlResponse(index_html)
+
+    response = MarketBriefingProvider(requester=requester).latest_fupan()
+
+    assert response.source_url == "https://stock.10jqka.com.cn/20260605/c677247169.shtml"
 
 
 def test_market_briefing_provider_reports_article_expansion_failures_in_diagnostics():

@@ -1,8 +1,10 @@
 use serde_json::Value;
 use std::fs;
 use std::io::Write;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use tauri::{AppHandle, State};
 
@@ -118,6 +120,61 @@ fn write_saved_strategies_to(root: &Path, items: &Value) -> Result<(), String> {
     Ok(())
 }
 
+fn is_ths_original_article_url(url: &str) -> bool {
+    const PREFIX: &str = "https://stock.10jqka.com.cn/";
+    let path = match url.strip_prefix(PREFIX) {
+        Some(path) => path,
+        None => return false,
+    };
+    !path.is_empty()
+        && path.ends_with(".shtml")
+        && path
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'.' | b'_' | b'-'))
+}
+
+fn external_open_command(url: &str) -> Command {
+    #[cfg(target_os = "windows")]
+    {
+        let mut command = Command::new("rundll32.exe");
+        command.args(["url.dll,FileProtocolHandler", url]);
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        command.creation_flags(CREATE_NO_WINDOW);
+        command
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let mut command = Command::new("open");
+        command.arg(url);
+        command
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let mut command = Command::new("xdg-open");
+        command.arg(url);
+        command
+    }
+}
+
+fn open_external_url(url: &str) -> Result<(), String> {
+    let mut command = external_open_command(url);
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|err| format!("failed to open Tonghuashun original article: {err}"))?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn open_ths_original_url(url: String) -> Result<(), String> {
+    if !is_ths_original_article_url(&url) {
+        return Err("only Tonghuashun original article detail urls can be opened".to_string());
+    }
+    open_external_url(&url)
+}
+
 #[tauri::command]
 pub fn ensure_data_service(
     app: AppHandle,
@@ -185,8 +242,8 @@ pub fn workspace_diagnostics() -> Result<WorkspaceDiagnostics, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        read_saved_strategies_from, saved_strategies_path_from_root, workspace_diagnostics_from_root,
-        write_saved_strategies_to,
+        is_ths_original_article_url, read_saved_strategies_from, saved_strategies_path_from_root,
+        workspace_diagnostics_from_root, write_saved_strategies_to,
     };
     use serde_json::json;
     use std::fs;
@@ -198,6 +255,37 @@ mod tests {
             .expect("system time should be valid")
             .as_nanos();
         std::env::temp_dir().join(format!("astock-backtester-{name}-{suffix}"))
+    }
+
+    #[test]
+    fn ths_original_article_url_accepts_real_detail_pages() {
+        assert!(is_ths_original_article_url(
+            "https://stock.10jqka.com.cn/20260605/c677247169.shtml"
+        ));
+    }
+
+    #[test]
+    fn ths_original_article_url_rejects_column_pages_and_other_hosts() {
+        assert!(!is_ths_original_article_url("https://stock.10jqka.com.cn/fupan/"));
+        assert!(!is_ths_original_article_url(
+            "https://example.com/20260605/c677247169.shtml"
+        ));
+        assert!(!is_ths_original_article_url(
+            "http://stock.10jqka.com.cn/20260605/c677247169.shtml"
+        ));
+    }
+
+    #[test]
+    fn ths_original_article_url_rejects_shell_sensitive_characters() {
+        assert!(!is_ths_original_article_url(
+            "https://stock.10jqka.com.cn/20260605/c677247169.shtml?x=1"
+        ));
+        assert!(!is_ths_original_article_url(
+            "https://stock.10jqka.com.cn/20260605/c677247169.shtml & calc"
+        ));
+        assert!(!is_ths_original_article_url(
+            "https://stock.10jqka.com.cn/20260605/c677247169.shtml\n"
+        ));
     }
 
     #[test]

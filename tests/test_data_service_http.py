@@ -3862,6 +3862,49 @@ def test_service_validates_user_written_exit_condition_with_mode(tmp_path):
         thread.join(timeout=5)
 
 
+def test_service_validates_custom_stock_symbols_against_local_warehouse_first(tmp_path):
+    class ProviderShouldNotRun:
+        def list_symbols(self):
+            raise AssertionError("provider list_symbols should not run when local warehouse symbols exist")
+
+    server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
+    server.state.provider = ProviderShouldNotRun()
+    server.state.warehouse.write_daily_bars(
+        pd.DataFrame(
+            {
+                "symbol": ["600519", "000001"],
+                "trade_date": ["2026-06-18", "2026-06-18"],
+                "open": [1.0, 1.0],
+                "high": [1.0, 1.0],
+                "low": [1.0, 1.0],
+                "close": [1.0, 1.0],
+                "volume": [1, 1],
+                "float_market_cap": [100.0, 100.0],
+            }
+        )
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        response = _request_json(
+            "POST",
+            f"http://127.0.0.1:{port}/symbols/validate",
+            {"symbols": ["SH600519", "000001.SZ", "999999"]},
+        )
+
+        assert response == {
+            "ok": False,
+            "valid_symbols": ["600519", "000001"],
+            "invalid_symbols": ["999999"],
+            "normalized_symbols": ["600519", "000001", "999999"],
+            "source": "local-warehouse",
+        }
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
 def test_service_returns_recommended_strategies(tmp_path):
     import pandas as pd
 

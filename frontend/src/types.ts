@@ -421,6 +421,14 @@ export type ConditionValidationResult = {
   examples: string[];
 };
 
+export type StockSymbolValidationResult = {
+  ok: boolean;
+  valid_symbols: string[];
+  invalid_symbols: string[];
+  normalized_symbols: string[];
+  source: string;
+};
+
 export type RecommendedStrategy = {
   id: string;
   name: string;

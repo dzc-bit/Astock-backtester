@@ -46,7 +46,9 @@ CANDIDATE_SCORE_WEIGHTS = {
 
 CAPITAL_FLOW_CONDITIONS = {
     "capital_flow_n_day_sum_at_least",
+    "capital_flow_n_day_sum_at_most",
     "capital_flow_today_at_least",
+    "capital_flow_today_at_most",
     "capital_flow_n_day_positive_count_at_least",
 }
 
@@ -173,8 +175,16 @@ def _filter_mask_for_node(node, data: pd.DataFrame) -> pd.Series:
         if column in data:
             return data[column] >= float(params["min"])
         return mask
+    if condition_id == "capital_flow_n_day_sum_at_most":
+        window = int(params["window"])
+        column = f"main_net_inflow_sum_{window}d"
+        if column in data:
+            return data[column] <= float(params["max"])
+        return mask
     if condition_id == "capital_flow_today_at_least":
         return data["main_net_inflow"] >= float(params["min"])
+    if condition_id == "capital_flow_today_at_most":
+        return data["main_net_inflow"] <= float(params["max"])
     if condition_id == "capital_flow_n_day_positive_count_at_least":
         window = int(params["window"])
         column = f"main_net_inflow_positive_count_{window}d"
@@ -202,6 +212,10 @@ def _filter_mask_for_node(node, data: pd.DataFrame) -> pd.Series:
         return data[f"volume_ratio_{window}d"].between(float(params["min"]), float(params["max"]), inclusive="both")
     if condition_id == "macd_histogram_at_least":
         return data["macd_hist"] >= float(params["min"])
+    if condition_id == "macd_dead_cross":
+        previous_dif = data.groupby("symbol")["macd_dif"].shift(1)
+        previous_dea = data.groupby("symbol")["macd_dea"].shift(1)
+        return (previous_dif >= previous_dea) & (data["macd_dif"] < data["macd_dea"])
     if condition_id == "breakout_above_n_day_high":
         window = int(params["window"])
         column = f"prior_high_{window}d"
@@ -551,7 +565,7 @@ def _build_metrics(
     closed = [trade for trade in trades if trade.pnl_pct is not None]
     wins = [trade for trade in closed if (trade.pnl_pct or 0) > 0]
     avg_trade = sum(trade.pnl_pct or 0 for trade in closed) / len(closed) if closed else 0.0
-    position_pcts = [trade.actual_position_pct for trade in closed]
+    position_pcts = [point.market_value / point.equity for point in equity_curve if point.equity]
     max_drawdown = min((point.drawdown_pct for point in equity_curve), default=0.0)
     return BacktestMetrics(
         total_return_pct=total_return,
@@ -586,11 +600,15 @@ def _planned_entry_amount(
     cash: float,
     open_positions: list[Trade],
     current_equity: float,
+    current_market_value: float,
 ) -> float:
+    total_target_amount = current_equity * settings.position_size_pct
+    remaining_capacity = max(0.0, total_target_amount - current_market_value)
     if settings.position_sizing_mode == "fixed_ratio":
-        return min(cash, current_equity * settings.position_size_pct)
+        per_trade_target = total_target_amount / max(1, settings.max_positions)
+        return min(cash, remaining_capacity, per_trade_target)
     remaining_slots = max(1, settings.max_positions - len(open_positions))
-    return cash / remaining_slots
+    return min(cash, remaining_capacity / remaining_slots if remaining_slots else 0.0)
 
 
 def run_backtest(
@@ -769,11 +787,13 @@ def run_backtest(
                     break
                 if opened_today >= settings.max_daily_buys:
                     break
+                if any(position.symbol == str(row["symbol"]) for position in open_positions):
+                    continue
                 buy_tuple = rows_by_date_symbol.get(next_date, {}).get(str(row["symbol"]))
                 if buy_tuple is None:
                     continue
                 buy = pd.Series(buy_tuple._asdict())
-                planned_amount = _planned_entry_amount(settings, cash, open_positions, current_equity)
+                planned_amount = _planned_entry_amount(settings, cash, open_positions, current_equity, current_market_value)
                 if bool(buy["is_suspended"]):
                     blocked_reason = f"买入日停牌，未买入：{buy['symbol']}"
                     blocked_trade = _blocked_trade(
@@ -824,6 +844,8 @@ def run_backtest(
                     buy_reason=reasons,
                 )
                 open_positions.append(opened_trade)
+                current_market_value += executed_buy_price * shares
+                current_equity = cash + current_market_value
                 if on_event is not None:
                     on_event({"type": "trade_opened", "trade": opened_trade})
 

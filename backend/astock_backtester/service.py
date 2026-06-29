@@ -29,7 +29,13 @@ from astock_backtester.data.operations import (
     fetch_daily_bars_into_cache,
     import_daily_bars_into_cache,
 )
-from astock_backtester.data.providers import ADataProvider, AkshareProvider, CompositeProvider, HttpAStockProvider
+from astock_backtester.data.providers import (
+    ADataProvider,
+    AkshareProvider,
+    CompositeProvider,
+    HttpAStockProvider,
+    normalize_symbol,
+)
 from astock_backtester.data.market_commentary import MarketCommentaryProvider, build_local_brief_commentary
 from astock_backtester.data.news import MarketNewsProvider
 from astock_backtester.data.news_summary import MarketNewsSummaryProvider
@@ -39,7 +45,14 @@ from astock_backtester.data.sync import SyncJobManager
 from astock_backtester.data.warehouse import Warehouse
 from astock_backtester.backtest_runner import run_configured_backtest
 from astock_backtester.condition_parser import validate_condition_text, validate_exit_condition_text
-from astock_backtester.models import BacktestSettings, ClsFinanceResponse, DatasetCoverage, ServiceHealth, StrategyConfig
+from astock_backtester.models import (
+    BacktestSettings,
+    ClsFinanceResponse,
+    DatasetCoverage,
+    ServiceHealth,
+    StockSymbolValidationResult,
+    StrategyConfig,
+)
 from astock_backtester.recommended_strategies import recommended_strategies
 
 
@@ -225,6 +238,33 @@ class DataServiceState:
         except Exception:
             pass
         return self.provider.list_symbols()
+
+    def validate_stock_symbols(self, symbols: list[str]) -> StockSymbolValidationResult:
+        normalized_symbols = [normalize_symbol(symbol) for symbol in symbols]
+        normalized_symbols = [symbol for symbol in normalized_symbols if symbol]
+        source = "local-warehouse"
+        known_symbols: list[str] = []
+        try:
+            known_symbols = self.warehouse.read_daily_symbols(require_ohlc=True)
+        except Exception:
+            known_symbols = []
+        if not known_symbols:
+            source = "provider-list"
+            try:
+                known_symbols = self.provider.list_symbols()
+            except Exception:
+                known_symbols = []
+
+        known = {normalize_symbol(symbol) for symbol in known_symbols}
+        valid_symbols = [symbol for symbol in normalized_symbols if symbol in known]
+        invalid_symbols = [symbol for symbol in normalized_symbols if symbol not in known]
+        return StockSymbolValidationResult(
+            ok=not invalid_symbols,
+            valid_symbols=valid_symbols,
+            invalid_symbols=invalid_symbols,
+            normalized_symbols=normalized_symbols,
+            source=source,
+        )
 
 
 def _retained_realtime_snapshot(provider: Any, exc: Exception):
@@ -619,6 +659,13 @@ class DataServiceHandler(BaseHTTPRequestHandler):
                     result = validate_exit_condition_text(str(payload.get("text", "")))
                 else:
                     result = validate_condition_text(str(payload.get("text", "")))
+                self._send_json(result.model_dump(mode="json"))
+                return
+            if self.path == "/symbols/validate":
+                symbols = payload.get("symbols") or []
+                if not isinstance(symbols, list):
+                    raise ValueError("symbols must be a list")
+                result = self.server.state.validate_stock_symbols([str(symbol) for symbol in symbols])
                 self._send_json(result.model_dump(mode="json"))
                 return
             self._send_json({"code": "not_found", "message": self.path}, HTTPStatus.NOT_FOUND)

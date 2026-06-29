@@ -16,6 +16,7 @@ import type {
   RealtimeMarketSnapshot,
   RecommendedStrategiesResponse,
   RiskAlertsResponse,
+  StockSymbolValidationResult,
   StrategyConfig,
   SyncJobStatus
 } from "./types";
@@ -562,15 +563,80 @@ export async function validateConditionExpression(
         examples: ["收盘价跌破3日均线", "跌破20日低点", "突破20日最低"]
       };
     }
+    if (mode === "exit" && text.trim() === "近5日涨幅小于3%") {
+      return {
+        ok: true,
+        normalized_text: text.trim(),
+        condition: {
+          id: "expr-past-return-at-most",
+          condition_id: "past_return_at_most",
+          enabled: true,
+          params: { window: 5, max: 0.03 },
+          data_lag_days: 0,
+          expression: text.trim()
+        },
+        errors: [],
+        examples: ["近5日涨幅小于3%", "MACD死叉", "近3日主力净流出"]
+      };
+    }
+    if (mode === "exit" && text.trim() === "MACD死叉") {
+      return {
+        ok: true,
+        normalized_text: text.trim(),
+        condition: {
+          id: "expr-macd-dead-cross",
+          condition_id: "macd_dead_cross",
+          enabled: true,
+          params: {},
+          data_lag_days: 0,
+          expression: text.trim()
+        },
+        errors: [],
+        examples: ["近5日涨幅小于3%", "MACD死叉", "近3日主力净流出"]
+      };
+    }
+    if (mode === "exit" && ["资金流出", "近3日主力净流出"].includes(text.trim())) {
+      const rolling = text.trim() === "近3日主力净流出";
+      return {
+        ok: true,
+        normalized_text: text.trim(),
+        condition: {
+          id: rolling ? "expr-capital-flow-out-3d" : "expr-capital-flow-out-today",
+          condition_id: rolling ? "capital_flow_n_day_sum_at_most" : "capital_flow_today_at_most",
+          enabled: true,
+          params: rolling ? { window: 3, max: 0 } : { max: 0 },
+          data_lag_days: 0,
+          expression: text.trim()
+        },
+        errors: [],
+        examples: ["近5日涨幅小于3%", "MACD死叉", "近3日主力净流出"]
+      };
+    }
     return {
       ok: false,
       normalized_text: text.trim(),
       condition: null,
       errors: [{ code: "unrecognized_condition", message: mode === "exit" ? "无法识别离场条件，请参考样例改写。" : "无法识别条件，请参考样例改写。" }],
-      examples: mode === "exit" ? ["收盘价跌破3日均线", "跌破20日低点"] : ["收盘价站上20日均线", "量比2日介于1.2到2.5"]
+      examples: mode === "exit" ? ["收盘价跌破3日均线", "近5日涨幅小于3%", "MACD死叉", "近3日主力净流出"] : ["收盘价站上20日均线", "量比2日介于1.2到2.5"]
     };
   }
   return serviceFetch<ConditionValidationResult>(baseUrl, "/strategy/conditions/validate", { text, mode });
+}
+
+export async function validateStockSymbols(baseUrl: string, symbols: string[]): Promise<StockSymbolValidationResult> {
+  const normalizedSymbols = symbols.map((symbol) => symbol.trim()).filter(Boolean);
+  if (!isTauriRuntime()) {
+    const known = new Set(["600519", "000001"]);
+    const valid = normalizedSymbols.filter((symbol) => known.has(symbol));
+    return {
+      ok: valid.length === normalizedSymbols.length,
+      valid_symbols: valid,
+      invalid_symbols: normalizedSymbols.filter((symbol) => !known.has(symbol)),
+      normalized_symbols: normalizedSymbols,
+      source: "browser-preview"
+    };
+  }
+  return serviceFetch<StockSymbolValidationResult>(baseUrl, "/symbols/validate", { symbols: normalizedSymbols });
 }
 
 export async function loadRecommendedStrategies(baseUrl: string): Promise<RecommendedStrategiesResponse> {

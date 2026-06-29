@@ -29,9 +29,10 @@ it("shows structured entry and exit writing templates for condition help", () =>
     />
   );
 
-  expect(screen.getByRole("heading", { name: "入场条件写法模板" })).toBeInTheDocument();
-  expect(screen.getByRole("heading", { name: "离场条件写法模板" })).toBeInTheDocument();
-  expect(screen.getByText("收盘价站上N日均线")).toBeInTheDocument();
-  expect(screen.getByText("跌破N日低点")).toBeInTheDocument();
-  expect(screen.getByText("写不出来时，先照着模板替换数字，再点校验条件。")).toBeInTheDocument();
+  expect(screen.getByRole("heading", { name: "可写入能力" })).toBeInTheDocument();
+  expect(screen.getByRole("heading", { name: "入场条件模板" })).toBeInTheDocument();
+  expect(screen.getByRole("heading", { name: "离场条件模板" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "套用入场条件：收盘价站上20日均线" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "套用离场条件：跌破20日低点" })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "套用入场条件：近5日涨幅小于12%" })).not.toBeInTheDocument();
 });

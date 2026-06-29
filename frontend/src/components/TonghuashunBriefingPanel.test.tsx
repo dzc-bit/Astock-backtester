@@ -1,8 +1,14 @@
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import type { MarketBriefingResponse } from "../types";
 import { TonghuashunBriefingPanel } from "./TonghuashunBriefingPanel";
+
+const invokeMock = vi.hoisted(() => vi.fn());
+
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: invokeMock
+}));
 
 function buildBriefing(kind: "fupan" | "zaopan"): MarketBriefingResponse {
   return {
@@ -105,10 +111,27 @@ it("keeps the end of a long full briefing readable in the dialog", async () => {
   expect(screen.getByText("重点摘要")).toBeInTheDocument();
   expect(screen.getByText("阅读全文")).toBeInTheDocument();
   expect(screen.getByText("长文本尾部：明日继续观察量能能否回到万亿上方。")).toBeInTheDocument();
-  expect(screen.getByRole("link", { name: /打开同花顺原文/ })).toHaveAttribute(
-    "href",
-    "https://stock.10jqka.com.cn/fupan/"
-  );
+  expect(screen.getByRole("button", { name: /暂无同花顺原文链接/ })).toBeDisabled();
+});
+
+it("opens a real Tonghuashun article detail page through the desktop shell command", async () => {
+  const user = userEvent.setup();
+  const briefing = buildBriefing("fupan");
+  briefing.source_url = "https://stock.10jqka.com.cn/20260605/c677247169.shtml";
+  Object.defineProperty(window, "__TAURI_INTERNALS__", {
+    configurable: true,
+    value: {}
+  });
+  invokeMock.mockResolvedValueOnce(undefined);
+
+  render(<TonghuashunBriefingPanel fupan={briefing} zaopan={buildBriefing("zaopan")} />);
+
+  await user.click(screen.getByRole("button", { name: /打开同花顺原文/ }));
+
+  expect(invokeMock).toHaveBeenCalledWith("open_ths_original_url", {
+    url: "https://stock.10jqka.com.cn/20260605/c677247169.shtml"
+  });
+  Reflect.deleteProperty(window, "__TAURI_INTERNALS__");
 });
 
 it("disables original article actions when source url is missing", async () => {

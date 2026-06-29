@@ -43,8 +43,20 @@ def registered_conditions() -> list[ConditionDefinition]:
             ("main_net_inflow",),
         ),
         ConditionDefinition(
+            "capital_flow_n_day_sum_at_most",
+            "N-day main net outflow",
+            "capital_flow",
+            ("main_net_inflow",),
+        ),
+        ConditionDefinition(
             "capital_flow_today_at_least",
             "Signal-day main net inflow",
+            "capital_flow",
+            ("main_net_inflow",),
+        ),
+        ConditionDefinition(
+            "capital_flow_today_at_most",
+            "Signal-day main net outflow",
             "capital_flow",
             ("main_net_inflow",),
         ),
@@ -67,6 +79,7 @@ def registered_conditions() -> list[ConditionDefinition]:
         ConditionDefinition("past_return_between", "Past return range", "price_movement", ()),
         ConditionDefinition("volume_ratio_between", "Volume ratio range", "volume", ()),
         ConditionDefinition("macd_histogram_at_least", "MACD histogram floor", "technical", ("macd_hist",)),
+        ConditionDefinition("macd_dead_cross", "MACD dead cross", "technical", ("macd_dif", "macd_dea")),
         ConditionDefinition("breakout_above_n_day_high", "Breakout above prior high", "pattern", ()),
         ConditionDefinition("breakdown_below_n_day_low", "Breakdown below prior low", "exit_pattern", ()),
     ]
@@ -113,6 +126,39 @@ def _capital_flow_n_day_sum_at_least(
     return ConditionResult(passed, f"{window}d main net inflow {value:.0f} >= {minimum:.0f}", value)
 
 
+def _capital_flow_n_day_sum_at_most(
+    node: ConditionNode,
+    row: pd.Series,
+    frame: pd.DataFrame,
+) -> ConditionResult:
+    window = int(node.params["window"])
+    maximum = float(node.params["max"])
+    precomputed_column = f"main_net_inflow_sum_{window}d"
+    if precomputed_column in row.index:
+        value = pd.to_numeric(row[precomputed_column], errors="coerce")
+        if pd.isna(value):
+            return ConditionResult(
+                False,
+                f"{window}d main net inflow unavailable before enough history",
+                None,
+            )
+        value = float(value)
+        return ConditionResult(value <= maximum, f"{window}d main net inflow {value:.0f} <= {maximum:.0f}", value)
+
+    symbol_frame = frame[
+        (frame["symbol"] == row["symbol"]) & (frame["trade_date"] <= row["trade_date"])
+    ].sort_values("trade_date")
+    if len(symbol_frame) < window:
+        return ConditionResult(
+            False,
+            f"{window}d main net inflow unavailable before enough history",
+            None,
+        )
+    value = float(symbol_frame.tail(window)["main_net_inflow"].sum())
+    passed = value <= maximum
+    return ConditionResult(passed, f"{window}d main net inflow {value:.0f} <= {maximum:.0f}", value)
+
+
 def _capital_flow_today_at_least(
     node: ConditionNode,
     row: pd.Series,
@@ -124,6 +170,19 @@ def _capital_flow_today_at_least(
         return ConditionResult(False, "signal-day main net inflow unavailable", None)
     value = float(value)
     return ConditionResult(value >= minimum, f"signal-day main net inflow {value:.0f} >= {minimum:.0f}", value)
+
+
+def _capital_flow_today_at_most(
+    node: ConditionNode,
+    row: pd.Series,
+    frame: pd.DataFrame,
+) -> ConditionResult:
+    maximum = float(node.params["max"])
+    value = pd.to_numeric(row["main_net_inflow"], errors="coerce")
+    if pd.isna(value):
+        return ConditionResult(False, "signal-day main net inflow unavailable", None)
+    value = float(value)
+    return ConditionResult(value <= maximum, f"signal-day main net inflow {value:.0f} <= {maximum:.0f}", value)
 
 
 def _capital_flow_n_day_positive_count_at_least(
@@ -234,6 +293,25 @@ def _macd_histogram_at_least(node: ConditionNode, row: pd.Series, frame: pd.Data
     return ConditionResult(value >= minimum, f"MACD histogram {value:.4f} >= {minimum:.4f}", value)
 
 
+def _macd_dead_cross(node: ConditionNode, row: pd.Series, frame: pd.DataFrame) -> ConditionResult:
+    dif = pd.to_numeric(row["macd_dif"], errors="coerce")
+    dea = pd.to_numeric(row["macd_dea"], errors="coerce")
+    if pd.isna(dif) or pd.isna(dea):
+        return ConditionResult(False, "MACD dead cross unavailable", None)
+    symbol_frame = frame[
+        (frame["symbol"] == row["symbol"]) & (frame["trade_date"] < row["trade_date"])
+    ].sort_values("trade_date")
+    if symbol_frame.empty:
+        return ConditionResult(False, "MACD dead cross unavailable before enough history", None)
+    prev = symbol_frame.iloc[-1]
+    prev_dif = pd.to_numeric(prev["macd_dif"], errors="coerce")
+    prev_dea = pd.to_numeric(prev["macd_dea"], errors="coerce")
+    if pd.isna(prev_dif) or pd.isna(prev_dea):
+        return ConditionResult(False, "MACD dead cross unavailable before enough history", None)
+    crossed = float(prev_dif) >= float(prev_dea) and float(dif) < float(dea)
+    return ConditionResult(crossed, f"MACD dead cross {float(prev_dif):.4f}/{float(prev_dea):.4f} -> {float(dif):.4f}/{float(dea):.4f}", float(dif - dea))
+
+
 def _breakout_above_n_day_high(node: ConditionNode, row: pd.Series, frame: pd.DataFrame) -> ConditionResult:
     window = int(node.params["window"])
     precomputed_column = f"prior_high_{window}d"
@@ -279,7 +357,9 @@ def _breakdown_below_n_day_low(node: ConditionNode, row: pd.Series, frame: pd.Da
 EVALUATORS: dict[str, Evaluator] = {
     "market_cap_between": _market_cap_between,
     "capital_flow_n_day_sum_at_least": _capital_flow_n_day_sum_at_least,
+    "capital_flow_n_day_sum_at_most": _capital_flow_n_day_sum_at_most,
     "capital_flow_today_at_least": _capital_flow_today_at_least,
+    "capital_flow_today_at_most": _capital_flow_today_at_most,
     "capital_flow_n_day_positive_count_at_least": _capital_flow_n_day_positive_count_at_least,
     "market_rising_ratio_at_least": _market_rising_ratio_at_least,
     "close_above_ma": _close_above_ma,
@@ -289,6 +369,7 @@ EVALUATORS: dict[str, Evaluator] = {
     "past_return_between": _past_return_between,
     "volume_ratio_between": _volume_ratio_between,
     "macd_histogram_at_least": _macd_histogram_at_least,
+    "macd_dead_cross": _macd_dead_cross,
     "breakout_above_n_day_high": _breakout_above_n_day_high,
     "breakdown_below_n_day_low": _breakdown_below_n_day_low,
 }

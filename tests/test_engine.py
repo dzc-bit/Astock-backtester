@@ -276,6 +276,121 @@ def test_equity_curve_does_not_deduct_next_day_buy_cash_on_signal_date():
     assert result.equity_curve[1].market_value > 0
 
 
+def test_total_position_size_caps_portfolio_exposure_across_multiple_holdings():
+    rows = []
+    for symbol in ["AAA", "BBB", "CCC"]:
+        rows.extend(
+            [
+                backtest_row("2024-01-02", symbol=symbol, close=10.0),
+                backtest_row("2024-01-03", symbol=symbol, open_price=10.0, close=10.0, pre_close=10.0),
+                backtest_row("2024-01-04", symbol=symbol, open_price=10.0, close=10.0, pre_close=10.0),
+            ]
+        )
+    settings = BacktestSettings(
+        start_date=pd.Timestamp("2024-01-02").date(),
+        end_date=pd.Timestamp("2024-01-04").date(),
+        initial_cash=100_000,
+        fixed_holding_days=20,
+        max_positions=5,
+        max_daily_buys=5,
+        min_listing_days=0,
+        position_sizing_mode="equal_slots",
+        position_size_pct=0.2,
+        slippage_rate=0,
+        fee_rate=0,
+        stamp_tax_rate=0,
+        conservative_execution=False,
+    )
+
+    result = run_backtest(pd.DataFrame(rows), simple_market_cap_strategy(), settings)
+
+    opened = [trade for trade in result.trades if trade.buy_amount > 0]
+    assert len(opened) == 3
+    assert sum(trade.buy_amount for trade in opened) <= 20_000
+    max_curve_exposure = max(point.market_value / point.equity for point in result.equity_curve if point.equity)
+    assert max_curve_exposure <= 0.2
+    assert result.metrics.max_position_pct == pytest.approx(max_curve_exposure)
+
+
+def test_exit_rules_sell_on_weak_recent_return_macd_dead_cross_and_capital_outflow():
+    rows = [
+        {
+            **backtest_row("2024-01-02", close=10.0),
+            "return_5d": 0.05,
+            "macd_dif": 0.08,
+            "macd_dea": 0.03,
+            "main_net_inflow_sum_3d": 1_000_000.0,
+        },
+        {
+            **backtest_row("2024-01-03", open_price=10.0, close=10.0, pre_close=10.0),
+            "return_5d": 0.05,
+            "macd_dif": 0.04,
+            "macd_dea": 0.04,
+            "main_net_inflow_sum_3d": 500_000.0,
+        },
+        {
+            **backtest_row("2024-01-04", open_price=10.0, close=10.1, pre_close=10.0),
+            "return_5d": 0.02,
+            "macd_dif": -0.02,
+            "macd_dea": 0.01,
+            "main_net_inflow_sum_3d": -100_000.0,
+        },
+        {
+            **backtest_row("2024-01-05", open_price=9.8, close=9.9, pre_close=10.1),
+            "return_5d": 0.01,
+            "macd_dif": -0.03,
+            "macd_dea": 0.0,
+            "main_net_inflow_sum_3d": -200_000.0,
+        },
+    ]
+    strategy = StrategyConfig(
+        name="exit-rich-rules",
+        market_filters=[],
+        entry_groups=[
+            ConditionGroup(
+                id="entry",
+                operator=ConditionOperator.AND,
+                conditions=[
+                    ConditionNode(
+                        id="cap",
+                        condition_id="market_cap_between",
+                        params={"min": 1_000_000_000, "max": 10_000_000_000},
+                    )
+                ],
+            )
+        ],
+        exit_rules=[
+            ConditionNode(id="weak-return", condition_id="past_return_at_most", params={"window": 5, "max": 0.03}),
+            ConditionNode(id="dead-cross", condition_id="macd_dead_cross", params={}),
+            ConditionNode(id="outflow", condition_id="capital_flow_n_day_sum_at_most", params={"window": 3, "max": 0}),
+        ],
+    )
+    settings = BacktestSettings(
+        start_date=pd.Timestamp("2024-01-02").date(),
+        end_date=pd.Timestamp("2024-01-05").date(),
+        initial_cash=100_000,
+        fixed_holding_days=20,
+        take_profit_pct=None,
+        stop_loss_pct=None,
+        max_positions=1,
+        max_daily_buys=1,
+        min_listing_days=0,
+        slippage_rate=0,
+        fee_rate=0,
+        stamp_tax_rate=0,
+        conservative_execution=False,
+    )
+
+    result = run_backtest(pd.DataFrame(rows), strategy, settings)
+
+    trade = result.trades[0]
+    assert trade.sell_signal_date.isoformat() == "2024-01-04"
+    assert trade.sell_date.isoformat() == "2024-01-05"
+    assert any("5d return" in reason for reason in trade.sell_reason)
+    assert any("MACD dead cross" in reason for reason in trade.sell_reason)
+    assert any("main net inflow" in reason for reason in trade.sell_reason)
+
+
 def test_preflight_reports_missing_capital_flow_when_required(basic_strategy, basic_settings):
     data = enriched_data().drop(columns=["main_net_inflow"])
 
@@ -693,11 +808,11 @@ def test_backtest_applies_single_position_ratio_and_board_lot_rounding(basic_str
 
     assert result.trades
     trade = result.trades[0]
-    assert trade.shares == 1200
-    assert trade.planned_amount == 15000
-    assert trade.buy_amount == 14400
-    assert trade.target_position_pct == 0.15
-    assert trade.actual_position_pct == 0.144
+    assert trade.shares == 600
+    assert trade.planned_amount == 7500
+    assert trade.buy_amount == 7200
+    assert trade.target_position_pct == 0.075
+    assert trade.actual_position_pct == 0.072
 
 
 def test_exit_rule_can_sell_when_price_breaks_prior_low():
@@ -849,7 +964,7 @@ def test_extreme_chasing_strategy_can_surface_large_loss():
     result = run_backtest(frame, strategy, settings)
 
     assert result.trades
-    assert result.metrics.total_return_pct < -0.3
+    assert result.metrics.total_return_pct < -0.08
     assert result.trades[0].pnl_pct is not None
     assert result.trades[0].pnl_pct < -0.3
 
@@ -937,8 +1052,8 @@ def test_annualized_return_uses_equity_curve_date_span_not_total_return():
 
     result = run_backtest(frame, simple_market_cap_strategy(), settings)
 
-    assert result.metrics.total_return_pct == pytest.approx(0.2)
-    assert result.metrics.annualized_return_pct == pytest.approx((1.2 ** (365 / 20)) - 1)
+    assert result.metrics.total_return_pct == pytest.approx(0.04)
+    assert result.metrics.annualized_return_pct == pytest.approx((1.04 ** (365 / 20)) - 1)
     assert result.metrics.annualized_return_pct != result.metrics.total_return_pct
 
 
@@ -1361,8 +1476,8 @@ def test_missing_holding_quote_uses_last_close_for_equity_curve():
     result = run_backtest(frame, simple_market_cap_strategy(), settings)
 
     jan4 = next(point for point in result.equity_curve if point.trade_date.isoformat() == "2024-01-04")
-    assert jan4.market_value == pytest.approx(110_000)
-    assert jan4.equity == pytest.approx(110_000)
+    assert jan4.market_value == pytest.approx(22_000)
+    assert jan4.equity == pytest.approx(102_000)
 
 
 def test_condition_data_lag_days_uses_prior_symbol_row():
