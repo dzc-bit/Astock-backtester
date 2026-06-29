@@ -2,7 +2,7 @@
 
 Windows 桌面版 A 股策略回测工具。项目使用 React + TypeScript 构建界面，Tauri 提供桌面容器，Python 负责本地数据服务、行情聚合、数据补齐和回测执行。
 
-当前版本：`1.3.0`。
+当前版本：`1.3.1`。
 
 ## 核心能力
 
@@ -61,6 +61,10 @@ Windows 桌面版 A 股策略回测工具。项目使用 React + TypeScript 构�
 - `src-tauri/capabilities/main.json`
 
 `运行产物\策略配置\saved-strategies.json`、`release-assets\latest.json`、探针 JSON 和日志 JSON 都是运行或发布产物，不应作为源码文件提交。
+
+## 本地材料
+
+`项目说明书.md`、`应用创新类项目报告.md` 和 `演示文档操作提醒.md` 是本机人工说明或演示材料，不纳入 GitHub 仓库。公开仓库只保留源码、测试、README、`AGENT必读.md` 和必要的 `docs/` 专项说明。
 
 ## 开发命令
 

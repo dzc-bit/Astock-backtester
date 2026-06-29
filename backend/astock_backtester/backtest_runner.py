@@ -38,7 +38,7 @@ def enrich_for_strategy(frame: Any, strategy: StrategyConfig) -> Any:
     ma_windows = window_params(strategy, {"close_above_ma", "close_below_ma"}, {3, 5, 10, 20, 60})
     return_windows = window_params(strategy, {"past_return_at_most", "past_return_between"}, {2, 3, 5, 10, 20})
     volume_windows = window_params(strategy, {"volume_ratio_between"}, {2, 3, 5, 10})
-    flow_windows = window_params(strategy, {"capital_flow_n_day_sum_at_least"}, set())
+    flow_windows = window_params(strategy, {"capital_flow_n_day_sum_at_least", "capital_flow_n_day_sum_at_most"}, set())
     flow_positive_count_windows = window_params(strategy, {"capital_flow_n_day_positive_count_at_least"}, set())
     high_low_windows = window_params(
         strategy,

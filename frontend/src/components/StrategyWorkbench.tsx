@@ -9,6 +9,7 @@ import type {
   DatasetCoverage,
   RecommendedStrategy,
   SavedStrategyPreset,
+  StockSymbolValidationResult,
   StrategyConfig
 } from "../types";
 import { RecommendedStrategies } from "./RecommendedStrategies";
@@ -34,6 +35,9 @@ type Props = {
   onConfirmPendingStrategySave?: () => void;
   onDismissPendingStrategySave?: () => void;
   onSettingsDraftErrorsChange?: (errors: string[]) => void;
+  stockSymbolValidation?: StockSymbolValidationResult | null;
+  isValidatingStockSymbols?: boolean;
+  onValidateStockSymbols?: (symbols: string[]) => void;
 };
 
 type ParamType = "currency" | "days" | "number" | "percent";
@@ -56,9 +60,12 @@ const conditionExamplesById: Record<string, string> = {
   market_rising_ratio_at_least: "市场上涨家数占比大于55%",
   market_cap_between: "流通市值10亿到300亿",
   capital_flow_n_day_sum_at_least: "近3日主力净流入大于300万",
+  capital_flow_n_day_sum_at_most: "近3日主力净流出",
   capital_flow_today_at_least: "当日主力净流入大于300万",
+  capital_flow_today_at_most: "资金流出",
   capital_flow_n_day_positive_count_at_least: "近3日主力净流入为正至少2天",
   macd_histogram_at_least: "MACD柱线大于0",
+  macd_dead_cross: "MACD死叉",
   close_above_ma: "收盘价站上20日均线",
   close_below_ma: "收盘价跌破3日均线",
   volume_ratio_between: "量比2日介于1.2到2.5",
@@ -79,8 +86,8 @@ const stockPools = [
 ] as const;
 
 const positionSizingModes = [
-  { value: "fixed_ratio", label: "单股固定仓位" },
-  { value: "equal_slots", label: "按剩余仓位等分" }
+  { value: "fixed_ratio", label: "总仓位按持仓数均分" },
+  { value: "equal_slots", label: "按剩余总仓位等分" }
 ] as const;
 
 const conditionMetaById = Object.fromEntries(
@@ -97,6 +104,27 @@ conditionMetaById.breakdown_below_n_day_low = {
   label: "跌破前低离场",
   category: "离场",
   params: [{ key: "window", label: "前低窗口", type: "days", options: [10, 20, 40, 60] }]
+};
+conditionMetaById.capital_flow_n_day_sum_at_most = {
+  id: "capital_flow_n_day_sum_at_most",
+  label: "近N日主力净流出",
+  category: "离场",
+  params: [
+    { key: "window", label: "统计窗口", type: "days", options: [3, 5, 10] },
+    { key: "max", label: "净流出阈值", type: "currency", options: [0, -1_000_000, -3_000_000, -5_000_000] }
+  ]
+};
+conditionMetaById.capital_flow_today_at_most = {
+  id: "capital_flow_today_at_most",
+  label: "当日资金流出",
+  category: "离场",
+  params: [{ key: "max", label: "净流出阈值", type: "currency", options: [0, -1_000_000, -3_000_000] }]
+};
+conditionMetaById.macd_dead_cross = {
+  id: "macd_dead_cross",
+  label: "MACD死叉",
+  category: "离场",
+  params: []
 };
 
 const operatorLabels = {
@@ -115,28 +143,30 @@ const defaultExamples = [
 ];
 
 const entryTemplates = [
-  "收盘价站上N日均线",
-  "量比N日介于A到B",
-  "流通市值X亿到Y亿",
-  "换手率A%到B%",
-  "近N日涨幅小于X%",
-  "近N日主力净流入大于X万/亿",
-  "突破N日新高",
-  "MACD柱线大于X"
+  "收盘价站上20日均线",
+  "量比2日介于1.2到2.5",
+  "流通市值10亿到300亿",
+  "换手率2%到8%",
+  "近5日涨幅0%到12%",
+  "近3日主力净流入大于300万",
+  "突破20日新高",
+  "MACD柱线大于0"
 ];
 
 const exitExamples = [
   "收盘价跌破3日均线",
   "跌破20日低点",
-  "突破20日最低",
-  "创20日新低"
+  "近5日涨幅小于3%",
+  "MACD死叉",
+  "资金流出",
+  "近3日主力净流出"
 ];
 
-const exitTemplates = ["收盘价跌破N日均线", "跌破N日低点", "创N日新低"];
+const exitTemplates = ["收盘价跌破3日均线", "近5日涨幅小于3%", "MACD死叉", "资金流出", "近3日主力净流出", "跌破20日低点"];
 
 const numericSettingLabels: Partial<Record<keyof BacktestSettingsConfig, string>> = {
   initial_cash: "初始资金",
-  position_size_pct: "单股仓位比例",
+  position_size_pct: "总仓位上限",
   fixed_holding_days: "固定持仓天数",
   max_positions: "最大持仓数",
   max_daily_buys: "每日最多买入",
@@ -295,7 +325,10 @@ export function StrategyWorkbench({
   onDeleteSavedStrategy,
   onConfirmPendingStrategySave,
   onDismissPendingStrategySave,
-  onSettingsDraftErrorsChange
+  onSettingsDraftErrorsChange,
+  stockSymbolValidation = null,
+  isValidatingStockSymbols = false,
+  onValidateStockSymbols
 }: Props) {
   const dateRange = settingDateRange(coverage);
   const examples = validationExamples.length > 0 ? validationExamples : defaultExamples;
@@ -376,9 +409,11 @@ export function StrategyWorkbench({
   };
 
   const validateExitCondition = async () => {
+    setExitAddMessage(null);
     setIsValidatingExit(true);
     try {
-      setExitValidation(await validateConditionText(exitConditionText, "exit"));
+      const result = await validateConditionText(exitConditionText, "exit");
+      setExitValidation(result);
     } catch (caught) {
       setExitValidation({
         ok: false,
@@ -611,10 +646,34 @@ export function StrategyWorkbench({
             <button className="secondary-button" type="button" onClick={applyCoverageDates} disabled={!dateRange.min || !dateRange.max}>
               套用数据中心日期
             </button>
+            {settings.stock_pool === "custom" ? (
+              <button
+                className="secondary-button"
+                type="button"
+                onClick={() => onValidateStockSymbols?.(parseSymbols(customSymbolsText))}
+                disabled={!onValidateStockSymbols || isValidatingStockSymbols || parseSymbols(customSymbolsText).length === 0}
+              >
+                <CheckCircle2 size={16} aria-hidden="true" />
+                {isValidatingStockSymbols ? "检查中" : "检查股票代码"}
+              </button>
+            ) : null}
             <span className="muted-code">
               可用范围 {dateRange.min ?? "-"} 至 {dateRange.max ?? "-"}
             </span>
           </div>
+          {settings.stock_pool === "custom" ? (
+            <div className={`condition-validation ${stockSymbolValidation?.ok ? "ok" : stockSymbolValidation ? "bad" : ""}`}>
+              {stockSymbolValidation ? (
+                stockSymbolValidation.ok ? (
+                  <span>自选代码已确认：{stockSymbolValidation.valid_symbols.join("、")}</span>
+                ) : (
+                  <span>自选代码包含无效股票代码：{stockSymbolValidation.invalid_symbols.join("、")}</span>
+                )
+              ) : (
+                <span>运行前会检查自选代码是否存在于真实 A 股股票池。</span>
+              )}
+            </div>
+          ) : null}
         </div>
 
         <div className="config-panel">
@@ -660,11 +719,11 @@ export function StrategyWorkbench({
               </select>
             </label>
             <label>
-              单股仓位（%）
+              总仓位上限（%）
               <span className="setting-example">样例：20</span>
               <input
                 type="number"
-                aria-label="单股仓位（%）"
+                aria-label="总仓位上限（%）"
                 min={0.1}
                 max={100}
                 step={1}
@@ -782,40 +841,11 @@ export function StrategyWorkbench({
       <div className="strategy-grid">
         <div className="condition-library">
           <h3>写入条件</h3>
-          <section aria-label="条件写法帮助" className="condition-help-grid">
-            <article className="condition-expression-box condition-help-card">
-              <div className="condition-help-copy">
-                <h4 className="condition-help-title">入场条件写法模板</h4>
-                <p className="condition-help-text">写不出来时，先照着模板替换数字，再点校验条件。</p>
-              </div>
-              <div className="condition-examples">
-                {entryTemplates.map((template) => (
-                  <span key={template} className="template-chip">
-                    {template}
-                  </span>
-                ))}
-              </div>
-            </article>
-            <article className="condition-expression-box condition-help-card">
-              <div className="condition-help-copy">
-                <h4 className="condition-help-title">离场条件写法模板</h4>
-                <p className="condition-help-text">离场尽量写成明确触发句，避免“感觉走弱”这类无法回测的描述。</p>
-              </div>
-              <div className="condition-examples">
-                {exitTemplates.map((template) => (
-                  <span key={template} className="template-chip">
-                    {template}
-                  </span>
-                ))}
-              </div>
-            </article>
-          </section>
-          <div className="condition-examples" aria-label="条件样例">
-            {examples.slice(0, 8).map((example) => (
-              <button className="example-chip" type="button" key={example} onClick={() => setConditionText(example)}>
-                {example}
-              </button>
-            ))}
+          <div className="condition-expression-box condition-help-card">
+            <div className="condition-help-copy">
+              <h4 className="condition-help-title">可写入能力</h4>
+              <p className="condition-help-text">入场和离场分别在右侧编辑，点击模板后校验即可写入策略。</p>
+            </div>
           </div>
           <ul className="condition-list">
             {(conditionLibrary as ConditionMeta[]).map((condition) => (
@@ -897,6 +927,25 @@ export function StrategyWorkbench({
               </div>
               {entryAddMessage ? <div className="condition-validation ok">{entryAddMessage}</div> : null}
             </div>
+            <div className="template-panel" aria-label="入场条件模板">
+              <div className="condition-help-copy">
+                <h4 className="condition-help-title">入场条件模板</h4>
+                <p className="condition-help-text">点击可套用，改数字后再校验写入。</p>
+              </div>
+              <div className="condition-examples">
+                {entryTemplates.map((template) => (
+                  <button
+                    key={template}
+                    className="template-chip template-button"
+                    type="button"
+                    aria-label={`套用入场条件：${template}`}
+                    onClick={() => setConditionText(template)}
+                  >
+                    {template}
+                  </button>
+                ))}
+              </div>
+            </div>
           </div>
           <div className="condition-config-list">
             {group.conditions.map((condition) => {
@@ -938,13 +987,17 @@ export function StrategyWorkbench({
               <span>止损 {settings.stop_loss_pct == null ? "未启用" : `${(settings.stop_loss_pct * 100).toFixed(2).replace(/\.?0+$/, "")}%`}</span>
             </div>
             <div className="condition-expression-box exit-expression-box">
-              <span className="condition-example-label">样例：收盘价跌破3日均线；跌破20日低点；突破20日最低</span>
+              <span className="condition-example-label">样例：收盘价跌破3日均线；近5日涨幅小于3%；MACD死叉；资金流出</span>
               <label>
                 新增离场条件表达式
                 <input
                   aria-label="新增离场条件表达式"
                   value={exitConditionText}
-                  onChange={(event) => setExitConditionText(event.target.value)}
+                  onChange={(event) => {
+                    setExitConditionText(event.target.value);
+                    setExitValidation(null);
+                    setExitAddMessage(null);
+                  }}
                   placeholder="例：收盘价跌破3日均线"
                 />
               </label>
@@ -976,12 +1029,24 @@ export function StrategyWorkbench({
               </div>
               {exitAddMessage ? <div className="condition-validation ok">{exitAddMessage}</div> : null}
             </div>
-            <div className="condition-examples" aria-label="离场条件样例">
-              {exitExamples.map((example) => (
-                <button className="example-chip" type="button" key={example} onClick={() => setExitConditionText(example)}>
-                  {example}
-                </button>
-              ))}
+            <div className="template-panel" aria-label="离场条件模板">
+              <div className="condition-help-copy">
+                <h4 className="condition-help-title">离场条件模板</h4>
+                <p className="condition-help-text">点击可套用，校验后写入卖出触发。</p>
+              </div>
+              <div className="condition-examples">
+                {exitTemplates.map((template) => (
+                  <button
+                    key={template}
+                    className="template-chip template-button"
+                    type="button"
+                    aria-label={`套用离场条件：${template}`}
+                    onClick={() => setExitConditionText(template)}
+                  >
+                    {template}
+                  </button>
+                ))}
+              </div>
             </div>
             <div className="condition-config-list">
               {strategy.exit_rules.map((condition) => {

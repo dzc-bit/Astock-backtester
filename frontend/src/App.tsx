@@ -11,7 +11,8 @@ import {
   loadRiskAlerts,
   runBacktestStreamWithDataService,
   runConfiguredBacktest,
-  validateConditionExpression
+  validateConditionExpression,
+  validateStockSymbols
 } from "./api";
 import { ClsFinancePanel } from "./components/ClsFinancePanel";
 import { DataCenter } from "./components/DataCenter";
@@ -51,6 +52,7 @@ import type {
   RecommendedStrategy,
   RiskAlertsResponse,
   SavedStrategyPreset,
+  StockSymbolValidationResult,
   StrategyConfig
 } from "./types";
 
@@ -199,7 +201,7 @@ function validateBacktestSettings(settings: BacktestSettingsConfig, draftErrors:
     errors.push("初始资金必须大于0。");
   }
   if (!Number.isFinite(settings.position_size_pct) || settings.position_size_pct <= 0 || settings.position_size_pct > 1) {
-    errors.push("单股仓位比例必须大于0且不能超过100%。");
+    errors.push("总仓位上限必须大于0且不能超过100%。");
   }
   if (!Number.isInteger(settings.fixed_holding_days) || settings.fixed_holding_days < 1) {
     errors.push("固定持仓天数必须至少为1天。");
@@ -275,6 +277,8 @@ export function App() {
   const [savedStrategies, setSavedStrategies] = useState<SavedStrategyPreset[]>(() => loadSavedStrategies());
   const [conditionValidation, setConditionValidation] = useState<ConditionValidationResult | null>(null);
   const [isValidatingCondition, setIsValidatingCondition] = useState(false);
+  const [stockSymbolValidation, setStockSymbolValidation] = useState<StockSymbolValidationResult | null>(null);
+  const [isValidatingStockSymbols, setIsValidatingStockSymbols] = useState(false);
   const [settingsDraftErrors, setSettingsDraftErrors] = useState<string[]>([]);
   const [strategySaveMessage, setStrategySaveMessage] = useState<string | null>(null);
   const [pendingStrategySave, setPendingStrategySave] = useState<PendingStrategySave>(null);
@@ -354,6 +358,12 @@ export function App() {
       if (nextSettings.start_date !== current.start_date || nextSettings.end_date !== current.end_date) {
         setSettingsDateTouched(true);
       }
+      if (
+        nextSettings.stock_pool !== current.stock_pool ||
+        nextSettings.custom_symbols.join(",") !== current.custom_symbols.join(",")
+      ) {
+        setStockSymbolValidation(null);
+      }
       return nextSettings;
     });
   };
@@ -388,6 +398,18 @@ export function App() {
       setRunProgressMessage(null);
       setRunPhases([]);
       return;
+    }
+    if (settings.stock_pool === "custom") {
+      const symbolValidation = await validateCustomStockSymbols(settings.custom_symbols);
+      if (!symbolValidation?.ok) {
+        const invalidSymbols = symbolValidation?.invalid_symbols.length
+          ? symbolValidation.invalid_symbols.join("、")
+          : settings.custom_symbols.join("、");
+        setError(`自选代码包含无效股票代码：${invalidSymbols}`);
+        setRunProgressMessage(null);
+        setRunPhases([]);
+        return;
+      }
     }
     try {
       setError(null);
@@ -596,6 +618,50 @@ export function App() {
     return validateConditionExpression(dataService.base_url, text, mode);
   };
 
+  const validateCustomStockSymbols = async (symbols: string[]): Promise<StockSymbolValidationResult | null> => {
+    const requested = symbols.map((symbol) => symbol.trim()).filter(Boolean);
+    if (requested.length === 0) {
+      const emptyResult: StockSymbolValidationResult = {
+        ok: false,
+        valid_symbols: [],
+        invalid_symbols: [],
+        normalized_symbols: [],
+        source: "empty"
+      };
+      setStockSymbolValidation(emptyResult);
+      return emptyResult;
+    }
+    if (!dataService) {
+      const serviceUnavailable: StockSymbolValidationResult = {
+        ok: false,
+        valid_symbols: [],
+        invalid_symbols: requested,
+        normalized_symbols: requested,
+        source: "service-unavailable"
+      };
+      setStockSymbolValidation(serviceUnavailable);
+      return serviceUnavailable;
+    }
+    setIsValidatingStockSymbols(true);
+    try {
+      const result = await validateStockSymbols(dataService.base_url, requested);
+      setStockSymbolValidation(result);
+      return result;
+    } catch {
+      const failed: StockSymbolValidationResult = {
+        ok: false,
+        valid_symbols: [],
+        invalid_symbols: requested,
+        normalized_symbols: requested,
+        source: "request-failed"
+      };
+      setStockSymbolValidation(failed);
+      return failed;
+    } finally {
+      setIsValidatingStockSymbols(false);
+    }
+  };
+
   const handleValidateCondition = async (text: string) => {
     setIsValidatingCondition(true);
     try {
@@ -800,6 +866,9 @@ export function App() {
           onConfirmPendingStrategySave={confirmPendingStrategySave}
           onDismissPendingStrategySave={dismissPendingStrategySave}
           onSettingsDraftErrorsChange={setSettingsDraftErrors}
+          stockSymbolValidation={stockSymbolValidation}
+          isValidatingStockSymbols={isValidatingStockSymbols}
+          onValidateStockSymbols={validateCustomStockSymbols}
         />
         {error ? <div className="error-banner" role="alert">{error}</div> : null}
         <div className="results-trades-grid">

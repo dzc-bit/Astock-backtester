@@ -349,7 +349,7 @@ def _is_ths_article_url(url: str | None) -> bool:
     if not url:
         return False
     parsed = urlparse(url)
-    return parsed.netloc.endswith("stock.10jqka.com.cn") and parsed.path.endswith(".shtml")
+    return parsed.hostname == "stock.10jqka.com.cn" and parsed.path.endswith(".shtml")
 
 
 def _article_title(soup: BeautifulSoup, fallback: str) -> str:
@@ -515,6 +515,20 @@ def _first_section_link_url(sections: list[MarketBriefingSection]) -> str | None
     return None
 
 
+def _ths_article_source_url(url: str) -> str:
+    parsed = urlparse(url)
+    return parsed._replace(scheme="https").geturl()
+
+
+def _first_ths_article_link_url(sections: list[MarketBriefingSection]) -> str | None:
+    for section in sections:
+        for link in section.links:
+            url = (link.url or "").strip()
+            if _is_ths_article_url(url):
+                return _ths_article_source_url(url)
+    return None
+
+
 @dataclass
 class MarketBriefingProvider:
     timeout: float = 8.0
@@ -629,7 +643,7 @@ class MarketBriefingProvider:
         expanded_sections, article_diagnostics = self._expand_article_links(sections[:8], THS_FUPAN_URL)
         diagnostics.extend(article_diagnostics)
         source = "ths-fupan"
-        source_url: str | None = THS_FUPAN_URL
+        source_url: str | None = _first_ths_article_link_url(expanded_sections)
         if not summary and not expanded_sections:
             fallback_sections, fallback_diagnostics = self._market_fallback_sections()
             diagnostics.append("同花顺复盘页未解析到有效章节。")
@@ -697,7 +711,7 @@ class MarketBriefingProvider:
             kind="zaopan",
             updated_at=datetime.now(timezone.utc),
             source="ths-zaopan",
-            source_url=THS_ZAOPAN_URL,
+            source_url=_first_ths_article_link_url(expanded_sections),
             summary=summary or (sections[0].content if sections and sections[0].content else fallback_summary),
             sections=expanded_sections,
             diagnostics=diagnostics,

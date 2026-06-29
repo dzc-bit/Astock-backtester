@@ -415,6 +415,14 @@ class ConditionValidationResult(BaseModel):
     examples: list[str] = Field(default_factory=list)
 
 
+class StockSymbolValidationResult(BaseModel):
+    ok: bool
+    valid_symbols: list[str] = Field(default_factory=list)
+    invalid_symbols: list[str] = Field(default_factory=list)
+    normalized_symbols: list[str] = Field(default_factory=list)
+    source: str
+
+
 class RecommendedStrategy(BaseModel):
     id: str
     name: str

@@ -5,6 +5,8 @@ node_modules/
 dist/
 release-assets/
 项目说明书.md
+应用创新类项目报告.md
+演示文档操作提醒.md
 src-tauri/target/
 src-tauri/gen/
 src-tauri/bin/

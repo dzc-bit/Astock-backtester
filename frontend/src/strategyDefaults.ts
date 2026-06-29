@@ -36,10 +36,25 @@ export const conditionLibrary = [
     ]
   },
   {
+    id: "capital_flow_n_day_sum_at_most",
+    label: "近N日主力净流出",
+    category: "资金流向",
+    params: [
+      { key: "window", label: "统计窗口", type: "days", options: [3, 5, 10] },
+      { key: "max", label: "净流出阈值", type: "currency", options: [0, -1_000_000, -3_000_000, -5_000_000] }
+    ]
+  },
+  {
     id: "capital_flow_today_at_least",
     label: "当日主力净流入",
     category: "资金流向",
     params: [{ key: "min", label: "净流入下限", type: "currency", options: [1_000_000, 3_000_000, 5_000_000, 10_000_000] }]
+  },
+  {
+    id: "capital_flow_today_at_most",
+    label: "当日资金流出",
+    category: "资金流向",
+    params: [{ key: "max", label: "净流出阈值", type: "currency", options: [0, -1_000_000, -3_000_000] }]
   },
   {
     id: "capital_flow_n_day_positive_count_at_least",
@@ -55,6 +70,12 @@ export const conditionLibrary = [
     label: "MACD柱线下限",
     category: "趋势",
     params: [{ key: "min", label: "MACD下限", type: "number", options: [-0.02, 0, 0.02, 0.05] }]
+  },
+  {
+    id: "macd_dead_cross",
+    label: "MACD死叉",
+    category: "趋势",
+    params: []
   },
   {
     id: "close_above_ma",
