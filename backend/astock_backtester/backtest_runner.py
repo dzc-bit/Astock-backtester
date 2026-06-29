@@ -45,6 +45,8 @@ def enrich_for_strategy(frame: Any, strategy: StrategyConfig) -> Any:
         {"breakout_above_n_day_high", "breakdown_below_n_day_low"},
         set(),
     )
+    # Sort once upfront so each indicator's _sorted() becomes a no-op
+    frame = frame.sort_values(["symbol", "trade_date"]).reset_index(drop=True)
     frame = add_moving_average(frame, ma_windows)
     frame = add_returns(frame, return_windows)
     frame = add_volume_ratio(frame, volume_windows)

@@ -15,6 +15,7 @@ from typing import Any
 from uuid import uuid4
 
 import pandas as pd
+import pyarrow.parquet as pq
 import requests
 
 from astock_backtester.data.briefing import MarketBriefingProvider
@@ -372,6 +373,7 @@ class DataServiceHandler(BaseHTTPRequestHandler):
             settings = BacktestSettings.model_validate(payload["settings"])
             self._write_ndjson({"type": "phase", "phase": "读取本地数据"})
             frame = self._read_backtest_frame(settings)
+            self._write_ndjson({"type": "data_loaded", "rows": len(frame)})
             self._write_ndjson({"type": "phase", "phase": "计算指标与撮合交易"})
 
             def write_backtest_event(event: dict[str, Any]) -> None:
@@ -690,30 +692,41 @@ class DataServiceHandler(BaseHTTPRequestHandler):
         return self.server.state._fetch_capital_flow(symbols, start_date, end_date)
 
     def _capital_flow_backfill_symbols(self, start_date: str | None = None, end_date: str | None = None) -> list[str]:
-        if start_date and end_date:
-            try:
-                frame = self.server.state.warehouse.read_daily_bars(
-                    start_date=start_date,
-                    end_date=end_date,
-                    require_ohlc=True,
-                )
-            except Exception:
-                frame = pd.DataFrame()
-            if not frame.empty and {"symbol", "main_net_inflow"}.issubset(frame.columns):
-                missing = frame.loc[frame["main_net_inflow"].isna(), "symbol"].dropna().astype(str)
-                symbols = sorted(symbol for symbol in missing.unique().tolist() if symbol)
-                if symbols:
-                    return symbols
-
-        symbols: set[str] = set()
+        all_symbols: set[str] = set()
         try:
-            symbols.update(str(symbol) for symbol in self.server.state.provider.list_symbols())
+            all_symbols.update(str(symbol) for symbol in self.server.state.warehouse.read_daily_symbols(require_ohlc=True))
         except Exception:
             pass
-        frame = self.server.state.warehouse.read_daily_bars()
-        if not frame.empty and "symbol" in frame:
-            symbols.update(str(symbol) for symbol in frame["symbol"].dropna().astype(str).unique())
-        return sorted(symbol for symbol in symbols if symbol)
+        if not all_symbols:
+            try:
+                all_symbols.update(str(symbol) for symbol in self.server.state.provider.list_symbols())
+            except Exception:
+                pass
+
+        if start_date and end_date and all_symbols:
+            try:
+                paths = sorted(self.server.state.warehouse.daily_bars_root.glob("year=*/daily_bars.parquet"))
+                if paths:
+                    latest_path = paths[-1]
+                    columns_to_read = ["symbol", "trade_date", "main_net_inflow"]
+                    available = set(pq.ParquetFile(latest_path).schema_arrow.names)
+                    columns_to_read = [c for c in columns_to_read if c in available]
+                    if "symbol" in columns_to_read and "main_net_inflow" in columns_to_read:
+                        frame = self.server.state.warehouse._safe_read_parquet(latest_path, columns=columns_to_read)
+                        if not frame.empty:
+                            frame["trade_date"] = pd.to_datetime(frame["trade_date"], errors="coerce")
+                            frame = frame.dropna(subset=["trade_date"])
+                            frame = frame[frame["trade_date"] >= pd.Timestamp(start_date)]
+                            frame = frame[frame["trade_date"] <= pd.Timestamp(end_date)]
+                            if "main_net_inflow" in frame.columns:
+                                has_any_flow = frame.groupby(frame["symbol"].astype(str))["main_net_inflow"].any()
+                                missing_symbols = set(has_any_flow[~has_any_flow].index)
+                                if missing_symbols:
+                                    return sorted(all_symbols & missing_symbols)
+            except Exception:
+                pass
+
+        return sorted(all_symbols)
 
 
 def create_server(host: str, port: int, cache_dir: str | Path) -> DataServiceServer:

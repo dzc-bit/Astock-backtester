@@ -609,41 +609,56 @@ def _symbols_with_complete_capital_flow(
     normalized = frame.copy()
     normalized["symbol"] = normalized["symbol"].astype(str)
     normalized["trade_date"] = pd.to_datetime(normalized["trade_date"], errors="coerce")
-    warehouse_start = normalized["trade_date"].min()
+    normalized = normalized.dropna(subset=["symbol", "trade_date"])
+    if normalized.empty:
+        return []
+
+    # Vectorized pre-computation: group by symbol and compute date sets in one pass
+    normalized["_td_norm"] = normalized["trade_date"].dt.normalize()
+    flow_mask = normalized["main_net_inflow"].notna()
+    flow_dates_by_sym = normalized[flow_mask].groupby("symbol")["_td_norm"].apply(set).to_dict()
+    all_dates_by_sym = normalized.groupby("symbol")["_td_norm"].apply(set).to_dict()
+    first_daily_by_sym = normalized.groupby("symbol")["trade_date"].min().to_dict()
+
+    base_expected = expected_dates - KNOWN_CAPITAL_FLOW_SOURCE_GAP_DATES
+    symbol_set = {str(s) for s in symbols}
     complete: list[str] = []
-    for symbol in symbols:
-        data = normalized.loc[normalized["symbol"] == str(symbol)]
-        if data.empty:
+
+    for symbol in symbol_set:
+        flow_dates = flow_dates_by_sym.get(symbol)
+        if flow_dates is None:
             continue
-        present_dates = set(data.loc[data["main_net_inflow"].notna(), "trade_date"].dropna().tolist())
-        flow_start = min(present_dates) if present_dates else None
-        first_daily_date = data["trade_date"].dropna().min()
+        all_dates = all_dates_by_sym.get(symbol, set())
+        first_daily_date = first_daily_by_sym.get(symbol)
+
+        # Check special source-start adjustments (rare path)
+        flow_start = min(flow_dates)
+        warehouse_start = normalized["trade_date"].min()
         source_start_boundary = (
-            flow_start is not None
-            and pd.notna(first_daily_date)
+            pd.notna(first_daily_date)
             and pd.notna(warehouse_start)
             and (
                 _uses_symbol_capital_flow_source_start(
-                    str(symbol),
+                    symbol,
                     pd.Timestamp(flow_start),
                     pd.Timestamp(first_daily_date),
                     pd.Timestamp(warehouse_start),
                 )
-                or _uses_listing_day_capital_flow_source_start(data, pd.Timestamp(flow_start))
+                or _uses_listing_day_capital_flow_source_start(
+                    normalized.loc[normalized["symbol"] == symbol], pd.Timestamp(flow_start)
+                )
             )
         )
-        effective_expected_dates = {
-            trade_date
-            for trade_date in expected_dates
-            if trade_date not in KNOWN_CAPITAL_FLOW_SOURCE_GAP_DATES
-            and not (
-                source_start_boundary
-                and flow_start is not None
-                and pd.Timestamp(trade_date) < pd.Timestamp(flow_start)
-            )
-        }
-        if effective_expected_dates.issubset(present_dates):
-            complete.append(str(symbol))
+        if source_start_boundary:
+            effective = {
+                td for td in base_expected
+                if not (pd.Timestamp(td) < pd.Timestamp(flow_start))
+            }
+            if effective.issubset(flow_dates):
+                complete.append(symbol)
+        else:
+            if base_expected.issubset(flow_dates):
+                complete.append(symbol)
     return sorted(complete)
 
 

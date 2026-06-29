@@ -288,12 +288,12 @@ def test_default_json_get_ignores_system_proxy_settings(monkeypatch):
 
     sessions = []
 
-    def fake_session_factory():
+    def fake_get_thread_session():
         session = FakeSession()
         sessions.append(session)
         return session
 
-    monkeypatch.setattr(capital_flow_crawler.requests, "Session", fake_session_factory)
+    monkeypatch.setattr(capital_flow_crawler, "_get_thread_session", fake_get_thread_session)
 
     result = capital_flow_crawler._default_json_get(
         "https://example.test",
@@ -303,7 +303,8 @@ def test_default_json_get_ignores_system_proxy_settings(monkeypatch):
     )
 
     assert result == {"data": {"klines": []}}
-    assert sessions[0].closed is True
+    assert len(sessions) == 1
+    assert sessions[0].trust_env is False
 
 
 def test_fetch_fund_flow_retries_with_header_variants_after_remote_disconnect():

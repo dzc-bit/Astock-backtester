@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+from collections import defaultdict
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta
 import json
 import re
 import time
-from threading import Lock
+from threading import Lock, local as thread_local
 from typing import Any
 
 import requests
@@ -28,6 +29,10 @@ SINA_REQUEST_INTERVAL_SECONDS = 0.25
 BAIDU_PAGE_RETRIES = 3
 BAIDU_PAGE_BACKOFF_SECONDS = 0.5
 BAIDU_PAGE_SLEEP_SECONDS = 0.05
+DEFAULT_MAX_WORKERS = 8
+DEFAULT_CAPITAL_FLOW_BATCH_SIZE = 50
+FAILED_SYMBOL_RETRY_ROUNDS = 2
+FAILED_SYMBOL_RETRY_BACKOFF_SECONDS = 2.0
 
 FIELDS1 = "f1,f2,f3,f7"
 FIELDS2 = "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63"
@@ -168,26 +173,31 @@ def _estimate_limit(start_date: str, end_date: str) -> int:
     return max(5, int(days * 1.3))
 
 
+_thread_local = thread_local()
+
+
+def _get_thread_session() -> requests.Session:
+    session = getattr(_thread_local, "session", None)
+    if session is None:
+        session = requests.Session()
+        session.trust_env = False
+        _thread_local.session = session
+    return session
+
+
 def _default_json_get(url: str, params: dict[str, str], headers: dict[str, str], timeout: int) -> dict[str, Any]:
-    session = requests.Session()
+    session = _get_thread_session()
     session.trust_env = False
-    try:
-        response = session.get(url, params=params, headers=headers, timeout=timeout)
-        response.raise_for_status()
-        return _loads_eastmoney_json(response.text)
-    finally:
-        session.close()
+    response = session.get(url, params=params, headers=headers, timeout=timeout)
+    response.raise_for_status()
+    return _loads_eastmoney_json(response.text)
 
 
 def _default_sina_json_get(url: str, params: dict[str, str], headers: dict[str, str], timeout: int) -> Any:
-    session = requests.Session()
-    session.trust_env = False
-    try:
-        response = session.get(url, params=params, headers=headers, timeout=timeout)
-        response.raise_for_status()
-        return json.loads(response.content.decode("gbk", errors="ignore"))
-    finally:
-        session.close()
+    session = _get_thread_session()
+    response = session.get(url, params=params, headers=headers, timeout=timeout)
+    response.raise_for_status()
+    return json.loads(response.content.decode("gbk", errors="ignore"))
 
 
 def _curl_cffi_json_get(url: str, params: dict[str, str], headers: dict[str, str], timeout: int) -> dict[str, Any]:
@@ -633,7 +643,7 @@ class CapitalFlowCrawler:
         limit: int | None = None,
         timeout: int = 15,
         skip_eastmoney: bool = False,
-        max_workers: int = 4,
+        max_workers: int = DEFAULT_MAX_WORKERS,
     ) -> dict[str, list[dict[str, Any]]]:
         rows: list[dict[str, Any]] = []
         failures: list[dict[str, Any]] = []
@@ -700,14 +710,16 @@ class CapitalFlowCrawler:
         if not codes:
             return {"rows": rows, "failures": failures, "diagnostics": diagnostics}
 
+        # Serial fetch for first symbol to determine eastmoney skip for the batch
         ordered_results: list[dict[str, Any] | None] = [None] * len(codes)
         first_result = fetch_one(codes[0], skip_eastmoney)
         ordered_results[0] = first_result
         skip_eastmoney_for_rest = bool(skip_eastmoney or first_result["skip_eastmoney"])
 
+        # Parallel fetch for remaining symbols
         remaining = codes[1:]
         worker_count = max(1, min(max_workers, len(remaining)))
-        if remaining and worker_count > 1:
+        if remaining:
             with ThreadPoolExecutor(max_workers=worker_count) as executor:
                 futures = {
                     executor.submit(fetch_one, code, skip_eastmoney_for_rest): index
@@ -715,19 +727,57 @@ class CapitalFlowCrawler:
                 }
                 for future in as_completed(futures):
                     ordered_results[futures[future]] = future.result()
-        else:
-            for index, code in enumerate(remaining, start=1):
-                result = fetch_one(code, skip_eastmoney_for_rest)
-                ordered_results[index] = result
-                if result["skip_eastmoney"]:
-                    skip_eastmoney_for_rest = True
 
+        # Collect results and identify failed symbols for retry
         for result in ordered_results:
             if not result:
                 continue
             rows.extend(result["rows"])
             failures.extend(result["failures"])
             diagnostics.extend(result["diagnostics"])
+
+        # Retry failed symbols with backoff (skip if cached rows were already used)
+        failed_symbols = {str(f["symbol"]) for f in failures if f.get("symbol")}
+        symbols_with_cached_rows = {
+            str(d["symbol"]) for d in diagnostics
+            if d.get("code") == "recent_success_cache_used" and d.get("symbol")
+        }
+        retryable_failures = failed_symbols - symbols_with_cached_rows
+        if retryable_failures and FAILED_SYMBOL_RETRY_ROUNDS > 0:
+            for retry_round in range(FAILED_SYMBOL_RETRY_ROUNDS):
+                remaining_failed = [s for s in codes if _normalize_code(s) in retryable_failures]
+                if not remaining_failed:
+                    break
+                time.sleep(FAILED_SYMBOL_RETRY_BACKOFF_SECONDS * (retry_round + 1))
+                # Determine skip_eastmoney based on failure pattern
+                network_failures = {
+                    str(f["symbol"]) for f in failures
+                    if f.get("code") == "network_error" and f.get("symbol")
+                }
+                round_skip = len(network_failures) > len(remaining_failed) / 2
+                retry_results: list[dict[str, Any]] = []
+                with ThreadPoolExecutor(max_workers=max(1, min(worker_count, len(remaining_failed)))) as executor:
+                    futures = {
+                        executor.submit(fetch_one, code, round_skip): code
+                        for code in remaining_failed
+                    }
+                    for future in as_completed(futures):
+                        retry_results.append(future.result())
+
+                # Remove old failures for retried symbols and add new results
+                retried_codes = {_normalize_code(s) for s in remaining_failed}
+                failures = [f for f in failures if str(f.get("symbol")) not in retried_codes]
+                diagnostics = [
+                    d for d in diagnostics
+                    if not (str(d.get("symbol")) in retried_codes and d.get("code") in ("network_error", "provider_attempt_failed"))
+                ]
+                for result in retry_results:
+                    rows.extend(result["rows"])
+                    failures.extend(result["failures"])
+                    diagnostics.extend(result["diagnostics"])
+                    if not result["failures"]:
+                        retryable_failures.discard(result["symbol"])
+
         return {"rows": rows, "failures": failures, "diagnostics": diagnostics}
 
     def _remember_success_rows(self, code: str, rows: list[dict[str, Any]]) -> None:

@@ -23,7 +23,7 @@ OHLC_COLUMNS = ["open", "high", "low", "close"]
 @dataclass
 class DailyCompletenessSnapshot:
     complete_symbols: set[str]
-    existing_by_pair: dict[tuple[str, pd.Timestamp], pd.Series]
+    existing_by_pair: pd.DataFrame  # MultiIndex (symbol, _td_norm) DataFrame
 
 
 @dataclass
@@ -45,7 +45,7 @@ class SyncJobManager:
     full_market_batch_size: int = 25
     full_market_workers: int = 4
     full_market_write_batch_rows: int = 25_000
-    capital_flow_batch_size: int = 20
+    capital_flow_batch_size: int = 50
 
     def __post_init__(self) -> None:
         self._jobs: dict[str, SyncJobStatus] = {}
@@ -296,31 +296,34 @@ class SyncJobManager:
     def _daily_completeness_snapshot(self, start_date: str, end_date: str) -> DailyCompletenessSnapshot:
         expected_dates = effective_a_share_date_range(start_date, end_date)
         if expected_dates is None:
-            return DailyCompletenessSnapshot(complete_symbols=set(), existing_by_pair={})
+            return DailyCompletenessSnapshot(complete_symbols=set(), existing_by_pair=pd.DataFrame())
         frame = self.warehouse.read_daily_bars(
             start_date=expected_dates[0],
             end_date=expected_dates[1],
             require_ohlc=True,
         )
         if frame.empty or not {"symbol", "trade_date"}.issubset(frame.columns):
-            return DailyCompletenessSnapshot(complete_symbols=set(), existing_by_pair={})
+            return DailyCompletenessSnapshot(complete_symbols=set(), existing_by_pair=pd.DataFrame())
         required_dates = a_share_trade_dates(expected_dates[0], expected_dates[1])
-        complete: set[str] = set()
-        existing_by_pair: dict[tuple[str, pd.Timestamp], pd.Series] = {}
         normalized = frame.copy()
         normalized["symbol"] = normalized["symbol"].astype(str)
         normalized["trade_date"] = pd.to_datetime(normalized["trade_date"], errors="coerce")
         normalized = normalized.dropna(subset=["symbol", "trade_date"])
-        for _, row in normalized.drop_duplicates(["symbol", "trade_date"], keep="last").iterrows():
-            existing_by_pair[(str(row["symbol"]), pd.Timestamp(row["trade_date"]).normalize())] = row
-        if "float_market_cap" not in normalized.columns:
-            return DailyCompletenessSnapshot(complete_symbols=set(), existing_by_pair=existing_by_pair)
-        for symbol, symbol_frame in normalized.groupby("symbol"):
-            cap_complete = symbol_frame.dropna(subset=["float_market_cap"])
-            actual_dates = {pd.Timestamp(value).normalize() for value in cap_complete["trade_date"].tolist()}
-            if required_dates.issubset(actual_dates):
-                complete.add(str(symbol))
-        return DailyCompletenessSnapshot(complete_symbols=complete, existing_by_pair=existing_by_pair)
+        if normalized.empty:
+            return DailyCompletenessSnapshot(complete_symbols=set(), existing_by_pair=pd.DataFrame())
+        normalized["_td_norm"] = normalized["trade_date"].dt.normalize()
+        # Always build existing DataFrame (needed for filled-missing-rows counting)
+        deduped = normalized.drop_duplicates(["symbol", "_td_norm"], keep="last")
+        existing_df = deduped.set_index(["symbol", "_td_norm"]).sort_index()
+
+        complete: set[str] = set()
+        if "float_market_cap" in normalized.columns:
+            cap_complete = normalized.dropna(subset=["float_market_cap"])
+            actual_by_sym = cap_complete.groupby("symbol")["_td_norm"].apply(set)
+            for symbol, actual_dates in actual_by_sym.items():
+                if required_dates.issubset(actual_dates):
+                    complete.add(str(symbol))
+        return DailyCompletenessSnapshot(complete_symbols=complete, existing_by_pair=existing_df)
 
     def _flush_full_market_frames(
         self,
@@ -376,7 +379,13 @@ class SyncJobManager:
             return FilledMissingRows()
         if snapshot is None:
             snapshot = self._daily_completeness_snapshot(start_date, end_date) if start_date and end_date else None
-        existing_by_pair = snapshot.existing_by_pair if snapshot else {}
+
+        # Convert DataFrame-based snapshot back to dict for row-level lookups
+        existing_df = snapshot.existing_by_pair if snapshot is not None and not snapshot.existing_by_pair.empty else pd.DataFrame()
+        existing_by_pair: dict[tuple[str, pd.Timestamp], pd.Series] = {}
+        if not existing_df.empty:
+            for idx_tuple, row in existing_df.iterrows():
+                existing_by_pair[(str(idx_tuple[0]), idx_tuple[1])] = row
 
         filled = FilledMissingRows()
         for _, row in normalized.iterrows():
