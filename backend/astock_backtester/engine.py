@@ -600,15 +600,13 @@ def _planned_entry_amount(
     cash: float,
     open_positions: list[Trade],
     current_equity: float,
-    current_market_value: float,
+    _current_market_value: float,
 ) -> float:
-    total_target_amount = current_equity * settings.position_size_pct
-    remaining_capacity = max(0.0, total_target_amount - current_market_value)
+    per_stock_cap = current_equity * settings.position_size_pct
     if settings.position_sizing_mode == "fixed_ratio":
-        per_trade_target = total_target_amount / max(1, settings.max_positions)
-        return min(cash, remaining_capacity, per_trade_target)
+        return min(cash, per_stock_cap)
     remaining_slots = max(1, settings.max_positions - len(open_positions))
-    return min(cash, remaining_capacity / remaining_slots if remaining_slots else 0.0)
+    return min(cash, per_stock_cap, cash / remaining_slots if remaining_slots else 0.0)
 
 
 def run_backtest(

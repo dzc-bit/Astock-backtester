@@ -694,13 +694,13 @@ describe("A 股回测工作台界面", () => {
     expect(screen.getByLabelText("新增离场条件表达式")).toHaveValue("MACD死叉");
   });
 
-  it("labels position size as a total portfolio cap", async () => {
+  it("labels position size as a single-stock cap", async () => {
     render(<App />);
 
     await screen.findByText("日线行情");
 
-    expect(screen.getByLabelText("总仓位上限（%）")).toBeInTheDocument();
-    expect(screen.queryByLabelText("单股仓位（%）")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("个股仓位上限（%）")).toBeInTheDocument();
+    expect(screen.queryByLabelText("总仓位上限（%）")).not.toBeInTheDocument();
   });
 
   it("uses controlled selectors to build strategy and backtest settings", async () => {
@@ -984,14 +984,14 @@ describe("A 股回测工作台界面", () => {
     expect(screen.getByLabelText("固定持仓天数").tagName).toBe("INPUT");
   });
 
-  it("lets the user set total position cap and shows it in the trades table", async () => {
+  it("lets the user set the single-stock position cap and shows position usage in the trades table", async () => {
     const user = userEvent.setup();
     render(<App />);
 
     await screen.findByRole("heading", { name: "A股策略回测工作台" });
     await user.selectOptions(screen.getByLabelText("仓位模式"), "fixed_ratio");
-    await user.clear(screen.getByLabelText("总仓位上限（%）"));
-    await user.type(screen.getByLabelText("总仓位上限（%）"), "20");
+    await user.clear(screen.getByLabelText("个股仓位上限（%）"));
+    await user.type(screen.getByLabelText("个股仓位上限（%）"), "20");
     await user.click(screen.getByRole("button", { name: "运行历史回测" }));
 
     expect(apiMocks.runBacktestStreamWithDataService).toHaveBeenCalledWith(

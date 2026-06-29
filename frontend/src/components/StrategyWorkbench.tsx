@@ -86,8 +86,8 @@ const stockPools = [
 ] as const;
 
 const positionSizingModes = [
-  { value: "fixed_ratio", label: "总仓位按持仓数均分" },
-  { value: "equal_slots", label: "按剩余总仓位等分" }
+  { value: "fixed_ratio", label: "固定单股仓位" },
+  { value: "equal_slots", label: "剩余资金按空位等分" }
 ] as const;
 
 const conditionMetaById = Object.fromEntries(
@@ -166,7 +166,7 @@ const exitTemplates = ["收盘价跌破3日均线", "近5日涨幅小于3%", "MA
 
 const numericSettingLabels: Partial<Record<keyof BacktestSettingsConfig, string>> = {
   initial_cash: "初始资金",
-  position_size_pct: "总仓位上限",
+  position_size_pct: "个股仓位上限",
   fixed_holding_days: "固定持仓天数",
   max_positions: "最大持仓数",
   max_daily_buys: "每日最多买入",
@@ -719,11 +719,11 @@ export function StrategyWorkbench({
               </select>
             </label>
             <label>
-              总仓位上限（%）
+              个股仓位上限（%）
               <span className="setting-example">样例：20</span>
               <input
                 type="number"
-                aria-label="总仓位上限（%）"
+                aria-label="个股仓位上限（%）"
                 min={0.1}
                 max={100}
                 step={1}
@@ -833,7 +833,7 @@ export function StrategyWorkbench({
             </label>
           </div>
           <div className="inline-actions">
-            <span className="muted-code">A股买入按 100 股整手取整，仓位按当前总权益计算。</span>
+            <span className="muted-code">A股买入按 100 股整手取整，个股仓位按当前总权益计算。</span>
           </div>
         </div>
       </div>

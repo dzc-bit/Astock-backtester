@@ -201,7 +201,7 @@ function validateBacktestSettings(settings: BacktestSettingsConfig, draftErrors:
     errors.push("初始资金必须大于0。");
   }
   if (!Number.isFinite(settings.position_size_pct) || settings.position_size_pct <= 0 || settings.position_size_pct > 1) {
-    errors.push("总仓位上限必须大于0且不能超过100%。");
+    errors.push("个股仓位上限必须大于0且不能超过100%。");
   }
   if (!Number.isInteger(settings.fixed_holding_days) || settings.fixed_holding_days < 1) {
     errors.push("固定持仓天数必须至少为1天。");

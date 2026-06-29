@@ -276,7 +276,7 @@ def test_equity_curve_does_not_deduct_next_day_buy_cash_on_signal_date():
     assert result.equity_curve[1].market_value > 0
 
 
-def test_total_position_size_caps_portfolio_exposure_across_multiple_holdings():
+def test_position_size_caps_each_stock_instead_of_total_portfolio_exposure():
     rows = []
     for symbol in ["AAA", "BBB", "CCC"]:
         rows.extend(
@@ -306,9 +306,10 @@ def test_total_position_size_caps_portfolio_exposure_across_multiple_holdings():
 
     opened = [trade for trade in result.trades if trade.buy_amount > 0]
     assert len(opened) == 3
-    assert sum(trade.buy_amount for trade in opened) <= 20_000
+    assert [trade.buy_amount for trade in opened] == [20_000, 20_000, 20_000]
+    assert [trade.target_position_pct for trade in opened] == [0.2, 0.2, 0.2]
     max_curve_exposure = max(point.market_value / point.equity for point in result.equity_curve if point.equity)
-    assert max_curve_exposure <= 0.2
+    assert max_curve_exposure == pytest.approx(0.6)
     assert result.metrics.max_position_pct == pytest.approx(max_curve_exposure)
 
 
@@ -808,11 +809,11 @@ def test_backtest_applies_single_position_ratio_and_board_lot_rounding(basic_str
 
     assert result.trades
     trade = result.trades[0]
-    assert trade.shares == 600
-    assert trade.planned_amount == 7500
-    assert trade.buy_amount == 7200
-    assert trade.target_position_pct == 0.075
-    assert trade.actual_position_pct == 0.072
+    assert trade.shares == 1200
+    assert trade.planned_amount == 15000
+    assert trade.buy_amount == 14400
+    assert trade.target_position_pct == 0.15
+    assert trade.actual_position_pct == 0.144
 
 
 def test_exit_rule_can_sell_when_price_breaks_prior_low():
