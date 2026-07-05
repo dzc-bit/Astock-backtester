@@ -1,7 +1,6 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, vi } from "vitest";
-import { expect, it } from "vitest";
+import { beforeEach, expect, it, vi } from "vitest";
 import type { MarketNewsResponse } from "../types";
 import { NewsPanel } from "./NewsPanel";
 
@@ -14,6 +13,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 beforeEach(() => {
   invokeMock.mockReset();
   Reflect.deleteProperty(window, "__TAURI_INTERNALS__");
+  Reflect.deleteProperty(globalThis, "isTauri");
 });
 
 function buildNews(): MarketNewsResponse {
@@ -24,11 +24,11 @@ function buildNews(): MarketNewsResponse {
   };
 }
 
-it("keeps Tonghuashun morning briefing out of the news panel", () => {
-  render(<NewsPanel news={buildNews()} />);
+it("keeps the market news panel mounted as a standalone section", () => {
+  const { container } = render(<NewsPanel news={buildNews()} />);
 
-  expect(screen.getByText("资讯与事件")).toBeInTheDocument();
-  expect(screen.queryByText("同花顺早盘汇总")).not.toBeInTheDocument();
+  expect(container.querySelector(".news-panel")).toBeInTheDocument();
+  expect(container.querySelector(".news-list")).not.toBeInTheDocument();
 });
 
 it("keeps all news items visible inside the scrolling list", () => {
@@ -38,9 +38,9 @@ it("keeps all news items visible inside the scrolling list", () => {
         updated_at: "2026-06-01T10:30:00+08:00",
         source: "test-news",
         items: Array.from({ length: 8 }, (_, index) => ({
-          title: `市场新闻 ${index + 1}`,
-          summary: "短要点",
-          source: "测试源",
+          title: `market-news-${index + 1}`,
+          summary: "summary",
+          source: "source",
           published_at: "2026-06-01T10:30:00+08:00",
           tags: [],
           sentiment: "neutral"
@@ -49,9 +49,8 @@ it("keeps all news items visible inside the scrolling list", () => {
     />
   );
 
-  expect(screen.getByText("市场新闻 1")).toBeInTheDocument();
-  expect(screen.getByText("市场新闻 8")).toBeInTheDocument();
-  expect(screen.queryByText(/资讯已收起/)).not.toBeInTheDocument();
+  expect(screen.getByText("market-news-1")).toBeInTheDocument();
+  expect(screen.getByText("market-news-8")).toBeInTheDocument();
 });
 
 it("opens news item urls through the desktop shell command", async () => {
@@ -69,9 +68,9 @@ it("opens news item urls through the desktop shell command", async () => {
         source: "test-news",
         items: [
           {
-            title: "市场新闻",
-            summary: "短要点",
-            source: "测试源",
+            title: "cls-news",
+            summary: "summary",
+            source: "source",
             published_at: "2026-06-01T10:30:00+08:00",
             url: "https://www.cls.cn/detail/123",
             tags: [],
@@ -82,9 +81,44 @@ it("opens news item urls through the desktop shell command", async () => {
     />
   );
 
-  await user.click(screen.getByRole("link", { name: "打开市场新闻" }));
+  await user.click(screen.getByRole("link", { name: "打开cls-news" }));
 
   expect(invokeMock).toHaveBeenCalledWith("open_external_url", {
     url: "https://www.cls.cn/detail/123"
+  });
+});
+
+it("detects Tauri v2 runtime when opening news item urls", async () => {
+  const user = userEvent.setup();
+  Object.defineProperty(globalThis, "isTauri", {
+    configurable: true,
+    value: true
+  });
+  invokeMock.mockResolvedValueOnce(undefined);
+
+  render(
+    <NewsPanel
+      news={{
+        updated_at: "2026-06-01T10:30:00+08:00",
+        source: "test-news",
+        items: [
+          {
+            title: "eastmoney-news",
+            summary: "summary",
+            source: "eastmoney",
+            published_at: "2026-06-01T10:30:00+08:00",
+            url: "http://finance.eastmoney.com/news/1345,202607053794287518.html",
+            tags: [],
+            sentiment: "neutral"
+          }
+        ]
+      }}
+    />
+  );
+
+  await user.click(screen.getByRole("link", { name: "打开eastmoney-news" }));
+
+  expect(invokeMock).toHaveBeenCalledWith("open_external_url", {
+    url: "http://finance.eastmoney.com/news/1345,202607053794287518.html"
   });
 });

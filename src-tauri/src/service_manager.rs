@@ -568,7 +568,7 @@ impl DataServiceManager {
         } else {
             return Err("packaged localhost data service was not found".to_string());
         };
-        command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped());
+        command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
         #[cfg(windows)]
         {
             command.creation_flags(hidden_process_creation_flags());
@@ -924,6 +924,16 @@ mod tests {
         assert!(
             source.contains(&needle),
             "data service sidecar spawn should suppress Windows console windows"
+        );
+    }
+
+    #[test]
+    fn service_spawn_discards_unread_stderr() {
+        let source = include_str!("service_manager.rs");
+
+        assert!(
+            source.contains("command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())"),
+            "unread sidecar stderr pipes can fill and stall the local data service"
         );
     }
 

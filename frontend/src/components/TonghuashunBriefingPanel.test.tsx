@@ -1,6 +1,6 @@
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { expect, it, vi } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import type { MarketBriefingResponse } from "../types";
 import { TonghuashunBriefingPanel } from "./TonghuashunBriefingPanel";
 
@@ -9,6 +9,12 @@ const invokeMock = vi.hoisted(() => vi.fn());
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: invokeMock
 }));
+
+afterEach(() => {
+  invokeMock.mockReset();
+  Reflect.deleteProperty(window, "__TAURI_INTERNALS__");
+  Reflect.deleteProperty(globalThis, "isTauri");
+});
 
 function buildBriefing(kind: "fupan" | "zaopan"): MarketBriefingResponse {
   return {
@@ -151,7 +157,50 @@ it("opens the Tonghuashun zaopan source page when no detail article url is avail
   expect(invokeMock).toHaveBeenCalledWith("open_ths_original_url", {
     url: "https://stock.10jqka.com.cn/zaopan/"
   });
-  Reflect.deleteProperty(window, "__TAURI_INTERNALS__");
+});
+
+it("detects Tauri v2 runtime when opening the Tonghuashun original source", async () => {
+  const user = userEvent.setup();
+  const zaopan = buildBriefing("zaopan");
+  zaopan.source_url = "https://stock.10jqka.com.cn/zaopan/";
+  Object.defineProperty(globalThis, "isTauri", {
+    configurable: true,
+    value: true
+  });
+  invokeMock.mockResolvedValueOnce(undefined);
+
+  const { container } = render(<TonghuashunBriefingPanel fupan={buildBriefing("fupan")} zaopan={zaopan} />);
+
+  const sourceButtons = Array.from(container.querySelectorAll<HTMLButtonElement>(".ths-source-link"));
+  expect(sourceButtons).toHaveLength(1);
+  await user.click(sourceButtons[0]);
+
+  expect(invokeMock).toHaveBeenCalledWith("open_ths_original_url", {
+    url: "https://stock.10jqka.com.cn/zaopan/"
+  });
+});
+
+it("opens full briefing inline links through the desktop shell command", async () => {
+  const user = userEvent.setup();
+  Object.defineProperty(globalThis, "isTauri", {
+    configurable: true,
+    value: true
+  });
+  invokeMock.mockResolvedValueOnce(undefined);
+
+  const { container } = render(<TonghuashunBriefingPanel fupan={buildBriefing("fupan")} zaopan={buildBriefing("zaopan")} />);
+
+  const openButtons = Array.from(container.querySelectorAll<HTMLButtonElement>(".ths-briefing-actions .secondary-button"));
+  expect(openButtons.length).toBeGreaterThan(0);
+  await user.click(openButtons[0]);
+
+  const sectionLinks = Array.from(container.querySelectorAll<HTMLAnchorElement>(".ths-briefing-link-list a"));
+  expect(sectionLinks.length).toBeGreaterThan(0);
+  await user.click(sectionLinks[0]);
+
+  expect(invokeMock).toHaveBeenCalledWith("open_external_url", {
+    url: "https://stock.10jqka.com.cn/fupan/detail.html"
+  });
 });
 
 it("disables original article actions when source url is missing", async () => {

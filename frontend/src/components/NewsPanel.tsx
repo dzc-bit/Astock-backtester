@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { ExternalLink, Newspaper, RefreshCw } from "lucide-react";
 import type { MouseEvent } from "react";
 import type { MarketNewsResponse } from "../types";
+import { isTauriRuntime } from "../tauriRuntime";
 
 type Props = {
   news: MarketNewsResponse | null;
@@ -22,10 +23,6 @@ function formatTime(value: string | null | undefined): string {
   }).format(new Date(value));
 }
 
-function isTauriRuntime(): boolean {
-  return Boolean((window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__);
-}
-
 async function openExternalUrl(url: string): Promise<void> {
   if (isTauriRuntime()) {
     await invoke("open_external_url", { url });
@@ -35,9 +32,6 @@ async function openExternalUrl(url: string): Promise<void> {
 }
 
 function handleNewsLinkClick(event: MouseEvent<HTMLAnchorElement>, url: string): void {
-  if (!isTauriRuntime()) {
-    return;
-  }
   event.preventDefault();
   void openExternalUrl(url);
 }

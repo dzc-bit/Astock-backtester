@@ -137,14 +137,16 @@ fn is_ths_original_article_url(url: &str) -> bool {
 }
 
 fn is_safe_external_http_url(url: &str) -> bool {
-    let Some(rest) = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://")) else {
+    if url.chars().any(|character| character.is_control() || character.is_whitespace()) {
         return false;
     };
-    !rest.is_empty()
-        && !rest.starts_with('/')
-        && rest
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_' | b'/' | b'?' | b'&' | b'=' | b'%' | b'#' | b':' | b'+'))
+    let Ok(parsed) = url::Url::parse(url) else {
+        return false;
+    };
+    matches!(parsed.scheme(), "http" | "https")
+        && parsed.host_str().is_some()
+        && parsed.username().is_empty()
+        && parsed.password().is_none()
 }
 
 fn external_open_command(url: &str) -> Command {
@@ -319,6 +321,9 @@ mod tests {
     fn external_http_url_accepts_news_links_and_rejects_non_web_targets() {
         assert!(is_safe_external_http_url("https://www.cls.cn/detail/123"));
         assert!(is_safe_external_http_url("https://finance.eastmoney.com/a/202606053421.html?from=web"));
+        assert!(is_safe_external_http_url(
+            "http://finance.eastmoney.com/news/1345,202607053794287518.html"
+        ));
         assert!(!is_safe_external_http_url("file:///C:/Windows/System32/calc.exe"));
         assert!(!is_safe_external_http_url("https://www.cls.cn/detail/123 & calc"));
         assert!(!is_safe_external_http_url("https://www.cls.cn/detail/123\n"));

@@ -20,6 +20,7 @@ import type {
   StrategyConfig,
   SyncJobStatus
 } from "./types";
+import { isTauriRuntime } from "./tauriRuntime";
 
 type BackendResponse<T> = ({ ok: true } & T) | { ok: false; error: { code: string; message: string } };
 
@@ -78,10 +79,6 @@ const demoResult: BacktestResult = {
   },
   preflight_issues: []
 };
-
-function isTauriRuntime(): boolean {
-  return Boolean((window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__);
-}
 
 async function callBackend<T>(payload: Record<string, unknown>): Promise<T> {
   if (!isTauriRuntime()) {

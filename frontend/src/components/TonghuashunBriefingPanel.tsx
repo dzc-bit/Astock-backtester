@@ -1,8 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
 import { ExternalLink, FileText, Sunrise, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import type { ReactNode, RefObject } from "react";
+import type { MouseEvent, ReactNode, RefObject } from "react";
 import type { MarketBriefingResponse, MarketBriefingTable } from "../types";
+import { isTauriRuntime } from "../tauriRuntime";
 
 type Props = {
   fupan: MarketBriefingResponse | null;
@@ -81,10 +82,6 @@ function hasMeaningfulTableValue(value: string | null | undefined): boolean {
   return normalized.length > 0 && normalized !== "--" && normalized !== "-";
 }
 
-function isTauriRuntime(): boolean {
-  return Boolean((window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__);
-}
-
 function isTonghuashunArticleUrl(url: string | null | undefined): url is string {
   const normalizedUrl = url?.trim();
   if (!normalizedUrl) {
@@ -129,6 +126,19 @@ async function openOriginalArticleUrl(url: string): Promise<void> {
     return;
   }
   window.open(url, "_blank", "noopener,noreferrer");
+}
+
+async function openExternalUrl(url: string): Promise<void> {
+  if (isTauriRuntime()) {
+    await invoke("open_external_url", { url });
+    return;
+  }
+  window.open(url, "_blank", "noopener,noreferrer");
+}
+
+function handleExternalLinkClick(event: MouseEvent<HTMLAnchorElement>, url: string): void {
+  event.preventDefault();
+  void openExternalUrl(url);
 }
 
 function linkUrlOrSource(linkUrl: string | null | undefined, briefing: MarketBriefingResponse): string | null {
@@ -369,7 +379,13 @@ function BriefingDialog({
                         {section.links.map((link, linkIndex) => {
                           const href = linkUrlOrSource(link.url, briefing);
                           return href ? (
-                            <a href={href} target="_blank" rel="noreferrer" key={`${link.title}-${linkIndex}`}>
+                            <a
+                              href={href}
+                              target="_blank"
+                              rel="noreferrer"
+                              key={`${link.title}-${linkIndex}`}
+                              onClick={(event) => handleExternalLinkClick(event, href)}
+                            >
                               {link.title}
                               <ExternalLink size={13} aria-hidden="true" />
                             </a>
