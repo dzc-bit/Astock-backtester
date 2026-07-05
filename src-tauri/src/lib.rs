@@ -58,6 +58,7 @@ pub fn run() {
             commands::backend_command,
             commands::ensure_data_service,
             commands::load_saved_strategies,
+            commands::open_external_url,
             commands::open_ths_original_url,
             commands::persist_saved_strategies,
             commands::workspace_diagnostics

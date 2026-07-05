@@ -711,7 +711,7 @@ class MarketBriefingProvider:
             kind="zaopan",
             updated_at=datetime.now(timezone.utc),
             source="ths-zaopan",
-            source_url=_first_ths_article_link_url(expanded_sections),
+            source_url=_first_ths_article_link_url(expanded_sections) or THS_ZAOPAN_URL,
             summary=summary or (sections[0].content if sections and sections[0].content else fallback_summary),
             sections=expanded_sections,
             diagnostics=diagnostics,

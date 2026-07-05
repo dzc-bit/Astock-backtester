@@ -5,6 +5,7 @@ from bs4 import BeautifulSoup
 from astock_backtester.data.briefing import (
     MarketBriefingProvider,
     THS_FUPAN_URL,
+    THS_ZAOPAN_URL,
     THS_REFERER,
     _is_noisy_content_line,
     _table_from_node,
@@ -360,6 +361,22 @@ def test_market_briefing_provider_parses_ths_zaopan_summary_and_tables():
     assert [section.title for section in response.sections] == ["早盘要点", "今日停复牌"]
     assert response.sections[0].tables[0].rows[0]["公司名称"] == "利通电子"
     assert response.sections[1].tables[0].rows[0]["简称"] == "*ST天择"
+
+
+def test_market_briefing_provider_uses_zaopan_page_as_source_when_no_article_detail_exists():
+    html = """
+    <html><body>
+      <div class="yestoday">昨日收盘指数 上证指数：4068.57 -0.734%</div>
+      <div class="content-main-fl">
+        <p>【昨日国内行情回顾】A股三大指数集体下跌，白酒、煤炭涨幅居前。</p>
+      </div>
+    </body></html>
+    """
+
+    response = MarketBriefingProvider(requester=lambda *args, **kwargs: FakeHtmlResponse(html)).latest_zaopan()
+
+    assert response.source == "ths-zaopan"
+    assert response.source_url == THS_ZAOPAN_URL
 
 
 def test_market_briefing_provider_labels_stock_gain_price_tables_without_misusing_theme_columns():

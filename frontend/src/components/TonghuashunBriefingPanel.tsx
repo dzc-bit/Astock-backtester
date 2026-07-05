@@ -98,13 +98,30 @@ function isTonghuashunArticleUrl(url: string | null | undefined): url is string 
   }
 }
 
+function isTonghuashunSourceUrl(url: string | null | undefined): url is string {
+  const normalizedUrl = url?.trim();
+  if (!normalizedUrl) {
+    return false;
+  }
+  try {
+    const parsed = new URL(normalizedUrl);
+    return (
+      parsed.protocol === "https:" &&
+      parsed.hostname === "stock.10jqka.com.cn" &&
+      (parsed.pathname.endsWith(".shtml") || parsed.pathname === "/zaopan/")
+    );
+  } catch {
+    return false;
+  }
+}
+
 function sourceArticleUrl(briefing: MarketBriefingResponse): string | null {
   const sourceUrl = briefing.source_url?.trim();
-  return isTonghuashunArticleUrl(sourceUrl) ? sourceUrl : null;
+  return isTonghuashunSourceUrl(sourceUrl) ? sourceUrl : null;
 }
 
 async function openOriginalArticleUrl(url: string): Promise<void> {
-  if (!isTonghuashunArticleUrl(url)) {
+  if (!isTonghuashunSourceUrl(url)) {
     return;
   }
   if (isTauriRuntime()) {

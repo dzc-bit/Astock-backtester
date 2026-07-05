@@ -126,11 +126,25 @@ fn is_ths_original_article_url(url: &str) -> bool {
         Some(path) => path,
         None => return false,
     };
+    if path == "zaopan/" {
+        return true;
+    }
     !path.is_empty()
         && path.ends_with(".shtml")
         && path
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'.' | b'_' | b'-'))
+}
+
+fn is_safe_external_http_url(url: &str) -> bool {
+    let Some(rest) = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://")) else {
+        return false;
+    };
+    !rest.is_empty()
+        && !rest.starts_with('/')
+        && rest
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_' | b'/' | b'?' | b'&' | b'=' | b'%' | b'#' | b':' | b'+'))
 }
 
 fn external_open_command(url: &str) -> Command {
@@ -156,7 +170,7 @@ fn external_open_command(url: &str) -> Command {
     }
 }
 
-fn open_external_url(url: &str) -> Result<(), String> {
+fn spawn_external_url(url: &str) -> Result<(), String> {
     let mut command = external_open_command(url);
     command
         .stdin(Stdio::null())
@@ -172,7 +186,15 @@ pub fn open_ths_original_url(url: String) -> Result<(), String> {
     if !is_ths_original_article_url(&url) {
         return Err("only Tonghuashun original article detail urls can be opened".to_string());
     }
-    open_external_url(&url)
+    spawn_external_url(&url)
+}
+
+#[tauri::command]
+pub fn open_external_url(url: String) -> Result<(), String> {
+    if !is_safe_external_http_url(&url) {
+        return Err("only http or https urls can be opened".to_string());
+    }
+    spawn_external_url(&url)
 }
 
 #[tauri::command]
@@ -242,7 +264,7 @@ pub fn workspace_diagnostics() -> Result<WorkspaceDiagnostics, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_ths_original_article_url, read_saved_strategies_from, saved_strategies_path_from_root,
+        is_safe_external_http_url, is_ths_original_article_url, read_saved_strategies_from, saved_strategies_path_from_root,
         workspace_diagnostics_from_root, write_saved_strategies_to,
     };
     use serde_json::json;
@@ -262,6 +284,11 @@ mod tests {
         assert!(is_ths_original_article_url(
             "https://stock.10jqka.com.cn/20260605/c677247169.shtml"
         ));
+    }
+
+    #[test]
+    fn ths_original_article_url_accepts_zaopan_source_page() {
+        assert!(is_ths_original_article_url("https://stock.10jqka.com.cn/zaopan/"));
     }
 
     #[test]
@@ -286,6 +313,15 @@ mod tests {
         assert!(!is_ths_original_article_url(
             "https://stock.10jqka.com.cn/20260605/c677247169.shtml\n"
         ));
+    }
+
+    #[test]
+    fn external_http_url_accepts_news_links_and_rejects_non_web_targets() {
+        assert!(is_safe_external_http_url("https://www.cls.cn/detail/123"));
+        assert!(is_safe_external_http_url("https://finance.eastmoney.com/a/202606053421.html?from=web"));
+        assert!(!is_safe_external_http_url("file:///C:/Windows/System32/calc.exe"));
+        assert!(!is_safe_external_http_url("https://www.cls.cn/detail/123 & calc"));
+        assert!(!is_safe_external_http_url("https://www.cls.cn/detail/123\n"));
     }
 
     #[test]

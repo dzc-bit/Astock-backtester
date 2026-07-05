@@ -126,10 +126,30 @@ it("opens a real Tonghuashun article detail page through the desktop shell comma
 
   render(<TonghuashunBriefingPanel fupan={briefing} zaopan={buildBriefing("zaopan")} />);
 
-  await user.click(screen.getByRole("button", { name: /打开同花顺原文/ }));
+  await user.click(screen.getByRole("button", { name: "打开同花顺原文：同花顺复盘总评" }));
 
   expect(invokeMock).toHaveBeenCalledWith("open_ths_original_url", {
     url: "https://stock.10jqka.com.cn/20260605/c677247169.shtml"
+  });
+  Reflect.deleteProperty(window, "__TAURI_INTERNALS__");
+});
+
+it("opens the Tonghuashun zaopan source page when no detail article url is available", async () => {
+  const user = userEvent.setup();
+  const zaopan = buildBriefing("zaopan");
+  zaopan.source_url = "https://stock.10jqka.com.cn/zaopan/";
+  Object.defineProperty(window, "__TAURI_INTERNALS__", {
+    configurable: true,
+    value: {}
+  });
+  invokeMock.mockResolvedValueOnce(undefined);
+
+  render(<TonghuashunBriefingPanel fupan={buildBriefing("fupan")} zaopan={zaopan} />);
+
+  await user.click(screen.getByRole("button", { name: "打开同花顺原文：同花顺早盘总评" }));
+
+  expect(invokeMock).toHaveBeenCalledWith("open_ths_original_url", {
+    url: "https://stock.10jqka.com.cn/zaopan/"
   });
   Reflect.deleteProperty(window, "__TAURI_INTERNALS__");
 });

@@ -1,4 +1,6 @@
+import { invoke } from "@tauri-apps/api/core";
 import { ExternalLink, Newspaper, RefreshCw } from "lucide-react";
+import type { MouseEvent } from "react";
 import type { MarketNewsResponse } from "../types";
 
 type Props = {
@@ -18,6 +20,26 @@ function formatTime(value: string | null | undefined): string {
     hour: "2-digit",
     minute: "2-digit"
   }).format(new Date(value));
+}
+
+function isTauriRuntime(): boolean {
+  return Boolean((window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__);
+}
+
+async function openExternalUrl(url: string): Promise<void> {
+  if (isTauriRuntime()) {
+    await invoke("open_external_url", { url });
+    return;
+  }
+  window.open(url, "_blank", "noopener,noreferrer");
+}
+
+function handleNewsLinkClick(event: MouseEvent<HTMLAnchorElement>, url: string): void {
+  if (!isTauriRuntime()) {
+    return;
+  }
+  event.preventDefault();
+  void openExternalUrl(url);
 }
 
 export function NewsPanel({ news, isLoading = false, onRefresh }: Props) {
@@ -61,7 +83,14 @@ export function NewsPanel({ news, isLoading = false, onRefresh }: Props) {
                 </div>
               </div>
               {item.url ? (
-                <a className="news-link" href={item.url} target="_blank" rel="noreferrer" aria-label={`打开${item.title}`}>
+                <a
+                  className="news-link"
+                  href={item.url}
+                  target="_blank"
+                  rel="noreferrer"
+                  aria-label={`打开${item.title}`}
+                  onClick={(event) => handleNewsLinkClick(event, item.url as string)}
+                >
                   <ExternalLink size={15} aria-hidden="true" />
                 </a>
               ) : null}
