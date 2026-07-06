@@ -2,27 +2,37 @@
 
 Windows 桌面版 A 股策略回测工具。项目使用 React + TypeScript 构建界面，Tauri 提供桌面容器，Python 负责本地数据服务、行情聚合、数据补齐和回测执行。
 
-当前版本：`1.3.1`。
+当前版本：`1.3.3`
 
-## 核心能力
+## 面向用户
 
-- 本地历史数据仓：维护 A 股日线、资金流、市值和覆盖信息。
-- 数据中心：支持导入、全市场同步、指定股票补齐、资金流补齐和覆盖查询；“补全缺失数据”默认走全市场，输入股票代码时才只补个股。
+- 数据中心：维护 A 股日线、资金流、市值和覆盖信息，支持导入、全市场同步、指定股票补齐和资金流补齐。
 - 策略回测：支持入场/离场条件、仓位参数、止盈止损、涨跌停约束和流式回测结果。
 - 行情看板：展示指数、红绿家数、强势板块、行情评价、新闻摘要、资讯事件、同花顺复盘/早盘和风险提示。
-- user 模式候选：回测结果通过 `latest_strategy_matches.matches` 展示符合用户策略的个股。
-- 桌面更新：通过 Tauri updater、签名安装包、`.sig` 和 `latest.json` 发布。
+- 候选股票：回测结果通过 `latest_strategy_matches.matches` 展示符合当前策略的个股。
+- 桌面更新：通过 GitHub Releases 发布 Windows 安装包，并由应用内更新入口检查新版本。
+
+最新安装包见 [GitHub Releases](https://github.com/dzc-bit/Astock-backtester/releases)。
+
+## 数据源概览
+
+- 历史行情：AData、AKShare、百度股市通 / PAE、东方财富公开接口。
+- 实时行情：财联社、同花顺、Sina、Tencent、AKShare 及后端公开行情爬虫。
+- 强势板块：同花顺概念/行业、Sina 行业、AKShare、东方财富板块接口。
+- 新闻资讯：东方财富栏目资讯、东方财富要闻、财联社电报。
+- 复盘早盘：同花顺复盘/早盘页面，失败时使用公开行情或本地简短判断兜底。
+- 资金流：东方财富公开资金流接口，缺口和失败原因会通过 diagnostics/failures 暴露给上层服务。
 
 ## 技术架构
 
 | 层级 | 目录 | 说明 |
 | --- | --- | --- |
 | 前端 | `frontend/src` | React + TypeScript，负责页面、状态、图表和结构化接口消费 |
-| 桌面容器 | `src-tauri/src` | Tauri + Rust，负责本地服务启动、运行产物路径、策略保存和更新器 |
+| 桌面容器 | `src-tauri/src` | Tauri + Rust，负责桌面命令、本地服务启动、策略保存和更新器 |
 | 本地后端 | `backend/astock_backtester` | Python，负责 HTTP 服务、数据 provider、仓库、回测和模型 |
 | 测试 | `tests`、`frontend/src/**/*.test.*` | 覆盖后端、前端、Rust 和数据服务边界 |
 
-前端只调用本地后端返回的结构化 JSON；上游网站、爬虫逻辑和字段清洗规则由后端 provider 封装。
+前端只消费本地后端返回的结构化 JSON；上游网站、爬虫逻辑和字段清洗规则由后端 provider 封装。
 
 ## 本地 HTTP 接口
 
@@ -41,50 +51,43 @@ Windows 桌面版 A 股策略回测工具。项目使用 React + TypeScript 构�
 
 `/run/backtest/stream` 返回 NDJSON，需要逐行解析，最后一行应为 `{"type":"result", ...}`。
 
-## 数据源概览
+## 开发环境
 
-- 历史行情：AData、AKShare、百度股市通 / PAE、东方财富公开接口。
-- 实时行情：同花顺市场页、Sina 批量行情、Tencent 批量行情、AKShare、后端公开行情爬虫。
-- 强势板块：同花顺概念/行业、Sina 行业、AKShare、东方财富板块接口。
-- 新闻资讯：东方财富栏目资讯、东方财富要闻、财联社电报。
-- 复盘早盘：同花顺复盘/早盘页面，失败时由公开行情或本地简短判断兜底。
-- 资金流：`CapitalFlowCrawler` 抓取东方财富公开资金流 XHR，使用固定 header / `ut` 参数变体和短超时兜底，由上层服务合并 `main_net_inflow`。
+建议环境：
 
-## JSON 文件说明
+- Node.js 20+
+- Python 3.11+
+- Rust stable toolchain
+- Windows 桌面构建需要 Tauri 支持的 MSVC 构建工具
 
-仓库根目录源码 JSON 主要是：
-
-- `package.json`
-- `package-lock.json`
-- `tsconfig.json`
-- `src-tauri/tauri.conf.json`
-- `src-tauri/capabilities/main.json`
-
-`运行产物\策略配置\saved-strategies.json`、`release-assets\latest.json`、探针 JSON 和日志 JSON 都是运行或发布产物，不应作为源码文件提交。
-
-## 本地材料
-
-`项目说明书.md`、`应用创新类项目报告.md` 和 `演示文档操作提醒.md` 是本机人工说明或演示材料，不纳入 GitHub 仓库。公开仓库只保留源码、测试、README、`AGENT必读.md` 和必要的 `docs/` 专项说明。
-
-## 开发命令
-
-所有命令都应在真实根目录 `D:\New project 6` 执行。
+安装依赖：
 
 ```powershell
+npm install
+python -m pip install -e .
+```
+
+常用命令：
+
+```powershell
+npm run test:ui -- --run
+npm run typecheck
+npm run build
+npm run build:data-service
 python -m pytest tests -q
-.\.tools\node-v20.18.1-win-x64\npm.cmd run test:ui -- --run
-.\.tools\node-v20.18.1-win-x64\npm.cmd run typecheck
-.\.tools\node-v20.18.1-win-x64\npm.cmd run build
-.\.tools\node-v20.18.1-win-x64\npm.cmd run build:data-service
+cargo test --manifest-path src-tauri/Cargo.toml
 ```
 
-Rust 测试：
+开发模式：
 
 ```powershell
-$env:CARGO_HOME='D:\New project 6\.tools\cargo-home'
-$env:RUSTUP_HOME='D:\New project 6\.tools\rustup-home'
-$env:PATH='D:\New project 6\.tools\rustup-home\toolchains\stable-x86_64-pc-windows-msvc\bin;' + $env:PATH
-cargo test --manifest-path src-tauri\Cargo.toml
+npm run tauri -- dev
 ```
 
-更多开发背景见 [AGENT必读.md](./AGENT必读.md) 和 `docs/` 下的专项说明。
+生产构建：
+
+```powershell
+npm run tauri -- build --ci
+```
+
+发布前请确认生成的安装包、签名文件、临时更新清单、日志和运行数据没有提交到 Git 仓库。
