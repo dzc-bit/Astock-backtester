@@ -11,7 +11,6 @@ from astock_backtester.models import (
     MarketNewsTheme,
 )
 
-
 FALLBACK_KEYWORDS = ("AI", "算力", "半导体", "机器人", "新能源", "电力", "地产", "券商", "政策", "退市", "ST")
 
 
@@ -56,7 +55,6 @@ class MarketNewsSummaryProvider:
 
     def latest_summary(self, limit: int = 24) -> MarketNewsSummaryResponse:
         now = datetime.now(timezone.utc)
-        diagnostics: list[str] = []
         try:
             news: MarketNewsResponse = self.news_provider.latest_news(limit=limit)
         except Exception as exc:
@@ -69,7 +67,8 @@ class MarketNewsSummaryProvider:
                 risks=["新闻源读取失败，暂时无法形成当日新闻脉络。"],
                 diagnostics=[f"新闻汇总读取失败：{exc}"],
             )
-        if not news.items:
+        diagnostics = list(news.diagnostics)
+        if news.source == "fallback" or not news.items:
             return MarketNewsSummaryResponse(
                 updated_at=now,
                 source=f"{news.source}-summary",
@@ -77,7 +76,7 @@ class MarketNewsSummaryProvider:
                 themes=[],
                 highlights=[],
                 risks=["当前没有可汇总的新闻，先不要把资讯缺口解读成市场没有事件。"],
-                diagnostics=["新闻源暂无可汇总内容"],
+                diagnostics=[*diagnostics, "新闻源暂无可汇总内容"],
             )
         items = _same_day_items(news)[:limit]
 

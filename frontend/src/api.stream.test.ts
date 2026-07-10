@@ -175,3 +175,135 @@ describe("realtime market snapshot stream", () => {
     expect(partials).toEqual(["1/0/0", "1/5100/0", "1/5100/1", "1/5100/1"]);
   });
 });
+
+describe("stream request lifecycle", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    Reflect.deleteProperty(window, "__TAURI_INTERNALS__");
+  });
+
+  function installHangingStream() {
+    Object.defineProperty(window, "__TAURI_INTERNALS__", {
+      configurable: true,
+      value: {}
+    });
+    const cancel = vi.fn();
+    const pull = vi.fn();
+    const stream = new ReadableStream<Uint8Array>({
+      start() {
+        // Keep the stream open without emitting a chunk.
+      },
+      pull,
+      cancel
+    });
+    const fetchMock = vi.fn().mockResolvedValue(new Response(stream, { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    return { cancel, fetchMock, pull };
+  }
+
+  it.each([
+    ["realtime", () => loadRealtimeMarketSnapshotStream("http://127.0.0.1:9010", {}, { idleTimeoutMs: 50 })],
+    [
+      "backtest",
+      () => runBacktestStreamWithDataService(
+        "http://127.0.0.1:9010",
+        strategy,
+        settings,
+        {},
+        { idleTimeoutMs: 50 }
+      )
+    ]
+  ])("aborts a stalled %s stream after its idle timeout", async (_name, startRequest) => {
+    vi.useFakeTimers();
+    const { cancel } = installHangingStream();
+
+    const request = startRequest();
+    const assertion = expect(request).rejects.toThrow("stream idle timeout");
+    await vi.advanceTimersByTimeAsync(50);
+
+    await assertion;
+    expect(cancel).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    [
+      "realtime",
+      (signal: AbortSignal) => loadRealtimeMarketSnapshotStream(
+        "http://127.0.0.1:9010",
+        {},
+        { signal, idleTimeoutMs: 5_000 }
+      )
+    ],
+    [
+      "backtest",
+      (signal: AbortSignal) => runBacktestStreamWithDataService(
+        "http://127.0.0.1:9010",
+        strategy,
+        settings,
+        {},
+        { signal, idleTimeoutMs: 5_000 }
+      )
+    ]
+  ])("cancels an active %s stream from the caller signal", async (_name, startRequest) => {
+    const { cancel, fetchMock, pull } = installHangingStream();
+    const controller = new AbortController();
+
+    const request = startRequest(controller.signal);
+    const assertion = expect(request).rejects.toThrow("stream request cancelled");
+    await vi.waitFor(() => expect(pull).toHaveBeenCalled());
+    controller.abort();
+
+    await assertion;
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(fetchMock.mock.calls[0][1].signal.aborted).toBe(true);
+  });
+
+  it("cancels the response body when an NDJSON event cannot be parsed", async () => {
+    Object.defineProperty(window, "__TAURI_INTERNALS__", {
+      configurable: true,
+      value: {}
+    });
+    const cancel = vi.fn();
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode("not-json\n"));
+      },
+      cancel
+    });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(stream, { status: 200 })));
+
+    await expect(
+      loadRealtimeMarketSnapshotStream("http://127.0.0.1:9010")
+    ).rejects.toThrow(SyntaxError);
+
+    expect(cancel).toHaveBeenCalledOnce();
+  });
+
+  it("reports the stream idle timeout when a non-success response body stalls", async () => {
+    vi.useFakeTimers();
+    Object.defineProperty(window, "__TAURI_INTERNALS__", {
+      configurable: true,
+      value: {}
+    });
+    const stream = new ReadableStream<Uint8Array>({
+      start() {
+        // Keep the HTTP error body pending.
+      },
+      pull() {
+        // Keep the HTTP error body pending.
+      }
+    });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(stream, { status: 500 })));
+
+    const request = loadRealtimeMarketSnapshotStream(
+      "http://127.0.0.1:9010",
+      {},
+      { idleTimeoutMs: 50 }
+    );
+    const assertion = expect(request).rejects.toThrow("stream idle timeout");
+    await vi.advanceTimersByTimeAsync(50);
+
+    await assertion;
+  });
+});

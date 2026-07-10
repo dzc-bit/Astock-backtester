@@ -60,6 +60,11 @@ from astock_backtester.recommended_strategies import recommended_strategies
 HEALTH_COVERAGE_WAIT_SECONDS = 0.1
 HEALTH_COVERAGE_REFRESH_TTL_SECONDS = 60.0
 BACKTEST_WARMUP_CALENDAR_DAYS = 120
+CLIENT_DISCONNECT_ERRORS = (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)
+
+
+class ClientDisconnected(Exception):
+    pass
 
 
 class DataServiceState:
@@ -312,27 +317,39 @@ class DataServiceHandler(BaseHTTPRequestHandler):
 
     def _send_json(self, payload: dict[str, Any], status: HTTPStatus = HTTPStatus.OK) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+            self.end_headers()
+            self.wfile.write(body)
+        except CLIENT_DISCONNECT_ERRORS:
+            return
 
     def _send_ndjson_headers(self, status: HTTPStatus = HTTPStatus.OK) -> None:
-        self.send_response(status)
-        self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
-        self.send_header("Cache-Control", "no-cache")
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.end_headers()
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+            self.end_headers()
+        except CLIENT_DISCONNECT_ERRORS as exc:
+            raise ClientDisconnected from exc
 
     def _write_ndjson(self, payload: dict[str, Any]) -> None:
-        self.wfile.write((json.dumps(self._jsonable(payload), ensure_ascii=False, default=str) + "\n").encode("utf-8"))
-        self.wfile.flush()
+        try:
+            body = (
+                json.dumps(self._jsonable(payload), ensure_ascii=False, default=str) + "\n"
+            ).encode("utf-8")
+            self.wfile.write(body)
+            self.wfile.flush()
+        except CLIENT_DISCONNECT_ERRORS as exc:
+            raise ClientDisconnected from exc
 
     def _jsonable(self, value: Any) -> Any:
         if hasattr(value, "model_dump"):
@@ -366,8 +383,8 @@ class DataServiceHandler(BaseHTTPRequestHandler):
         return frame
 
     def _run_backtest_stream(self, payload: dict[str, Any]) -> None:
-        self._send_ndjson_headers()
         try:
+            self._send_ndjson_headers()
             self._write_ndjson({"type": "phase", "phase": "校验参数"})
             strategy = StrategyConfig.model_validate(payload["strategy"])
             settings = BacktestSettings.model_validate(payload["settings"])
@@ -391,13 +408,18 @@ class DataServiceHandler(BaseHTTPRequestHandler):
             )
             self._write_ndjson({"type": "phase", "phase": "生成结果"})
             self._write_ndjson({"type": "result", "result": result.model_dump(mode="json")})
+        except ClientDisconnected:
+            return
         except Exception as exc:
             self.server.state.log("error", str(exc))
-            self._write_ndjson({"type": "error", "message": str(exc), "code": "request_failed"})
+            try:
+                self._write_ndjson({"type": "error", "message": str(exc), "code": "request_failed"})
+            except ClientDisconnected:
+                return
 
     def _run_realtime_snapshot_stream(self) -> None:
-        self._send_ndjson_headers()
         try:
+            self._send_ndjson_headers()
             event_source = getattr(self.server.state.realtime_provider, "market_snapshot_events", None)
             if callable(event_source):
                 for event in event_source():
@@ -405,6 +427,8 @@ class DataServiceHandler(BaseHTTPRequestHandler):
             else:
                 snapshot = self.server.state.realtime_provider.market_snapshot()
                 self._write_ndjson({"type": "result", "snapshot": snapshot})
+        except ClientDisconnected:
+            return
         except Exception as exc:
             self.server.state.log("error", f"realtime market snapshot stream failed: {exc}")
             snapshot = _retained_realtime_snapshot(self.server.state.realtime_provider, exc)
@@ -413,8 +437,11 @@ class DataServiceHandler(BaseHTTPRequestHandler):
                     "实时行情接口暂不可用，已保留页面最近数据。",
                     diagnostics=[f"实时行情接口失败：{exc}"],
                 )
-            self._write_ndjson({"type": "error", "message": str(exc), "code": "request_failed"})
-            self._write_ndjson({"type": "result", "snapshot": snapshot})
+            try:
+                self._write_ndjson({"type": "error", "message": str(exc), "code": "request_failed"})
+                self._write_ndjson({"type": "result", "snapshot": snapshot})
+            except ClientDisconnected:
+                return
 
     def do_OPTIONS(self) -> None:
         self._send_json({"ok": True})
@@ -506,6 +533,9 @@ class DataServiceHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         try:
             payload = self._read_json()
+        except CLIENT_DISCONNECT_ERRORS:
+            return
+        try:
             if self.path == "/coverage/daily-bars":
                 symbols = payload.get("symbols")
                 if not symbols:

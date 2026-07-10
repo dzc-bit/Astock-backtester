@@ -4,6 +4,7 @@ import json
 import os
 import time
 import threading
+from types import SimpleNamespace
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -14,7 +15,7 @@ from astock_backtester.data.realtime import HeavyMarketCrawlerProvider, Realtime
 from astock_backtester.data.warehouse import Warehouse
 from astock_backtester.data.news import _parse_time
 from astock_backtester.models import DatasetCoverage, MarketBreadth, MarketIndexQuote, RealtimeMarketSnapshot, SectorMover
-from astock_backtester.service import create_server
+from astock_backtester.service import ClientDisconnected, DataServiceHandler, create_server
 
 
 def _request_json(method: str, url: str, payload: dict | None = None) -> dict:
@@ -430,6 +431,126 @@ def test_service_uses_local_warehouse_symbols_for_full_market_sync_before_provid
     finally:
         server.shutdown()
         thread.join(timeout=5)
+
+
+def test_realtime_stream_stops_without_secondary_write_after_client_disconnect():
+    class StreamingProvider:
+        def market_snapshot_events(self):
+            yield {"type": "indexes", "indexes": []}
+            yield {"type": "result", "snapshot": _fake_realtime_snapshot()}
+
+    logs: list[tuple[str, str]] = []
+    writes: list[dict] = []
+    handler = object.__new__(DataServiceHandler)
+    handler.server = SimpleNamespace(
+        state=SimpleNamespace(
+            realtime_provider=StreamingProvider(),
+            log=lambda level, message: logs.append((level, message)),
+        )
+    )
+    handler._send_ndjson_headers = lambda: None
+
+    def disconnected_write(payload: dict) -> None:
+        writes.append(payload)
+        raise ClientDisconnected("client closed stream")
+
+    handler._write_ndjson = disconnected_write
+
+    handler._run_realtime_snapshot_stream()
+
+    assert writes == [{"type": "indexes", "indexes": []}]
+    assert logs == []
+
+
+def test_json_response_write_treats_client_disconnect_as_normal_completion():
+    writes: list[bytes] = []
+    handler = object.__new__(DataServiceHandler)
+    handler.send_response = lambda _status: None
+    handler.send_header = lambda _key, _value: None
+    handler.end_headers = lambda: None
+
+    def disconnected_write(body: bytes) -> None:
+        writes.append(body)
+        raise BrokenPipeError("client closed JSON response")
+
+    handler.wfile = SimpleNamespace(write=disconnected_write)
+
+    handler._send_json({"ok": True})
+
+    assert len(writes) == 1
+
+
+def test_post_request_stops_without_error_response_when_client_disconnects_during_body_read():
+    logs: list[tuple[str, str]] = []
+    writes: list[dict] = []
+    handler = object.__new__(DataServiceHandler)
+    handler.path = "/symbols/validate"
+    handler.server = SimpleNamespace(
+        state=SimpleNamespace(log=lambda level, message: logs.append((level, message)))
+    )
+
+    def disconnected_read() -> dict:
+        raise ConnectionResetError("client closed request body")
+
+    handler._read_json = disconnected_read
+    handler._send_json = lambda payload, _status=None: writes.append(payload)
+
+    handler.do_POST()
+
+    assert logs == []
+    assert writes == []
+
+
+def test_post_request_reports_upstream_connection_reset_as_domain_failure():
+    logs: list[tuple[str, str]] = []
+    writes: list[tuple[dict, object]] = []
+    handler = object.__new__(DataServiceHandler)
+    handler.path = "/symbols/validate"
+
+    def reset_upstream(_symbols):
+        raise ConnectionResetError("upstream provider reset")
+
+    handler.server = SimpleNamespace(
+        state=SimpleNamespace(
+            log=lambda level, message: logs.append((level, message)),
+            validate_stock_symbols=reset_upstream,
+        )
+    )
+    handler._read_json = lambda: {"symbols": ["000001"]}
+    handler._send_json = lambda payload, status=None: writes.append((payload, status))
+
+    handler.do_POST()
+
+    assert logs == [("error", "upstream provider reset")]
+    assert writes[0][0] == {"code": "request_failed", "message": "upstream provider reset"}
+
+
+def test_realtime_stream_reports_upstream_connection_reset_instead_of_treating_it_as_disconnect():
+    class ResettingProvider:
+        def market_snapshot_events(self):
+            raise ConnectionResetError("upstream realtime reset")
+
+    logs: list[tuple[str, str]] = []
+    writes: list[dict] = []
+    handler = object.__new__(DataServiceHandler)
+    handler.server = SimpleNamespace(
+        state=SimpleNamespace(
+            realtime_provider=ResettingProvider(),
+            log=lambda level, message: logs.append((level, message)),
+        )
+    )
+    handler._send_ndjson_headers = lambda: None
+    handler._write_ndjson = lambda payload: writes.append(payload)
+
+    handler._run_realtime_snapshot_stream()
+
+    assert logs == [("error", "realtime market snapshot stream failed: upstream realtime reset")]
+    assert writes[0] == {
+        "type": "error",
+        "message": "upstream realtime reset",
+        "code": "request_failed",
+    }
+    assert writes[1]["type"] == "result"
 
 
 def test_service_uses_all_local_warehouse_symbols_for_recent_full_market_sync(tmp_path):
@@ -2237,7 +2358,7 @@ def test_realtime_provider_rejects_breadth_below_local_pool_ratio(tmp_path):
 
 
 def test_realtime_provider_rejects_partial_local_breadth_against_warehouse_coverage():
-    from datetime import date, datetime, timezone
+    from datetime import UTC, date, datetime
 
     bars = pd.DataFrame(
         [
@@ -2270,9 +2391,11 @@ def test_realtime_provider_rejects_partial_local_breadth_against_warehouse_cover
             ]
 
     provider = RealtimeMarketProvider(PartialLatestWarehouse())
-    provider._skip_local_topic_fetch_once = True
 
-    snapshot = provider._snapshot_from_local(datetime(2026, 6, 7, tzinfo=timezone.utc))
+    snapshot = provider._snapshot_from_local(
+        datetime(2026, 6, 7, tzinfo=UTC),
+        skip_topic_fetch=True,
+    )
 
     assert snapshot.breadth is None
     assert any("local-latest" in item and "total=192" in item for item in snapshot.diagnostics)

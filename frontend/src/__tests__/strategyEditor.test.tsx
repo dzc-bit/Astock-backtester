@@ -412,6 +412,28 @@ describe("A 股回测工作台界面", () => {
     expect(await screen.findByText("日线行情")).toBeInTheDocument();
   });
 
+  it("aborts the active realtime stream when the workspace unmounts", async () => {
+    let requestSignal: AbortSignal | undefined;
+    apiMocks.loadRealtimeMarketSnapshotStream.mockImplementation(
+      async (_baseUrl, _handlers, options) => new Promise((_resolve, reject) => {
+        requestSignal = options?.signal;
+        requestSignal?.addEventListener(
+          "abort",
+          () => reject(new Error("stream request cancelled")),
+          { once: true }
+        );
+      })
+    );
+
+    const { unmount } = render(<App />);
+
+    await waitFor(() => expect(requestSignal).toBeDefined());
+    expect(requestSignal?.aborted).toBe(false);
+    unmount();
+
+    expect(requestSignal?.aborted).toBe(true);
+  });
+
   it("shows the Tonghuashun score in the overview band instead of a capital-flow card", async () => {
     apiMocks.loadClsFinance.mockResolvedValueOnce({
       updated_at: "2026-06-09T07:05:00Z",

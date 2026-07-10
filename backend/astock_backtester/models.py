@@ -252,6 +252,7 @@ class MarketNewsResponse(BaseModel):
     updated_at: datetime
     source: str
     items: list[MarketNewsItem] = Field(default_factory=list)
+    diagnostics: list[str] = Field(default_factory=list)
 
 
 class MarketCommentaryPoint(BaseModel):
