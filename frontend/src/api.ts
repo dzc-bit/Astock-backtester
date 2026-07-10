@@ -103,10 +103,119 @@ const DEFAULT_SERVICE_TIMEOUT_MS = 12_000;
 const LONG_RUNNING_SERVICE_TIMEOUT_MS = 300_000;
 const HEALTH_SERVICE_TIMEOUT_MS = 60_000;
 const CLS_FINANCE_SERVICE_TIMEOUT_MS = 30_000;
+const NEWS_SERVICE_TIMEOUT_MS = 20_000;
+const REALTIME_STREAM_IDLE_TIMEOUT_MS = 15_000;
+const BACKTEST_STREAM_IDLE_TIMEOUT_MS = 120_000;
 
 type ServiceFetchOptions = {
   timeoutMs?: number;
 };
+
+export type StreamRequestOptions = {
+  signal?: AbortSignal;
+  idleTimeoutMs?: number;
+};
+
+async function consumeNdjsonStream(
+  url: string,
+  init: RequestInit,
+  options: StreamRequestOptions,
+  defaultIdleTimeoutMs: number,
+  onLine: (line: string) => void
+): Promise<void> {
+  const controller = new AbortController();
+  const idleTimeoutMs = options.idleTimeoutMs ?? defaultIdleTimeoutMs;
+  let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+  let readerCancelled = false;
+  let completed = false;
+  let idleTimer: number | undefined;
+  let rejectIdle: (error: Error) => void = () => undefined;
+  let rejectAbort: (error: Error) => void = () => undefined;
+  const idleFailure = new Promise<never>((_resolve, reject) => {
+    rejectIdle = reject;
+  });
+  const abortFailure = new Promise<never>((_resolve, reject) => {
+    rejectAbort = reject;
+  });
+
+  const cancelReader = (reason: Error) => {
+    if (!reader || readerCancelled) {
+      return;
+    }
+    readerCancelled = true;
+    void reader.cancel(reason).catch(() => undefined);
+  };
+  const failForAbort = () => {
+    const error = new Error("stream request cancelled");
+    rejectAbort(error);
+    cancelReader(error);
+    controller.abort(error);
+  };
+  const armIdleTimer = () => {
+    if (idleTimer !== undefined) {
+      window.clearTimeout(idleTimer);
+    }
+    idleTimer = window.setTimeout(() => {
+      const error = new Error(`stream idle timeout after ${idleTimeoutMs}ms`);
+      rejectIdle(error);
+      cancelReader(error);
+      controller.abort(error);
+    }, idleTimeoutMs);
+  };
+
+  if (options.signal?.aborted) {
+    failForAbort();
+  } else {
+    options.signal?.addEventListener("abort", failForAbort, { once: true });
+  }
+
+  try {
+    armIdleTimer();
+    const response = await Promise.race([
+      fetch(url, { ...init, signal: controller.signal }),
+      idleFailure,
+      abortFailure
+    ]);
+    if (!response.ok) {
+      armIdleTimer();
+      const text = await Promise.race([response.text(), idleFailure, abortFailure]);
+      throw new Error(`HTTP ${response.status}: ${text || "local data service request failed"}`);
+    }
+    if (!response.body) {
+      throw new Error("NDJSON stream is not available in this browser.");
+    }
+
+    const decoder = new TextDecoder();
+    reader = response.body.getReader();
+    let buffer = "";
+    while (true) {
+      armIdleTimer();
+      const { done, value } = await Promise.race([reader.read(), idleFailure, abortFailure]);
+      if (done) {
+        break;
+      }
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split(/\r?\n/);
+      buffer = lines.pop() ?? "";
+      for (const line of lines) {
+        onLine(line);
+      }
+    }
+    buffer += decoder.decode();
+    onLine(buffer);
+    completed = true;
+  } finally {
+    if (!completed && reader && !readerCancelled) {
+      const error = new Error("stream consumption failed");
+      cancelReader(error);
+      controller.abort(error);
+    }
+    if (idleTimer !== undefined) {
+      window.clearTimeout(idleTimer);
+    }
+    options.signal?.removeEventListener("abort", failForAbort);
+  }
+}
 
 async function serviceFetch<T>(
   baseUrl: string,
@@ -117,28 +226,27 @@ async function serviceFetch<T>(
   const controller = new AbortController();
   const timeoutMs = options.timeoutMs ?? DEFAULT_SERVICE_TIMEOUT_MS;
   const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
-  let response: Response;
   try {
-    response = await fetch(`${baseUrl}${path}`, {
+    const response = await fetch(`${baseUrl}${path}`, {
       method: payload ? "POST" : "GET",
       headers: { "Content-Type": "application/json" },
       body: payload ? JSON.stringify(payload) : undefined,
       signal: controller.signal
     });
+    const json = await response.json();
+    if (!response.ok) {
+      const code = json.code ? `${json.code} - ` : "";
+      throw new Error(`HTTP ${response.status}: ${code}${json.message ?? "local data service request failed"}`);
+    }
+    return json as T;
   } catch (error) {
-    if (error instanceof DOMException && error.name === "AbortError") {
+    if (controller.signal.aborted || (error instanceof DOMException && error.name === "AbortError")) {
       throw new Error("本地数据服务请求超时，请稍后重试或重新连接本地服务。");
     }
     throw error;
   } finally {
     window.clearTimeout(timeout);
   }
-  const json = await response.json();
-  if (!response.ok) {
-    const code = json.code ? `${json.code} - ` : "";
-    throw new Error(`HTTP ${response.status}: ${code}${json.message ?? "local data service request failed"}`);
-  }
-  return json as T;
 }
 
 export async function ensureDataService(cacheDir: string): Promise<DataServiceStatus> {
@@ -280,7 +388,8 @@ function partialRealtimeSnapshot(
 
 export async function loadRealtimeMarketSnapshotStream(
   baseUrl: string,
-  handlers: RealtimeSnapshotStreamHandlers = {}
+  handlers: RealtimeSnapshotStreamHandlers = {},
+  options: StreamRequestOptions = {}
 ): Promise<RealtimeMarketSnapshot> {
   if (!isTauriRuntime()) {
     const snapshot = await loadRealtimeMarketSnapshot(baseUrl);
@@ -288,20 +397,6 @@ export async function loadRealtimeMarketSnapshotStream(
     return snapshot;
   }
 
-  const response = await fetch(`${baseUrl}/realtime/market-snapshot/stream`, {
-    headers: { Accept: "application/x-ndjson" }
-  });
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`HTTP ${response.status}: ${text || "local data service request failed"}`);
-  }
-  if (!response.body) {
-    throw new Error("Realtime market stream is not available in this browser.");
-  }
-
-  const decoder = new TextDecoder();
-  const reader = response.body.getReader();
-  let buffer = "";
   let current: RealtimeMarketSnapshot | null = null;
   let finalResult: RealtimeMarketSnapshot | null = null;
   let streamError: string | null = null;
@@ -325,20 +420,13 @@ export async function loadRealtimeMarketSnapshotStream(
     handlers.onSnapshot?.(current);
   };
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) {
-      break;
-    }
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split(/\r?\n/);
-    buffer = lines.pop() ?? "";
-    for (const line of lines) {
-      handleLine(line);
-    }
-  }
-  buffer += decoder.decode();
-  handleLine(buffer);
+  await consumeNdjsonStream(
+    `${baseUrl}/realtime/market-snapshot/stream`,
+    { headers: { Accept: "application/x-ndjson" } },
+    options,
+    REALTIME_STREAM_IDLE_TIMEOUT_MS,
+    handleLine
+  );
 
   if (!finalResult) {
     throw new Error(streamError ?? "Realtime market stream ended before a final result was produced.");
@@ -365,7 +453,9 @@ export async function loadMarketNews(baseUrl: string): Promise<MarketNewsRespons
       ]
     };
   }
-  return serviceFetch<MarketNewsResponse>(baseUrl, "/market/news");
+  return serviceFetch<MarketNewsResponse>(baseUrl, "/market/news", undefined, {
+    timeoutMs: NEWS_SERVICE_TIMEOUT_MS
+  });
 }
 
 export async function loadMarketBriefing(baseUrl: string, kind: "fupan" | "zaopan"): Promise<MarketBriefingResponse> {
@@ -497,7 +587,9 @@ export async function loadNewsSummary(baseUrl: string): Promise<NewsSummaryRespo
       diagnostics: []
     };
   }
-  return serviceFetch<NewsSummaryResponse>(baseUrl, "/market/news-summary");
+  return serviceFetch<NewsSummaryResponse>(baseUrl, "/market/news-summary", undefined, {
+    timeoutMs: NEWS_SERVICE_TIMEOUT_MS
+  });
 }
 
 export async function loadRiskAlerts(baseUrl: string): Promise<RiskAlertsResponse> {
@@ -964,7 +1056,8 @@ export async function runBacktestStreamWithDataService(
   baseUrl: string,
   strategy: StrategyConfig,
   settings: BacktestSettingsConfig,
-  handlers: BacktestStreamHandlers = {}
+  handlers: BacktestStreamHandlers = {},
+  options: StreamRequestOptions = {}
 ): Promise<BacktestResult> {
   if (!isTauriRuntime()) {
     handlers.onPhase?.("校验参数");
@@ -975,22 +1068,6 @@ export async function runBacktestStreamWithDataService(
     return demoResult;
   }
 
-  const response = await fetch(`${baseUrl}/run/backtest/stream`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ strategy, settings })
-  });
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`HTTP ${response.status}: ${text || "local data service request failed"}`);
-  }
-  if (!response.body) {
-    throw new Error("Backtest stream is not available in this browser.");
-  }
-
-  const decoder = new TextDecoder();
-  const reader = response.body.getReader();
-  let buffer = "";
   let finalResult: BacktestResult | null = null;
 
   const handleLine = (line: string) => {
@@ -1019,20 +1096,17 @@ export async function runBacktestStreamWithDataService(
     }
   };
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) {
-      break;
-    }
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split(/\r?\n/);
-    buffer = lines.pop() ?? "";
-    for (const line of lines) {
-      handleLine(line);
-    }
-  }
-  buffer += decoder.decode();
-  handleLine(buffer);
+  await consumeNdjsonStream(
+    `${baseUrl}/run/backtest/stream`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ strategy, settings })
+    },
+    options,
+    BACKTEST_STREAM_IDLE_TIMEOUT_MS,
+    handleLine
+  );
 
   if (!finalResult) {
     throw new Error("Backtest stream ended before a final result was produced.");

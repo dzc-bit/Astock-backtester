@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import { Activity, Database, Flame, Gauge, ShieldAlert } from "lucide-react";
 import {
   loadClsFinance,
@@ -19,7 +19,6 @@ import { DataCenter } from "./components/DataCenter";
 import { MarketDashboard } from "./components/MarketDashboard";
 import { NewsPanel } from "./components/NewsPanel";
 import { NewsSummaryPanel } from "./components/NewsSummaryPanel";
-import { ResultsOverview } from "./components/ResultsOverview";
 import { RiskAlertsModal } from "./components/RiskAlertsModal";
 import {
   cloneStrategyConfig,
@@ -60,6 +59,10 @@ type PendingStrategySave = {
   strategy: StrategyConfig;
   name: string;
 } | null;
+
+const ResultsOverview = lazy(() => import("./components/ResultsOverview").then((module) => ({
+  default: module.ResultsOverview
+})));
 
 const A_SHARE_HOLIDAY_RANGES: Record<number, Array<[string, string]>> = {
   2024: [
@@ -452,7 +455,10 @@ export function App() {
     }
     let cancelled = false;
     let timer: number | undefined;
+    let activeRequest: AbortController | undefined;
     const refreshMarket = async () => {
+      const requestController = new AbortController();
+      activeRequest = requestController;
       const phase = detectMarketSessionPhase();
       let nextRefreshMs = refreshIntervalForPhase(phase);
       setIsLoadingMarket(true);
@@ -498,9 +504,12 @@ export function App() {
         };
         const snapshot = await loadRealtimeMarketSnapshotStream(dataService.base_url, {
           onSnapshot: (partial) => applySnapshot(partial, true)
-        });
+        }, { signal: requestController.signal });
         applySnapshot(snapshot);
       } catch (caught) {
+        if (cancelled || requestController.signal.aborted) {
+          return;
+        }
         try {
           const snapshot = await loadRealtimeMarketSnapshot(dataService.base_url);
           if (!cancelled) {
@@ -545,6 +554,9 @@ export function App() {
           }
         }
       } finally {
+        if (activeRequest === requestController) {
+          activeRequest = undefined;
+        }
         if (!cancelled) {
           setIsLoadingMarket(false);
           timer = window.setTimeout(refreshMarket, nextRefreshMs);
@@ -554,6 +566,7 @@ export function App() {
     void refreshMarket();
     return () => {
       cancelled = true;
+      activeRequest?.abort();
       if (timer !== undefined) {
         window.clearTimeout(timer);
       }
@@ -872,15 +885,21 @@ export function App() {
         />
         {error ? <div className="error-banner" role="alert">{error}</div> : null}
         <div className="results-trades-grid">
-          <ResultsOverview
-            result={result}
-            isRunning={isRunningBacktest}
-            phases={runPhases}
-            progressMessage={runProgressMessage}
-            onRun={runBacktest}
-            riskAlertCount={riskAlertCount}
-            onOpenRiskAlerts={() => setRiskModalOpen(true)}
-          />
+          <Suspense fallback={(
+            <section className="surface results-surface" aria-busy="true">
+              <h2>收益概览</h2>
+            </section>
+          )}>
+            <ResultsOverview
+              result={result}
+              isRunning={isRunningBacktest}
+              phases={runPhases}
+              progressMessage={runProgressMessage}
+              onRun={runBacktest}
+              riskAlertCount={riskAlertCount}
+              onOpenRiskAlerts={() => setRiskModalOpen(true)}
+            />
+          </Suspense>
           <TradesTable trades={isRunningBacktest ? streamedTrades : visibleTrades} />
         </div>
         <DataCenter

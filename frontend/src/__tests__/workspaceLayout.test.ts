@@ -10,6 +10,14 @@ if (!stylesPath) {
 }
 
 const styles = readFileSync(stylesPath, "utf8");
+const appPathCandidates = [resolve(process.cwd(), "frontend/src/App.tsx"), resolve(process.cwd(), "src/App.tsx")];
+const appPath = appPathCandidates.find((candidate) => existsSync(candidate));
+
+if (!appPath) {
+  throw new Error("Could not locate frontend/src/App.tsx for workspace layout test.");
+}
+
+const appSource = readFileSync(appPath, "utf8");
 
 describe("workspace desktop layout", () => {
   it("lets the data center span the full workspace width", () => {
@@ -34,5 +42,11 @@ describe("workspace desktop layout", () => {
     expect(styles).toMatch(/\.trades-surface\s*\{[^}]*min-height:\s*0;[^}]*overflow:\s*hidden;/s);
     expect(styles).toMatch(/\.trades-scroll\s*\{[^}]*flex:\s*1\s+1\s+0;[^}]*min-height:\s*0;[^}]*overflow:\s*auto;/s);
     expect(styles).not.toMatch(/\.trades-scroll\s*\{[^}]*min-height:\s*420px;/s);
+  });
+
+  it("loads the chart-heavy results overview outside the initial application chunk", () => {
+    expect(appSource).not.toContain('import { ResultsOverview } from "./components/ResultsOverview";');
+    expect(appSource).toContain('lazy(() => import("./components/ResultsOverview")');
+    expect(appSource).toContain("<Suspense fallback=");
   });
 });

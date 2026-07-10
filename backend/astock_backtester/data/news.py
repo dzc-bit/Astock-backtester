@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 import re
-from html import unescape
-from dataclasses import dataclass
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, wait
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Callable
+from html import unescape
+from threading import Lock
+from time import monotonic
 
 import requests
+from bs4 import BeautifulSoup
 
+from astock_backtester.data.http_transport import resilient_get
 from astock_backtester.models import MarketNewsItem, MarketNewsResponse
-
 
 POSITIVE_WORDS = ("利好", "拉升", "走强", "活跃", "增长", "抢筹", "突破")
 NEGATIVE_WORDS = ("利空", "下跌", "退市", "风险", "调查", "亏损", "警示")
@@ -35,16 +39,6 @@ def _parse_time(value: str | None) -> datetime | None:
         return None
 
 
-def _parse_epoch(value: object) -> datetime | None:
-    try:
-        timestamp = float(value)
-    except (TypeError, ValueError):
-        return None
-    if timestamp > 10_000_000_000:
-        timestamp = timestamp / 1000
-    return datetime.fromtimestamp(timestamp, tz=timezone.utc)
-
-
 def _clean_html_text(value: str | None) -> str:
     text = re.sub(r"<[^>]+>", "", value or "")
     return unescape(text).strip()
@@ -58,39 +52,171 @@ def _tags(title: str, summary: str | None) -> list[str]:
 @dataclass
 class MarketNewsProvider:
     timeout: float = 5.0
+    time_budget: float | None = 12.0
+    cache_ttl: float = 5.0
+    recent_success_ttl: float = 15 * 60.0
     requester: Callable[..., requests.Response] = requests.get
+    alternate_requester: Callable[..., requests.Response] | None = None
+    allow_alternate_transport: bool | None = None
+    _refresh_lock: Lock = field(default_factory=Lock, init=False, repr=False)
+    _cached_response: MarketNewsResponse | None = field(default=None, init=False, repr=False)
+    _cached_until: float = field(default=0.0, init=False, repr=False)
+    _last_successful_response: MarketNewsResponse | None = field(
+        default=None,
+        init=False,
+        repr=False,
+    )
+    _last_successful_at: float = field(default=0.0, init=False, repr=False)
+
+    def _allow_public_alternate_transport(self) -> bool:
+        if self.allow_alternate_transport is not None:
+            return self.allow_alternate_transport
+        return self.requester is requests.get
+
+    def _request(
+        self,
+        url: str,
+        *,
+        source: str,
+        diagnostics: list[str],
+        deadline: float | None,
+        **kwargs,
+    ) -> requests.Response:
+        return resilient_get(
+            self.requester,
+            url,
+            timeout=self.timeout,
+            source=source,
+            diagnostics=diagnostics,
+            retries=1,
+            deadline=deadline,
+            alternate_requester=self.alternate_requester,
+            allow_alternate=self._allow_public_alternate_transport(),
+            **kwargs,
+        )
+
+    def _budget_available(self, deadline: float | None, diagnostics: list[str]) -> bool:
+        if deadline is None or monotonic() < deadline:
+            return True
+        message = "market-news source chain stopped because the request budget was exhausted."
+        if message not in diagnostics:
+            diagnostics.append(message)
+        return False
 
     def latest_news(self, limit: int = 18) -> MarketNewsResponse:
+        with self._refresh_lock:
+            cached = self._fresh_cached_response(limit)
+            if cached is not None:
+                return cached
+
+            response = self._fetch_latest_news(max(limit, 24))
+            fetched_at = monotonic()
+            cache_until = fetched_at + max(0.0, self.cache_ttl)
+            if response.source != "fallback" and response.items:
+                self._last_successful_response = response.model_copy(deep=True)
+                self._last_successful_at = fetched_at
+            elif (
+                self._last_successful_response is not None
+                and self.recent_success_ttl > 0
+                and fetched_at - self._last_successful_at <= max(0.0, self.recent_success_ttl)
+            ):
+                retained = self._last_successful_response.model_copy(deep=True)
+                retained.source = f"{retained.source}+recent-success-cache"
+                retained.diagnostics = [
+                    *response.diagnostics,
+                    "market-news recent_success_cache_used after current sources failed.",
+                ]
+                response = retained
+                cache_until = min(
+                    cache_until,
+                    self._last_successful_at + self.recent_success_ttl,
+                )
+
+            self._cached_response = response.model_copy(deep=True)
+            self._cached_until = cache_until
+            return self._response_for_limit(response, limit)
+
+    def _fresh_cached_response(self, limit: int) -> MarketNewsResponse | None:
+        if self._cached_response is None or self.cache_ttl <= 0:
+            return None
+        if monotonic() >= self._cached_until:
+            return None
+        return self._response_for_limit(self._cached_response, limit)
+
+    def _response_for_limit(self, response: MarketNewsResponse, limit: int) -> MarketNewsResponse:
+        copied = response.model_copy(deep=True)
+        copied.items = copied.items[: max(0, limit)]
+        return copied
+
+    def _fetch_latest_news(self, limit: int) -> MarketNewsResponse:
         now = datetime.now(timezone.utc)
         items: list[MarketNewsItem] = []
         sources: list[str] = []
+        diagnostics: list[str] = []
+        deadline = None if self.time_budget is None else monotonic() + max(0, self.time_budget)
+        if not self._budget_available(deadline, diagnostics):
+            return self._fallback_response(now, diagnostics)
+
+        source_specs = [
+            ("eastmoney-columns", "eastmoney-news-columns", self._fetch_eastmoney_columns),
+            ("eastmoney-rolling", "eastmoney-news-rolling", self._fetch_eastmoney_rolling),
+            ("eastmoney-fast-news", "eastmoney-fast-news", self._fetch_eastmoney_fast_news),
+        ]
+        executor = ThreadPoolExecutor(max_workers=len(source_specs))
+        futures = {
+            source: executor.submit(self._run_source, fetcher, failure_label, limit, deadline)
+            for source, failure_label, fetcher in source_specs
+        }
         try:
-            column_items = self._fetch_eastmoney_columns(limit)
-            items.extend(column_items)
-            if column_items:
-                sources.append("eastmoney-columns")
-        except Exception:
-            pass
-        try:
-            rolling_items = self._fetch_eastmoney_rolling(limit)
-            items.extend(rolling_items)
-            if rolling_items:
-                sources.append("eastmoney-rolling")
-        except Exception:
-            pass
-        try:
-            cailian_items = self._fetch_cailianpress(limit)
-            items.extend(cailian_items)
-            if cailian_items:
-                sources.append("cls-telegraph")
-        except Exception:
-            pass
+            if deadline is None:
+                done, pending = wait(futures.values())
+            else:
+                done, pending = wait(futures.values(), timeout=max(0.0, deadline - monotonic()))
+        finally:
+            for future in futures.values():
+                if not future.done():
+                    future.cancel()
+            executor.shutdown(wait=False, cancel_futures=True)
+
+        for source, failure_label, _fetcher in source_specs:
+            future = futures[source]
+            if future not in done:
+                diagnostics.append(f"{failure_label} exceeded the market-news request budget.")
+                continue
+            source_items, source_diagnostics = future.result()
+            diagnostics.extend(source_diagnostics)
+            items.extend(source_items)
+            if source_items:
+                sources.append(source)
         items = self._dedupe_and_sort(items, limit)
         if items:
-            return MarketNewsResponse(updated_at=now, source="+".join(sources), items=items)
+            return MarketNewsResponse(
+                updated_at=now,
+                source="+".join(sources),
+                items=items,
+                diagnostics=diagnostics,
+            )
+        return self._fallback_response(now, diagnostics)
+
+    def _run_source(
+        self,
+        fetcher: Callable[[int, list[str], float | None], list[MarketNewsItem]],
+        failure_label: str,
+        limit: int,
+        deadline: float | None,
+    ) -> tuple[list[MarketNewsItem], list[str]]:
+        diagnostics: list[str] = []
+        try:
+            return fetcher(limit, diagnostics, deadline), diagnostics
+        except Exception as exc:
+            diagnostics.append(f"{failure_label} failed: {exc}")
+            return [], diagnostics
+
+    def _fallback_response(self, now: datetime, diagnostics: list[str]) -> MarketNewsResponse:
         return MarketNewsResponse(
             updated_at=now,
             source="fallback",
+            diagnostics=diagnostics,
             items=[
                 MarketNewsItem(
                     title="资讯接口暂不可用",
@@ -103,9 +229,14 @@ class MarketNewsProvider:
             ],
         )
 
-    def _fetch_eastmoney_columns(self, limit: int) -> list[MarketNewsItem]:
-        response = self.requester(
+    def _fetch_eastmoney_columns(
+        self, limit: int, diagnostics: list[str], deadline: float | None
+    ) -> list[MarketNewsItem]:
+        response = self._request(
             "https://np-listapi.eastmoney.com/comm/web/getNewsByColumns",
+            source="eastmoney-news-columns",
+            diagnostics=diagnostics,
+            deadline=deadline,
             params={
                 "client": "web",
                 "biz": "web_news_col",
@@ -117,10 +248,8 @@ class MarketNewsProvider:
                 "types": "1",
                 "req_trace": "astock-backtester",
             },
-            timeout=self.timeout,
             headers={"Referer": "https://finance.eastmoney.com/"},
         )
-        response.raise_for_status()
         payload = response.json()
         rows = ((payload or {}).get("data") or {}).get("list") or []
         items: list[MarketNewsItem] = []
@@ -142,18 +271,21 @@ class MarketNewsProvider:
             )
         return items
 
-    def _fetch_eastmoney_rolling(self, limit: int) -> list[MarketNewsItem]:
-        response = self.requester(
+    def _fetch_eastmoney_rolling(
+        self, limit: int, diagnostics: list[str], deadline: float | None
+    ) -> list[MarketNewsItem]:
+        response = self._request(
             "https://finance.eastmoney.com/yaowen.html",
-            timeout=self.timeout,
+            source="eastmoney-news-rolling",
+            diagnostics=diagnostics,
+            deadline=deadline,
             headers={"Referer": "https://finance.eastmoney.com/"},
         )
-        response.raise_for_status()
-        text = response.text
+        soup = BeautifulSoup(response.text, "html.parser")
         items: list[MarketNewsItem] = []
-        for href, title in re.findall(r'<a[^>]+href="([^"]+)"[^>]*title="([^"]+)"', text):
-            cleaned_title = _clean_html_text(title)
-            href = href.strip()
+        for link in soup.select("a[href][title]"):
+            cleaned_title = _clean_html_text(str(link.get("title") or ""))
+            href = str(link.get("href") or "").strip()
             if not cleaned_title or len(cleaned_title) < 8:
                 continue
             items.append(
@@ -170,30 +302,39 @@ class MarketNewsProvider:
                 break
         return items
 
-    def _fetch_cailianpress(self, limit: int) -> list[MarketNewsItem]:
-        response = self.requester(
-            "https://www.cls.cn/nodeapi/telegraphList",
-            params={"app": "CailianpressWeb", "category": "", "lastTime": "", "last_time": "", "os": "web", "sv": "7.7.5"},
-            timeout=self.timeout,
-            headers={"Referer": "https://www.cls.cn/telegraph"},
+    def _fetch_eastmoney_fast_news(
+        self, limit: int, diagnostics: list[str], deadline: float | None
+    ) -> list[MarketNewsItem]:
+        response = self._request(
+            "https://np-weblist.eastmoney.com/comm/web/getFastNewsList",
+            source="eastmoney-fast-news",
+            diagnostics=diagnostics,
+            deadline=deadline,
+            params={
+                "client": "web",
+                "biz": "web_724",
+                "fastColumn": "102",
+                "sortEnd": "",
+                "pageSize": str(limit),
+                "req_trace": "astock-backtester",
+            },
+            headers={"Referer": "https://kuaixun.eastmoney.com/"},
         )
-        response.raise_for_status()
         payload = response.json() or {}
-        rows = (payload.get("data") or {}).get("roll_data") or (payload.get("data") or {}).get("list") or []
+        rows = (payload.get("data") or {}).get("fastNewsList") or []
         items: list[MarketNewsItem] = []
         for row in rows[:limit]:
-            title = str(row.get("title") or row.get("content") or "").strip()
+            title = _clean_html_text(str(row.get("title") or ""))
             if not title:
                 continue
-            summary = str(row.get("content") or "").strip() or None
-            timestamp = row.get("ctime") or row.get("time") or row.get("modified_time")
+            summary = _clean_html_text(str(row.get("summary") or "")) or None
             items.append(
                 MarketNewsItem(
-                    title=_clean_html_text(title)[:120],
-                    summary=_clean_html_text(summary) if summary and summary != title else None,
-                    source="财联社电报",
-                    published_at=_parse_epoch(timestamp),
-                    url=f"https://www.cls.cn/detail/{row.get('id')}" if row.get("id") else None,
+                    title=title[:120],
+                    summary=summary if summary != title else None,
+                    source="东方财富7×24",
+                    published_at=_parse_time(row.get("showTime")),
+                    url=None,
                     tags=_tags(title, summary),
                     sentiment=_sentiment(title, summary),  # type: ignore[arg-type]
                 )

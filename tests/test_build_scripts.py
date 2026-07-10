@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import tomllib
 from pathlib import Path
 
 
@@ -79,3 +80,18 @@ def test_service_manager_resolves_release_cache_dir_from_d_drive_workspace_data_
 
     assert 'join("运行产物").join("本地数据仓")' in source
     assert "app_local_data_dir()" not in source
+
+
+def test_release_manifests_use_one_version():
+    package_version = json.loads(Path("package.json").read_text(encoding="utf-8"))["version"]
+    python_version = tomllib.loads(
+        Path("pyproject.toml").read_text(encoding="utf-8")
+    )["project"]["version"]
+    cargo_version = tomllib.loads(
+        Path("src-tauri/Cargo.toml").read_text(encoding="utf-8")
+    )["package"]["version"]
+    tauri_version = json.loads(
+        Path("src-tauri/tauri.conf.json").read_text(encoding="utf-8")
+    )["version"]
+
+    assert {package_version, python_version, cargo_version, tauri_version} == {package_version}

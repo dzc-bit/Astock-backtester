@@ -1,5 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { importDailyBars, loadClsFinance, loadDataServiceHealth, startFullMarketSync } from "./api";
+import {
+  importDailyBars,
+  loadClsFinance,
+  loadDataServiceHealth,
+  loadMarketNews,
+  loadNewsSummary,
+  loadRealtimeMarketSnapshot,
+  startFullMarketSync
+} from "./api";
 
 describe("service fetch timeouts", () => {
   beforeEach(() => {
@@ -144,6 +152,57 @@ describe("service fetch timeouts", () => {
     });
   });
 
+  it.each([
+    [
+      "market news",
+      loadMarketNews,
+      { updated_at: "2026-07-10T10:00:00Z", source: "test", items: [], diagnostics: [] }
+    ],
+    [
+      "news summary",
+      loadNewsSummary,
+      {
+        updated_at: "2026-07-10T10:00:00Z",
+        source: "test",
+        item_count: 0,
+        themes: [],
+        highlights: [],
+        risks: [],
+        diagnostics: []
+      }
+    ]
+  ])("keeps %s requests alive beyond the backend source budget", async (_name, requestNews, payload) => {
+    let resolveFetch: ((response: Response) => void) | undefined;
+    let requestSignal: AbortSignal | undefined;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((_url: string, init?: RequestInit) => {
+        requestSignal = init?.signal as AbortSignal | undefined;
+        return new Promise<Response>((resolve, reject) => {
+          resolveFetch = resolve;
+          requestSignal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")));
+        });
+      })
+    );
+
+    const settled = requestNews("http://127.0.0.1:9010").then(
+      (value) => ({ ok: true as const, value }),
+      (error) => ({ ok: false as const, error })
+    );
+
+    await vi.advanceTimersByTimeAsync(12_000);
+    expect(requestSignal?.aborted).toBe(false);
+
+    resolveFetch?.(
+      new Response(JSON.stringify(payload), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      })
+    );
+
+    await expect(settled).resolves.toEqual({ ok: true, value: expect.objectContaining({ source: "test" }) });
+  });
+
   it("keeps full-market sync start requests alive while the backend prepares symbols", async () => {
     let resolveFetch: ((response: Response) => void) | undefined;
     let requestSignal: AbortSignal | undefined;
@@ -190,6 +249,44 @@ describe("service fetch timeouts", () => {
       ok: true,
       value: expect.objectContaining({
         job: expect.objectContaining({ job_id: "job-1", status: "running" })
+      })
+    });
+  });
+
+  it("keeps the timeout armed while a successful JSON response body is decoding", async () => {
+    let requestSignal: AbortSignal | undefined;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((_url: string, init?: RequestInit) => {
+        requestSignal = init?.signal as AbortSignal | undefined;
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () => new Promise((_resolve, reject) => {
+            requestSignal?.addEventListener(
+              "abort",
+              () => reject(new DOMException("Aborted", "AbortError")),
+              { once: true }
+            );
+          })
+        } as Response);
+      })
+    );
+
+    const settled = loadRealtimeMarketSnapshot("http://127.0.0.1:9010").then(
+      (value) => ({ ok: true as const, value }),
+      (error) => ({ ok: false as const, error })
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+
+    await vi.advanceTimersByTimeAsync(12_000);
+
+    expect(requestSignal?.aborted).toBe(true);
+    await expect(settled).resolves.toEqual({
+      ok: false,
+      error: expect.objectContaining({
+        message: "本地数据服务请求超时，请稍后重试或重新连接本地服务。"
       })
     });
   });

@@ -1,20 +1,28 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 
 from astock_backtester.data.news_summary import MarketNewsSummaryProvider
 from astock_backtester.models import MarketNewsItem, MarketNewsResponse
 
 
 class FakeNewsProvider:
-    def __init__(self, items: list[MarketNewsItem]) -> None:
+    def __init__(
+        self,
+        items: list[MarketNewsItem],
+        diagnostics: list[str] | None = None,
+        source: str = "fake-news",
+    ) -> None:
         self.items = items
+        self.diagnostics = diagnostics or []
+        self.source = source
 
     def latest_news(self, limit: int = 24) -> MarketNewsResponse:
         return MarketNewsResponse(
             updated_at=datetime(2026, 6, 5, 14, 30, tzinfo=timezone.utc),
-            source="fake-news",
+            source=self.source,
             items=self.items[:limit],
+            diagnostics=self.diagnostics,
         )
 
 
@@ -100,3 +108,47 @@ def test_news_summary_returns_clear_fallback_when_news_provider_is_empty():
     assert response.themes == []
     assert response.risks
     assert response.diagnostics == ["新闻源暂无可汇总内容"]
+
+
+def test_news_summary_preserves_crawler_diagnostics():
+    item = MarketNewsItem(
+        title="财联社快讯正常返回",
+        source="财联社",
+        published_at=datetime(2026, 6, 5, 14, 20, tzinfo=UTC),
+        tags=[],
+        sentiment="neutral",
+    )
+
+    response = MarketNewsSummaryProvider(
+        FakeNewsProvider([item], diagnostics=["eastmoney-news-columns failed: connection reset"])
+    ).latest_summary()
+
+    assert response.item_count == 1
+    assert response.diagnostics == ["eastmoney-news-columns failed: connection reset"]
+
+
+def test_news_summary_does_not_treat_fallback_placeholder_as_market_news():
+    placeholder = MarketNewsItem(
+        title="资讯接口暂不可用",
+        summary="网络恢复后会自动展示市场新闻。",
+        source="本地服务",
+        published_at=datetime(2026, 6, 5, 14, 20, tzinfo=UTC),
+        tags=["系统"],
+        sentiment="neutral",
+    )
+
+    response = MarketNewsSummaryProvider(
+        FakeNewsProvider(
+            [placeholder],
+            diagnostics=["cls-news-telegraph failed: timeout"],
+            source="fallback",
+        )
+    ).latest_summary()
+
+    assert response.item_count == 0
+    assert response.themes == []
+    assert response.highlights == []
+    assert response.diagnostics == [
+        "cls-news-telegraph failed: timeout",
+        "新闻源暂无可汇总内容",
+    ]

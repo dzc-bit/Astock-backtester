@@ -6,6 +6,7 @@ import time as monotonic_time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta, timezone
+from threading import Event, Lock
 from typing import Any, Callable, Iterable
 
 import pandas as pd
@@ -13,6 +14,7 @@ import requests
 from bs4 import BeautifulSoup
 
 from astock_backtester.data.cls import CLS_QUOTE_BASE_URL, cls_request_json
+from astock_backtester.data.http_transport import resilient_get
 from astock_backtester.data.providers import normalize_symbol
 from astock_backtester.data.warehouse import Warehouse
 from astock_backtester.models import (
@@ -21,7 +23,6 @@ from astock_backtester.models import (
     RealtimeMarketSnapshot,
     SectorMover,
 )
-
 
 INDEXES = [
     ("sh000001", "上证指数"),
@@ -468,19 +469,30 @@ class RealtimeMarketProvider:
     warehouse: Warehouse
     timeout: float = 4.0
     requester: Callable[..., requests.Response] = requests.get
+    alternate_requester: Callable[..., Any] | None = None
+    allow_alternate_transport: bool | None = None
     breadth_time_budget: float = 2.0
     breadth_source_timeout: float = 0.8
     sector_time_budget: float = 3.0
     sector_source_timeout: float = 0.8
     local_snapshot_time_budget: float = 2.0
     allow_eastmoney_breadth_fallback: bool = False
-    _last_live_sector_rows: list[dict] = field(default_factory=list, init=False, repr=False)
     _sector_member_cache: dict[str, list[str]] = field(default_factory=dict, init=False, repr=False)
-    _ths_concept_rows_cache: list[dict] | None = field(default=None, init=False, repr=False)
-    _ths_industry_rows_cache: list[dict] | None = field(default=None, init=False, repr=False)
     _last_successful_snapshot: RealtimeMarketSnapshot | None = field(default=None, init=False, repr=False)
-    _skip_local_topic_fetch_once: bool = field(default=False, init=False, repr=False)
+    _state_lock: Lock = field(default_factory=Lock, init=False, repr=False)
     _heavy_market_provider: HeavyMarketCrawlerProvider | None = field(default=None, init=False, repr=False)
+
+    def _remember_successful_snapshot(self, snapshot: RealtimeMarketSnapshot) -> None:
+        with self._state_lock:
+            current = self._last_successful_snapshot
+            if current is None or snapshot.updated_at >= current.updated_at:
+                self._last_successful_snapshot = snapshot.model_copy(deep=True)
+
+    def _retained_successful_snapshot(self) -> RealtimeMarketSnapshot | None:
+        with self._state_lock:
+            if self._last_successful_snapshot is None:
+                return None
+            return self._last_successful_snapshot.model_copy(deep=True)
 
     def market_snapshot(self) -> RealtimeMarketSnapshot:
         for event in self.market_snapshot_events():
@@ -499,19 +511,20 @@ class RealtimeMarketProvider:
         phase_note = _phase_diagnostic(phase)
         if phase_note:
             diagnostics.append(phase_note)
-        self._ths_concept_rows_cache = None
-        self._ths_industry_rows_cache = None
-        self._last_live_sector_rows = []
-        self._skip_local_topic_fetch_once = False
 
         indexes: list[MarketIndexQuote] = []
         live_breadth: MarketBreadth | None = None
         live_sectors: list[SectorMover] = []
+        live_sector_rows: list[dict] = []
         with ThreadPoolExecutor(max_workers=3) as executor:
             futures = {
                 executor.submit(self._fetch_indexes): "indexes",
                 executor.submit(self._fetch_live_breadth_with_budget, breadth_diagnostics): "breadth",
-                executor.submit(self._fetch_live_sectors_with_budget, sector_diagnostics): "sectors",
+                executor.submit(
+                    self._fetch_live_sectors_with_budget,
+                    sector_diagnostics,
+                    live_sector_rows,
+                ): "sectors",
             }
             for future in as_completed(futures):
                 event_type = futures[future]
@@ -550,7 +563,20 @@ class RealtimeMarketProvider:
         diagnostics.extend(breadth_diagnostics)
         diagnostics.extend(sector_diagnostics)
         has_live_context = bool(indexes and live_breadth and live_sectors)
-        local_snapshot = None if has_live_context else self._snapshot_from_local_with_budget(now, diagnostics)
+        skip_local_topic_fetch = any(
+            item.startswith(("实时强势题材接口超时", "实时强势题材接口失败"))
+            for item in sector_diagnostics
+        )
+        local_snapshot = (
+            None
+            if has_live_context
+            else self._snapshot_from_local_with_budget(
+                now,
+                diagnostics,
+                live_sector_rows,
+                skip_topic_fetch=skip_local_topic_fetch,
+            )
+        )
         strong_sectors = live_sectors or (local_snapshot.strong_sectors if local_snapshot else [])
         yesterday_sectors = local_snapshot.yesterday_strong_sectors if local_snapshot else []
         breadth = live_breadth or (local_snapshot.breadth if local_snapshot else None)
@@ -628,11 +654,12 @@ class RealtimeMarketProvider:
             diagnostics=diagnostics,
         )
         if snapshot.status == "live" and _is_renderable_snapshot(snapshot):
-            self._last_successful_snapshot = snapshot.model_copy(deep=True)
+            self._remember_successful_snapshot(snapshot)
             yield {"type": "result", "snapshot": snapshot}
             return
-        if self._last_successful_snapshot is not None and not indexes:
-            retained = self._last_successful_snapshot.model_copy(deep=True)
+        retained = self._retained_successful_snapshot()
+        if retained is not None and not indexes:
+            retained_at = retained.updated_at
             retained.status = "stale"
             retained.updated_at = now
             retained.market_phase = phase
@@ -646,26 +673,41 @@ class RealtimeMarketProvider:
             )
             retained.diagnostics = [
                 *diagnostics,
-                f"沿用最近成功行情快照：{self._last_successful_snapshot.updated_at.isoformat()}。",
+                f"沿用最近成功行情快照：{retained_at.isoformat()}。",
             ]
             yield {"type": "result", "snapshot": retained}
             return
         yield {"type": "result", "snapshot": snapshot}
 
-    def _call_live_breadth(self, diagnostics: list[str]) -> MarketBreadth | None:
+    def _call_live_breadth(
+        self,
+        diagnostics: list[str],
+        deadline: float | None = None,
+        cancel_event: Event | None = None,
+    ) -> MarketBreadth | None:
         try:
-            return self._fetch_live_breadth(diagnostics)
+            return self._fetch_live_breadth(
+                diagnostics,
+                deadline=deadline,
+                cancel_event=cancel_event,
+            )
         except TypeError:
-            return self._fetch_live_breadth()
+            try:
+                return self._fetch_live_breadth(diagnostics)
+            except TypeError:
+                return self._fetch_live_breadth()
 
     def _fetch_live_breadth_with_budget(self, diagnostics: list[str]) -> MarketBreadth | None:
         if self.breadth_time_budget is None:
             return self._call_live_breadth(diagnostics)
+        deadline = monotonic_time.monotonic() + self.breadth_time_budget
+        cancel_event = Event()
         executor = ThreadPoolExecutor(max_workers=1)
-        future = executor.submit(self._call_live_breadth, diagnostics)
+        future = executor.submit(self._call_live_breadth, diagnostics, deadline, cancel_event)
         try:
             return future.result(timeout=self.breadth_time_budget)
         except TimeoutError:
+            cancel_event.set()
             future.cancel()
             diagnostics.append(f"实时红绿家数接口超时：{self.breadth_time_budget:g}秒，已继续返回可用行情。")
             return None
@@ -675,30 +717,62 @@ class RealtimeMarketProvider:
         finally:
             executor.shutdown(wait=False, cancel_futures=True)
 
-    def _fetch_live_sectors_with_budget(self, diagnostics: list[str]) -> list[SectorMover]:
+    def _fetch_live_sectors_with_budget(
+        self,
+        diagnostics: list[str],
+        sector_rows_out: list[dict] | None = None,
+    ) -> list[SectorMover]:
+        worker_rows: list[dict] = []
         if self.sector_time_budget is None:
-            return self._call_live_sectors(diagnostics)
+            sectors = self._call_live_sectors(diagnostics, sector_rows_out=worker_rows)
+            if sector_rows_out is not None:
+                sector_rows_out[:] = worker_rows
+            return sectors
+        deadline = monotonic_time.monotonic() + self.sector_time_budget
+        cancel_event = Event()
         executor = ThreadPoolExecutor(max_workers=1)
-        future = executor.submit(self._call_live_sectors, diagnostics)
+        future = executor.submit(
+            self._call_live_sectors,
+            diagnostics,
+            deadline,
+            cancel_event,
+            worker_rows,
+        )
         try:
-            return future.result(timeout=self.sector_time_budget)
+            sectors = future.result(timeout=max(0.0, deadline - monotonic_time.monotonic()))
+            if monotonic_time.monotonic() > deadline:
+                raise TimeoutError
+            if sector_rows_out is not None:
+                sector_rows_out[:] = worker_rows
+            return sectors
         except TimeoutError:
+            cancel_event.set()
             future.cancel()
-            self._skip_local_topic_fetch_once = True
             diagnostics.append(f"实时强势题材接口超时：{self.sector_time_budget:g}秒，已先返回红绿家数并回退本地题材。")
             return []
         except Exception as exc:
-            self._skip_local_topic_fetch_once = True
             diagnostics.append(f"实时强势题材接口失败：{exc}，已回退本地题材。")
             return []
         finally:
             executor.shutdown(wait=False, cancel_futures=True)
 
-    def _snapshot_from_local_with_budget(self, now: datetime, diagnostics: list[str]) -> RealtimeMarketSnapshot:
+    def _snapshot_from_local_with_budget(
+        self,
+        now: datetime,
+        diagnostics: list[str],
+        sector_rows: list[dict] | None = None,
+        *,
+        skip_topic_fetch: bool = False,
+    ) -> RealtimeMarketSnapshot:
         if self.local_snapshot_time_budget is None:
-            return self._snapshot_from_local(now)
+            return self._call_snapshot_from_local(now, sector_rows, skip_topic_fetch)
         executor = ThreadPoolExecutor(max_workers=1)
-        future = executor.submit(self._snapshot_from_local, now)
+        future = executor.submit(
+            self._call_snapshot_from_local,
+            now,
+            sector_rows,
+            skip_topic_fetch,
+        )
         try:
             return future.result(timeout=self.local_snapshot_time_budget)
         except TimeoutError:
@@ -717,11 +791,43 @@ class RealtimeMarketProvider:
         finally:
             executor.shutdown(wait=False, cancel_futures=True)
 
-    def _call_live_sectors(self, diagnostics: list[str]) -> list[SectorMover]:
+    def _call_live_sectors(
+        self,
+        diagnostics: list[str],
+        deadline: float | None = None,
+        cancel_event: Event | None = None,
+        sector_rows_out: list[dict] | None = None,
+    ) -> list[SectorMover]:
         try:
-            return self._fetch_live_sectors(diagnostics)
+            return self._fetch_live_sectors(
+                diagnostics,
+                deadline=deadline,
+                cancel_event=cancel_event,
+                sector_rows_out=sector_rows_out,
+            )
         except TypeError:
-            return self._fetch_live_sectors()
+            try:
+                return self._fetch_live_sectors(diagnostics)
+            except TypeError:
+                return self._fetch_live_sectors()
+
+    def _call_snapshot_from_local(
+        self,
+        now: datetime,
+        sector_rows: list[dict] | None,
+        skip_topic_fetch: bool = False,
+    ) -> RealtimeMarketSnapshot:
+        try:
+            return self._snapshot_from_local(
+                now,
+                sector_rows=sector_rows,
+                skip_topic_fetch=skip_topic_fetch,
+            )
+        except TypeError:
+            try:
+                return self._snapshot_from_local(now, sector_rows=sector_rows)
+            except TypeError:
+                return self._snapshot_from_local(now)
 
     def _fetch_indexes(self) -> list[MarketIndexQuote]:
         cls_quotes = self._fetch_cls_indexes()
@@ -775,41 +881,174 @@ class RealtimeMarketProvider:
             timeout = min(timeout, max_seconds)
         return min(self.timeout, timeout)
 
-    def _fetch_live_sectors(self, diagnostics: list[str] | None = None) -> list[SectorMover]:
+    def _source_chain_cancelled(
+        self,
+        cancel_event: Event | None,
+        deadline: float | None,
+        diagnostics: list[str],
+        chain: str,
+    ) -> bool:
+        cancelled = cancel_event is not None and cancel_event.is_set()
+        expired = deadline is not None and monotonic_time.monotonic() >= deadline
+        if not cancelled and not expired:
+            return False
+        message = f"{chain} source chain stopped because the request budget was exhausted."
+        if message not in diagnostics:
+            diagnostics.append(message)
+        return True
+
+    def _publish_sector_rows(
+        self,
+        rows: list[dict],
+        sector_rows_out: list[dict] | None,
+        cancel_event: Event | None,
+        deadline: float | None,
+        diagnostics: list[str],
+    ) -> bool:
+        if self._source_chain_cancelled(cancel_event, deadline, diagnostics, "strong-sector"):
+            return False
+        if sector_rows_out is not None:
+            sector_rows_out[:] = rows
+        return True
+
+    def _allow_public_alternate_transport(self) -> bool:
+        if self.allow_alternate_transport is not None:
+            return self.allow_alternate_transport
+        return self.requester is requests.get
+
+    def _request_public_html(
+        self,
+        url: str,
+        *,
+        timeout: float,
+        source: str,
+        diagnostics: list[str],
+        deadline: float | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> Any:
+        return resilient_get(
+            self.requester,
+            url,
+            timeout=timeout,
+            source=source,
+            diagnostics=diagnostics,
+            retries=1,
+            deadline=deadline,
+            alternate_requester=self.alternate_requester,
+            allow_alternate=self._allow_public_alternate_transport(),
+            headers=headers,
+        )
+
+    def _call_ths_concept_section_rows(
+        self,
+        diagnostics: list[str],
+        deadline: float | None,
+        cancel_event: Event | None,
+    ) -> list[dict]:
+        try:
+            return self._fetch_ths_concept_section_rows(
+                diagnostics=diagnostics,
+                deadline=deadline,
+                cancel_event=cancel_event,
+            )
+        except TypeError:
+            return self._fetch_ths_concept_section_rows()
+
+    def _call_ths_industry_html_rows(
+        self,
+        diagnostics: list[str],
+        deadline: float | None,
+        cancel_event: Event | None,
+    ) -> list[dict]:
+        try:
+            return self._fetch_ths_industry_html_rows(
+                diagnostics=diagnostics,
+                deadline=deadline,
+                cancel_event=cancel_event,
+            )
+        except TypeError:
+            return self._fetch_ths_industry_html_rows()
+
+    def _fetch_live_sectors(
+        self,
+        diagnostics: list[str] | None = None,
+        *,
+        deadline: float | None = None,
+        cancel_event: Event | None = None,
+        sector_rows_out: list[dict] | None = None,
+    ) -> list[SectorMover]:
         diagnostics = diagnostics if diagnostics is not None else []
-        cls_sectors = self._fetch_cls_hot_plate_sectors(diagnostics)
+        if self._source_chain_cancelled(cancel_event, deadline, diagnostics, "strong-sector"):
+            return []
+        cls_sectors = self._call_cls_hot_plate_sectors(
+            diagnostics,
+            sector_rows_out,
+            deadline,
+            cancel_event,
+        )
         if cls_sectors:
             return _dedupe_sectors(cls_sectors, 10)
         diagnostics.append("cls-hot-plate strong-sector source returned no valid rows.")
-        ths_concept_rows = self._fetch_ths_concept_section_rows()
+        if self._source_chain_cancelled(cancel_event, deadline, diagnostics, "strong-sector"):
+            return []
+        ths_concept_rows = self._call_ths_concept_section_rows(diagnostics, deadline, cancel_event)
+        if self._source_chain_cancelled(cancel_event, deadline, diagnostics, "strong-sector"):
+            return []
         ths_concept_sectors = self._parse_sector_rows(ths_concept_rows, "ths-concept-section")
         if ths_concept_sectors:
-            self._last_live_sector_rows = ths_concept_rows
+            if not self._publish_sector_rows(
+                ths_concept_rows, sector_rows_out, cancel_event, deadline, diagnostics
+            ):
+                return []
             return _dedupe_sectors(ths_concept_sectors, 10)
         diagnostics.append("ths-concept-section strong-sector source returned no valid rows.")
-        ths_industry_rows = self._fetch_ths_industry_html_rows()
+        if self._source_chain_cancelled(cancel_event, deadline, diagnostics, "strong-sector"):
+            return []
+        ths_industry_rows = self._call_ths_industry_html_rows(diagnostics, deadline, cancel_event)
+        if self._source_chain_cancelled(cancel_event, deadline, diagnostics, "strong-sector"):
+            return []
         ths_industry_sectors = self._parse_sector_rows(ths_industry_rows, "ths-industry-html")
         if ths_industry_sectors:
-            self._last_live_sector_rows = ths_industry_rows
+            if not self._publish_sector_rows(
+                ths_industry_rows, sector_rows_out, cancel_event, deadline, diagnostics
+            ):
+                return []
             return _dedupe_sectors(ths_industry_sectors, 10)
         diagnostics.append("ths-industry-html strong-sector source returned no valid rows.")
+        if self._source_chain_cancelled(cancel_event, deadline, diagnostics, "strong-sector"):
+            return []
         sina_sectors = self._fetch_sina_sectors()
-        self._last_live_sector_rows = []
         if sina_sectors:
+            if not self._publish_sector_rows(
+                [], sector_rows_out, cancel_event, deadline, diagnostics
+            ):
+                return []
             return _dedupe_sectors(sina_sectors, 10)
         diagnostics.append("sina-sector strong-sector source returned no valid rows.")
+        if self._source_chain_cancelled(cancel_event, deadline, diagnostics, "strong-sector"):
+            return []
         akshare_concept_rows = self._fetch_akshare_sector_rows_with_timeout("concept", "akshare-sector", diagnostics)
         akshare_concept_sectors = self._parse_sector_rows(akshare_concept_rows, "akshare-sector")
         if akshare_concept_sectors:
-            self._last_live_sector_rows = akshare_concept_rows
+            if not self._publish_sector_rows(
+                akshare_concept_rows, sector_rows_out, cancel_event, deadline, diagnostics
+            ):
+                return []
             return _dedupe_sectors(akshare_concept_sectors, 10)
         diagnostics.append("akshare-sector strong-sector source returned no valid rows.")
+        if self._source_chain_cancelled(cancel_event, deadline, diagnostics, "strong-sector"):
+            return []
         akshare_industry_rows = self._fetch_akshare_sector_rows_with_timeout("industry", "akshare-industry-sector", diagnostics)
         akshare_industry_sectors = self._parse_sector_rows(akshare_industry_rows, "akshare-industry-sector")
         if akshare_industry_sectors:
-            self._last_live_sector_rows = akshare_industry_rows
+            if not self._publish_sector_rows(
+                akshare_industry_rows, sector_rows_out, cancel_event, deadline, diagnostics
+            ):
+                return []
             return _dedupe_sectors(akshare_industry_sectors, 10)
         diagnostics.append("akshare-industry-sector strong-sector source returned no valid rows.")
+        if self._source_chain_cancelled(cancel_event, deadline, diagnostics, "strong-sector"):
+            return []
         eastmoney_concept_rows = self._call_eastmoney_sector_rows(
             ["m:90+t:3+f:!50", "m:90+t:3"],
             diagnostics=diagnostics,
@@ -817,9 +1056,14 @@ class RealtimeMarketProvider:
         )
         eastmoney_concept_sectors = self._parse_sector_rows(eastmoney_concept_rows, "eastmoney-sector")
         if eastmoney_concept_sectors:
-            self._last_live_sector_rows = eastmoney_concept_rows
+            if not self._publish_sector_rows(
+                eastmoney_concept_rows, sector_rows_out, cancel_event, deadline, diagnostics
+            ):
+                return []
             return _dedupe_sectors(eastmoney_concept_sectors, 10)
         diagnostics.append("eastmoney-sector controlled backup returned no valid rows.")
+        if self._source_chain_cancelled(cancel_event, deadline, diagnostics, "strong-sector"):
+            return []
         eastmoney_industry_rows = self._call_eastmoney_sector_rows(
             ["m:90+t:2+f:!50", "m:90+t:2"],
             diagnostics=diagnostics,
@@ -827,19 +1071,54 @@ class RealtimeMarketProvider:
         )
         eastmoney_industry_sectors = self._parse_sector_rows(eastmoney_industry_rows, "eastmoney-industry-sector")
         if eastmoney_industry_sectors:
-            self._last_live_sector_rows = eastmoney_industry_rows
+            if not self._publish_sector_rows(
+                eastmoney_industry_rows, sector_rows_out, cancel_event, deadline, diagnostics
+            ):
+                return []
             return _dedupe_sectors(eastmoney_industry_sectors, 10)
         diagnostics.append("eastmoney-industry-sector controlled backup returned no valid rows.")
+        if self._source_chain_cancelled(cancel_event, deadline, diagnostics, "strong-sector"):
+            return []
         ths_hot_topic_rows = self._fetch_ths_hot_topic_rows()
         if ths_hot_topic_rows:
             # Hot-reason rows are useful topic candidates, but their gains are
             # individual stock moves. Do not present them as board quote pct.
-            self._last_live_sector_rows = ths_hot_topic_rows
+            self._publish_sector_rows(
+                ths_hot_topic_rows,
+                sector_rows_out,
+                cancel_event,
+                deadline,
+                diagnostics,
+            )
         else:
             diagnostics.append("ths-hot-reason strong-topic source returned no valid rows.")
         return []
 
-    def _fetch_cls_hot_plate_sectors(self, diagnostics: list[str]) -> list[SectorMover]:
+    def _call_cls_hot_plate_sectors(
+        self,
+        diagnostics: list[str],
+        sector_rows_out: list[dict] | None,
+        deadline: float | None,
+        cancel_event: Event | None,
+    ) -> list[SectorMover]:
+        try:
+            return self._fetch_cls_hot_plate_sectors(
+                diagnostics,
+                sector_rows_out=sector_rows_out,
+                deadline=deadline,
+                cancel_event=cancel_event,
+            )
+        except TypeError:
+            return self._fetch_cls_hot_plate_sectors(diagnostics)
+
+    def _fetch_cls_hot_plate_sectors(
+        self,
+        diagnostics: list[str],
+        *,
+        sector_rows_out: list[dict] | None = None,
+        deadline: float | None = None,
+        cancel_event: Event | None = None,
+    ) -> list[SectorMover]:
         try:
             payload = cls_request_json(
                 self.requester,
@@ -852,8 +1131,10 @@ class RealtimeMarketProvider:
             return []
         rows = _sector_rows_from_cls_hot_plate(payload)
         sectors = self._parse_sector_rows(rows, "cls-hot-plate")
-        if sectors:
-            self._last_live_sector_rows = rows
+        if sectors and not self._publish_sector_rows(
+            rows, sector_rows_out, cancel_event, deadline, diagnostics
+        ):
+            return []
         return sectors
 
     def _parse_sector_rows(self, rows: list[dict], source: str) -> list[SectorMover]:
@@ -876,10 +1157,19 @@ class RealtimeMarketProvider:
             )
         return sectors
 
-    def _fetch_live_breadth(self, diagnostics: list[str]) -> MarketBreadth | None:
+    def _fetch_live_breadth(
+        self,
+        diagnostics: list[str],
+        *,
+        deadline: float | None = None,
+        cancel_event: Event | None = None,
+    ) -> MarketBreadth | None:
         fetchers: list[tuple[str, Callable[[], MarketBreadth | None]]] = [
             ("财联社涨跌分布", self._fetch_cls_breadth),
-            ("同花顺市场总览", self._fetch_ths_market_summary_breadth),
+            (
+                "同花顺市场总览",
+                lambda: self._call_ths_market_summary_breadth(diagnostics, deadline, cancel_event),
+            ),
             ("Sina 批量实时个股", self._fetch_sina_breadth),
             ("Tencent 批量实时个股", lambda: self._fetch_tencent_breadth(diagnostics)),
             ("AKShare 实时个股", lambda: self._fetch_akshare_breadth_with_timeout(diagnostics)),
@@ -889,6 +1179,8 @@ class RealtimeMarketProvider:
             fetchers.append(("东方财富轻量 spot 兜底", lambda: self._fetch_eastmoney_breadth(diagnostics)))
         local_symbol_count: int | None = None
         for label, fetcher in fetchers:
+            if self._source_chain_cancelled(cancel_event, deadline, diagnostics, "market-breadth"):
+                return None
             try:
                 breadth = fetcher()
             except Exception as exc:
@@ -1413,33 +1705,39 @@ class RealtimeMarketProvider:
                 return _aggregate_ths_hot_topic_rows(rows)
         return []
 
-    def _fetch_ths_concept_section_rows(self) -> list[dict]:
-        if self._ths_concept_rows_cache is not None:
-            return self._ths_concept_rows_cache
+    def _fetch_ths_concept_section_rows(
+        self,
+        diagnostics: list[str] | None = None,
+        deadline: float | None = None,
+        cancel_event: Event | None = None,
+    ) -> list[dict]:
+        diagnostics = diagnostics if diagnostics is not None else []
         try:
-            response = self.requester(
+            response = self._request_public_html(
                 THS_CONCEPT_SECTION_URL,
                 timeout=self._sector_request_timeout(),
+                source="ths-concept-section",
+                diagnostics=diagnostics,
+                deadline=deadline,
                 headers=THS_HEADERS,
             )
-            response.raise_for_status()
         except Exception:
-            self._ths_concept_rows_cache = []
+            if self._source_chain_cancelled(cancel_event, deadline, diagnostics, "strong-sector"):
+                return []
+            return []
+        if self._source_chain_cancelled(cancel_event, deadline, diagnostics, "strong-sector"):
             return []
         response.encoding = response.encoding or "gbk"
         soup = BeautifulSoup(response.text, "html.parser")
         node = soup.select_one("#gnSection")
         raw_value = str(node.get("value") or "") if node else ""
         if not raw_value:
-            self._ths_concept_rows_cache = []
             return []
         try:
             payload = json.loads(raw_value)
         except (TypeError, ValueError):
-            self._ths_concept_rows_cache = []
             return []
         if not isinstance(payload, dict):
-            self._ths_concept_rows_cache = []
             return []
         rows: list[dict] = []
         seen: set[str] = set()
@@ -1463,24 +1761,34 @@ class RealtimeMarketProvider:
                 }
             )
         rows.sort(key=lambda row: _normalize_sector_change_pct(row) or float("-inf"), reverse=True)
-        self._ths_concept_rows_cache = rows
         return rows
 
-    def _fetch_ths_industry_html_rows(self, max_pages: int = 3) -> list[dict]:
-        if self._ths_industry_rows_cache is not None:
-            return self._ths_industry_rows_cache
+    def _fetch_ths_industry_html_rows(
+        self,
+        max_pages: int = 3,
+        diagnostics: list[str] | None = None,
+        deadline: float | None = None,
+        cancel_event: Event | None = None,
+    ) -> list[dict]:
+        diagnostics = diagnostics if diagnostics is not None else []
         rows_out: list[dict] = []
         seen: set[str] = set()
         for page in range(1, max_pages + 1):
+            if self._source_chain_cancelled(cancel_event, deadline, diagnostics, "strong-sector"):
+                return []
             try:
-                response = self.requester(
+                response = self._request_public_html(
                     THS_INDUSTRY_HTML_URL.format(page=page),
                     timeout=self._sector_request_timeout(),
+                    source="ths-industry-html",
+                    diagnostics=diagnostics,
+                    deadline=deadline,
                     headers=THS_HEADERS,
                 )
-                response.raise_for_status()
             except Exception:
                 break
+            if self._source_chain_cancelled(cancel_event, deadline, diagnostics, "strong-sector"):
+                return []
             response.encoding = response.encoding or "gbk"
             soup = BeautifulSoup(response.text, "html.parser")
             table_rows = soup.select("table.m-table.m-pager-table tbody tr")
@@ -1520,17 +1828,43 @@ class RealtimeMarketProvider:
                 added += 1
             if added == 0:
                 break
-        self._ths_industry_rows_cache = rows_out
+        if self._source_chain_cancelled(cancel_event, deadline, diagnostics, "strong-sector"):
+            return []
         return rows_out
 
-    def _fetch_ths_market_summary_breadth(self) -> MarketBreadth | None:
+    def _call_ths_market_summary_breadth(
+        self,
+        diagnostics: list[str],
+        deadline: float | None,
+        cancel_event: Event | None,
+    ) -> MarketBreadth | None:
         try:
-            response = self.requester(
+            return self._fetch_ths_market_summary_breadth(
+                diagnostics=diagnostics,
+                deadline=deadline,
+                cancel_event=cancel_event,
+            )
+        except TypeError:
+            return self._fetch_ths_market_summary_breadth()
+
+    def _fetch_ths_market_summary_breadth(
+        self,
+        diagnostics: list[str] | None = None,
+        deadline: float | None = None,
+        cancel_event: Event | None = None,
+    ) -> MarketBreadth | None:
+        diagnostics = diagnostics if diagnostics is not None else []
+        try:
+            response = self._request_public_html(
                 THS_MARKET_SUMMARY_URL,
                 timeout=self.timeout,
+                source="ths-market-summary",
+                diagnostics=diagnostics,
+                deadline=deadline,
                 headers=THS_HEADERS,
             )
-            response.raise_for_status()
+            if self._source_chain_cancelled(cancel_event, deadline, diagnostics, "market-breadth"):
+                return None
             response.encoding = response.encoding or "gbk"
             text = BeautifulSoup(response.text, "html.parser").get_text(" ", strip=True)
             match = THS_BREADTH_RE.search(text)
@@ -1546,7 +1880,9 @@ class RealtimeMarketProvider:
         except Exception:
             pass
 
-        industry_rows = self._fetch_ths_industry_html_rows()
+        if self._source_chain_cancelled(cancel_event, deadline, diagnostics, "market-breadth"):
+            return None
+        industry_rows = self._call_ths_industry_html_rows(diagnostics, deadline, cancel_event)
         if not industry_rows:
             return None
         up = sum(int(row.get("up_count") or 0) for row in industry_rows)
@@ -1630,7 +1966,13 @@ class RealtimeMarketProvider:
             return f"实时指数来自{index_label}，红绿家数来自{breadth_label}，强势题材暂不可用。"
         return f"实时指数来自{index_label}，红绿家数与强势题材暂不可用，已保留可用的最近数据。"
 
-    def _snapshot_from_local(self, now: datetime) -> RealtimeMarketSnapshot:
+    def _snapshot_from_local(
+        self,
+        now: datetime,
+        *,
+        sector_rows: list[dict] | None = None,
+        skip_topic_fetch: bool = False,
+    ) -> RealtimeMarketSnapshot:
         try:
             bars = self.warehouse.read_latest_daily_bars(days=3)
         except Exception as exc:
@@ -1692,8 +2034,18 @@ class RealtimeMarketProvider:
             source="local-latest",
             updated_at=now,
         )
-        local_sectors = self._local_market_groups(latest, source="local-market-group")
-        yesterday_sectors = self._local_market_groups(yesterday, source="local-yesterday-group")
+        local_sectors = self._local_market_groups(
+            latest,
+            source="local-market-group",
+            sector_rows=sector_rows,
+            skip_topic_fetch=skip_topic_fetch,
+        )
+        yesterday_sectors = self._local_market_groups(
+            yesterday,
+            source="local-yesterday-group",
+            sector_rows=sector_rows,
+            skip_topic_fetch=skip_topic_fetch,
+        )
         message = _append_yesterday_sector_note(
             f"实时行情源暂不可用，已使用本地最近交易日 {latest_date.date()} 数据。",
             yesterday_sectors,
@@ -1730,12 +2082,19 @@ class RealtimeMarketProvider:
         current["change_pct"] = current["change_pct"].replace([float("inf"), -float("inf")], pd.NA)
         return current
 
-    def _local_market_groups(self, latest: pd.DataFrame, source: str) -> list[SectorMover]:
-        sector_rows = self._last_live_sector_rows
+    def _local_market_groups(
+        self,
+        latest: pd.DataFrame,
+        source: str,
+        sector_rows: list[dict] | None = None,
+        *,
+        skip_topic_fetch: bool = False,
+    ) -> list[SectorMover]:
+        sector_rows = [] if sector_rows is None else sector_rows
         if latest.empty:
             return []
         if not sector_rows:
-            if self._skip_local_topic_fetch_once:
+            if skip_topic_fetch:
                 return []
             sector_rows = self._fetch_ths_hot_topic_rows()
         if not sector_rows:
