@@ -165,11 +165,69 @@ function builtInStrategyPresets(): SavedStrategyPreset[] {
   }));
 }
 
+function validateStrategyConfig(strategy: unknown, index: number): asserts strategy is StrategyConfig {
+  if (!strategy || typeof strategy !== "object") {
+    throw new Error(`已保存策略条目 #${index} 的 strategy 必须是对象。`);
+  }
+  const s = strategy as Record<string, unknown>;
+  const validateCondition = (condition: unknown, path: string): void => {
+    if (!condition || typeof condition !== "object" || Array.isArray(condition)) {
+      throw new Error(`已保存策略条目 #${index} 的 ${path} 包含非法 condition。`);
+    }
+    const node = condition as Record<string, unknown>;
+    if (
+      typeof node.id !== "string" ||
+      typeof node.condition_id !== "string" ||
+      typeof node.enabled !== "boolean" ||
+      !node.params ||
+      typeof node.params !== "object" ||
+      Array.isArray(node.params) ||
+      typeof node.data_lag_days !== "number"
+    ) {
+      throw new Error(`已保存策略条目 #${index} 的 ${path} condition 字段不完整。`);
+    }
+  };
+  if (!Array.isArray(s.market_filters)) {
+    throw new Error(`已保存策略条目 #${index} 的 strategy.market_filters 必须是数组。`);
+  }
+  if (!Array.isArray(s.entry_groups)) {
+    throw new Error(`已保存策略条目 #${index} 的 strategy.entry_groups 必须是数组。`);
+  }
+  if (!Array.isArray(s.exit_rules)) {
+    throw new Error(`已保存策略条目 #${index} 的 strategy.exit_rules 必须是数组。`);
+  }
+  for (const condition of s.market_filters as unknown[]) {
+    validateCondition(condition, "market_filters");
+  }
+  for (const group of s.entry_groups as unknown[]) {
+    if (!group || typeof group !== "object" || Array.isArray(group)) {
+      throw new Error(`已保存策略条目 #${index} 的 entry_groups 包含非法 group。`);
+    }
+    const value = group as Record<string, unknown>;
+    if (
+      typeof value.id !== "string" ||
+      !["and", "or", "score"].includes(String(value.operator)) ||
+      !Array.isArray(value.conditions)
+    ) {
+      throw new Error(`已保存策略条目 #${index} 的 entry_groups group 字段不完整。`);
+    }
+    for (const condition of value.conditions) {
+      validateCondition(condition, "entry_groups.conditions");
+    }
+  }
+  for (const rule of s.exit_rules as unknown[]) {
+    validateCondition(rule, "exit_rules");
+  }
+}
+
 function parseCustomSavedStrategies(raw: unknown): SavedStrategyPreset[] {
   if (!Array.isArray(raw)) {
-    return [];
+    throw new Error("已保存策略数据格式错误：期望一个 JSON 数组。");
   }
-  return raw.flatMap((item) => {
+  // Reject the whole payload if any entry is malformed instead of silently
+  // dropping it. A partial parse would let a later save persist a strict subset
+  // and permanently lose the dropped strategies.
+  return raw.map((item, index) => {
     if (
       !item ||
       typeof item !== "object" ||
@@ -178,17 +236,22 @@ function parseCustomSavedStrategies(raw: unknown): SavedStrategyPreset[] {
       typeof item.saved_at !== "string" ||
       !("strategy" in item)
     ) {
-      return [];
+      throw new Error(`已保存策略数据存在非法条目（#${index}），已停止加载以避免覆盖丢失数据。`);
     }
-    return [
-      {
-        id: item.id,
-        name: item.name,
-        saved_at: item.saved_at,
-        strategy: cloneStrategyConfig(item.strategy as StrategyConfig)
-      }
-    ];
+    validateStrategyConfig(item.strategy, index);
+    return {
+      id: item.id,
+      name: item.name,
+      saved_at: item.saved_at,
+      strategy: cloneStrategyConfig(item.strategy as StrategyConfig)
+    };
   });
+}
+
+function loadSavedStrategiesFromLocalStorageStrict(): SavedStrategyPreset[] {
+  const raw = window.localStorage.getItem(STORAGE_KEY);
+  const customItems = raw ? parseCustomSavedStrategies(JSON.parse(raw)) : [];
+  return [...builtInStrategyPresets(), ...customItems];
 }
 
 function serializeCustomSavedStrategies(items: SavedStrategyPreset[]) {
@@ -228,11 +291,41 @@ export function persistSavedStrategies(items: SavedStrategyPreset[]): void {
 
 export async function loadSavedStrategiesFromStore(): Promise<SavedStrategyPreset[]> {
   if (!isTauriRuntime()) {
-    return loadSavedStrategies();
+    return loadSavedStrategiesFromLocalStorageStrict();
   }
   const builtins = builtInStrategyPresets();
   const customItems = parseCustomSavedStrategies(await invoke<unknown[]>("load_saved_strategies"));
   return [...builtins, ...customItems];
+}
+
+export async function upsertSavedStrategyToStore(
+  preset: SavedStrategyPreset,
+  current: SavedStrategyPreset[]
+): Promise<SavedStrategyPreset[]> {
+  if (!isTauriRuntime()) {
+    const next = [preset, ...current.filter((item) => item.id !== preset.id)];
+    persistSavedStrategies(next);
+    return next;
+  }
+  const customItems = parseCustomSavedStrategies(
+    await invoke<unknown[]>("upsert_saved_strategy", { preset: serializeCustomSavedStrategies([preset])[0] })
+  );
+  return [...builtInStrategyPresets(), ...customItems];
+}
+
+export async function deleteSavedStrategyFromStore(
+  presetId: string,
+  current: SavedStrategyPreset[]
+): Promise<SavedStrategyPreset[]> {
+  if (!isTauriRuntime()) {
+    const next = current.filter((item) => item.id !== presetId);
+    persistSavedStrategies(next);
+    return next;
+  }
+  const customItems = parseCustomSavedStrategies(
+    await invoke<unknown[]>("delete_saved_strategy", { presetId })
+  );
+  return [...builtInStrategyPresets(), ...customItems];
 }
 
 export async function persistSavedStrategiesToStore(items: SavedStrategyPreset[]): Promise<void> {

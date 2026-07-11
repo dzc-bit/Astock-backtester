@@ -5,7 +5,8 @@ use std::io::Write;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 use tauri::{AppHandle, State};
 
 use crate::python_runtime::{backend_dir, project_root, python_command};
@@ -104,20 +105,255 @@ fn read_saved_strategies_from(root: &Path) -> Result<Value, String> {
     if !parsed.is_array() {
         return Err("saved strategies must be a JSON array".to_string());
     }
+    validate_strategy_array(&parsed)?;
     Ok(parsed)
 }
 
-fn write_saved_strategies_to(root: &Path, items: &Value) -> Result<(), String> {
+/// Validate that every entry in the strategy array has the required shape.
+/// Rejecting early prevents a malformed entry from ever being persisted.
+fn validate_strategy_array(array: &Value) -> Result<(), String> {
+    fn require_string(object: &serde_json::Map<String, Value>, field: &str, path: &str) -> Result<(), String> {
+        if object.get(field).and_then(Value::as_str).is_some_and(|value| !value.is_empty()) {
+            Ok(())
+        } else {
+            Err(format!("{path}.{field} 必须是非空字符串。"))
+        }
+    }
+
+    fn validate_condition(condition: &Value, path: &str) -> Result<(), String> {
+        let object = condition
+            .as_object()
+            .ok_or_else(|| format!("{path} 必须是 condition 对象。"))?;
+        require_string(object, "id", path)?;
+        require_string(object, "condition_id", path)?;
+        if !object.get("enabled").is_some_and(Value::is_boolean) {
+            return Err(format!("{path}.enabled 必须是布尔值。"));
+        }
+        if !object.get("params").is_some_and(Value::is_object) {
+            return Err(format!("{path}.params 必须是对象。"));
+        }
+        if !object.get("data_lag_days").is_some_and(Value::is_number) {
+            return Err(format!("{path}.data_lag_days 必须是数字。"));
+        }
+        Ok(())
+    }
+
+    let entries = array.as_array().expect("caller must guarantee array");
+    for (index, entry) in entries.iter().enumerate() {
+        let obj = entry.as_object().ok_or_else(|| {
+            format!("已保存策略条目 #{index} 非法：期望一个 JSON 对象。")
+        })?;
+        if obj.get("id").and_then(|v| v.as_str()).is_none() {
+            return Err(format!("已保存策略条目 #{index} 缺少必需的 id 字段（字符串）。"));
+        }
+        if obj.get("name").and_then(|v| v.as_str()).is_none() {
+            return Err(format!("已保存策略条目 #{index} 缺少必需的 name 字段（字符串）。"));
+        }
+        if obj.get("saved_at").and_then(|v| v.as_str()).is_none() {
+            return Err(format!("已保存策略条目 #{index} 缺少必需的 saved_at 字段（字符串）。"));
+        }
+        let strategy = obj.get("strategy").ok_or_else(|| {
+            format!("已保存策略条目 #{index} 缺少必需的 strategy 字段。")
+        })?;
+        let strat_obj = strategy.as_object().ok_or_else(|| {
+            format!("已保存策略条目 #{index} 的 strategy 必须是对象。")
+        })?;
+        require_string(strat_obj, "name", &format!("已保存策略条目 #{index}.strategy"))?;
+        if !strat_obj.get("market_filters").map_or(false, |v| v.is_array()) {
+            return Err(format!(
+                "已保存策略条目 #{index} 的 strategy.market_filters 必须是数组。"
+            ));
+        }
+        if !strat_obj.get("entry_groups").map_or(false, |v| v.is_array()) {
+            return Err(format!(
+                "已保存策略条目 #{index} 的 strategy.entry_groups 必须是数组。"
+            ));
+        }
+        if !strat_obj.get("exit_rules").map_or(false, |v| v.is_array()) {
+            return Err(format!(
+                "已保存策略条目 #{index} 的 strategy.exit_rules 必须是数组。"
+            ));
+        }
+        for (condition_index, condition) in strat_obj["market_filters"].as_array().unwrap().iter().enumerate() {
+            validate_condition(condition, &format!("已保存策略条目 #{index}.strategy.market_filters[{condition_index}]"))?;
+        }
+        for (group_index, group) in strat_obj["entry_groups"].as_array().unwrap().iter().enumerate() {
+            let path = format!("已保存策略条目 #{index}.strategy.entry_groups[{group_index}]");
+            let group_object = group.as_object().ok_or_else(|| format!("{path} 必须是 group 对象。"))?;
+            require_string(group_object, "id", &path)?;
+            if !matches!(group_object.get("operator").and_then(Value::as_str), Some("and" | "or" | "score")) {
+                return Err(format!("{path}.operator 必须是 and、or 或 score。"));
+            }
+            let conditions = group_object
+                .get("conditions")
+                .and_then(Value::as_array)
+                .ok_or_else(|| format!("{path}.conditions 必须是数组。"))?;
+            for (condition_index, condition) in conditions.iter().enumerate() {
+                validate_condition(condition, &format!("{path}.conditions[{condition_index}]"))?;
+            }
+        }
+        for (condition_index, condition) in strat_obj["exit_rules"].as_array().unwrap().iter().enumerate() {
+            validate_condition(condition, &format!("已保存策略条目 #{index}.strategy.exit_rules[{condition_index}]"))?;
+        }
+    }
+    Ok(())
+}
+
+/// Cross-process exclusive write lock for the saved-strategies file.
+///
+/// Uses `fs2::FileExt::lock_exclusive` on a companion `.lock` file so that
+/// two independent application processes cannot simultaneously read-modify-write
+/// and overwrite each other's changes.  The process-internal `Mutex` serialises
+/// threads within a single process; this lock extends that serialisation across
+/// separate OS processes.
+struct SavedStrategiesFileLock {
+    _file: std::fs::File,
+}
+
+impl SavedStrategiesFileLock {
+    fn acquire(root: &Path) -> Result<Self, String> {
+        let lock_path = saved_strategies_lock_path_from_root(root);
+        if let Some(parent) = lock_path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|err| format!("failed to create lock dir: {err}"))?;
+        }
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(&lock_path)
+            .map_err(|err| format!("failed to open saved-strategies lock file: {err}"))?;
+        fs2::FileExt::lock_exclusive(&file)
+            .map_err(|err| format!("failed to acquire saved-strategies cross-process lock: {err}"))?;
+        Ok(Self { _file: file })
+    }
+}
+
+impl Drop for SavedStrategiesFileLock {
+    fn drop(&mut self) {
+        // fs2 releases the lock when the file descriptor is closed.
+        let _ = fs2::FileExt::unlock(&self._file);
+    }
+}
+
+fn saved_strategies_lock_path_from_root(root: &Path) -> PathBuf {
+    root.join("运行产物")
+        .join("策略配置")
+        .join("saved-strategies.lock")
+}
+
+/// Dedicated synchronization boundary for saved-strategies writes.
+///
+/// Serializes every write within this process so that concurrent
+/// `persist_saved_strategies` / `upsert_saved_strategy` / `delete_saved_strategy`
+/// calls cannot interleave.
+fn saved_strategies_write_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+/// Build a process-unique temporary path next to the final file. Keeps a `.tmp`
+/// suffix so any leaked temporary remains easy to detect and clean up.
+fn unique_tmp_path(path: &Path) -> PathBuf {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let pid = std::process::id();
+    path.with_extension(format!("json.{pid}.{seq}.tmp"))
+}
+
+fn write_saved_strategies_unlocked(root: &Path, items: &Value) -> Result<(), String> {
+    // Validate and encode the payload BEFORE touching disk. An invalid (non-array)
+    // payload must never destroy or truncate the existing file.
     let array = items
         .as_array()
         .ok_or_else(|| "saved strategies payload must be a JSON array".to_string())?;
+    validate_strategy_array(items)?;
+    let payload = serde_json::to_string_pretty(array).map_err(|err| format!("failed to encode saved strategies: {err}"))?;
+
     let path = saved_strategies_path_from_root(root);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|err| format!("failed to create strategy config dir: {err}"))?;
     }
-    let payload = serde_json::to_string_pretty(array).map_err(|err| format!("failed to encode saved strategies: {err}"))?;
-    fs::write(&path, payload).map_err(|err| format!("failed to write saved strategies: {err}"))?;
+
+    // Atomic write: write_all + sync_all to a unique .tmp first, then rename
+    // over the final path.  On any failure, clean up the temp file so nothing
+    // is leaked and the previous file stays intact (the rename either fully
+    // succeeds or never happens).
+    let tmp_path = unique_tmp_path(&path);
+    {
+        let mut tmp_file = std::fs::File::create(&tmp_path)
+            .map_err(|err| {
+                let _ = fs::remove_file(&tmp_path);
+                format!("failed to create tmp strategies file: {err}")
+            })?;
+        tmp_file.write_all(payload.as_bytes()).map_err(|err| {
+            let _ = fs::remove_file(&tmp_path);
+            format!("failed to write tmp strategies: {err}")
+        })?;
+        tmp_file.sync_all().map_err(|err| {
+            let _ = fs::remove_file(&tmp_path);
+            format!("failed to sync tmp strategies to disk: {err}")
+        })?;
+    }
+    if let Err(err) = fs::rename(&tmp_path, &path) {
+        if let Err(cleanup_err) = fs::remove_file(&tmp_path) {
+            return Err(format!(
+                "failed to rename tmp strategies ({err}), and cleanup of tmp file also failed ({cleanup_err})"
+            ));
+        }
+        return Err(format!("failed to rename tmp strategies: {err}, tmp file cleaned up"));
+    }
     Ok(())
+}
+
+fn write_saved_strategies_to(root: &Path, items: &Value) -> Result<(), String> {
+    let _file_lock = SavedStrategiesFileLock::acquire(root)?;
+    let _guard = saved_strategies_write_lock()
+        .lock()
+        .map_err(|_| "saved strategies write lock poisoned".to_string())?;
+    write_saved_strategies_unlocked(root, items)
+}
+
+fn upsert_saved_strategy_in(root: &Path, preset: Value) -> Result<Value, String> {
+    let new_id = preset
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "preset must have a string 'id'".to_string())?;
+    let _file_lock = SavedStrategiesFileLock::acquire(root)?;
+    let _guard = saved_strategies_write_lock()
+        .lock()
+        .map_err(|_| "saved strategies write lock poisoned".to_string())?;
+    let mut current = read_saved_strategies_from(root)?;
+    let array = current
+        .as_array_mut()
+        .ok_or_else(|| "saved strategies must be a JSON array".to_string())?;
+    if let Some(pos) = array
+        .iter()
+        .position(|entry| entry.get("id").and_then(Value::as_str) == Some(new_id))
+    {
+        array[pos] = preset;
+    } else {
+        array.insert(0, preset);
+    }
+    write_saved_strategies_unlocked(root, &current)?;
+    Ok(current)
+}
+
+fn delete_saved_strategy_in(root: &Path, preset_id: &str) -> Result<Value, String> {
+    let _file_lock = SavedStrategiesFileLock::acquire(root)?;
+    let _guard = saved_strategies_write_lock()
+        .lock()
+        .map_err(|_| "saved strategies write lock poisoned".to_string())?;
+    let mut current = read_saved_strategies_from(root)?;
+    let array = current
+        .as_array_mut()
+        .ok_or_else(|| "saved strategies must be a JSON array".to_string())?;
+    let before = array.len();
+    array.retain(|entry| entry.get("id").and_then(Value::as_str) != Some(preset_id));
+    if array.len() != before {
+        write_saved_strategies_unlocked(root, &current)?;
+    }
+    Ok(current)
 }
 
 fn is_ths_original_article_url(url: &str) -> bool {
@@ -256,6 +492,29 @@ pub fn persist_saved_strategies(items: Value) -> Result<(), String> {
     write_saved_strategies_to(&root, &items)
 }
 
+/// Upsert a single saved strategy preset atomically.
+///
+/// Re-reads the latest disk array under the cross-process lock, inserts or
+/// replaces the entry identified by `preset.id`, and writes the result
+/// atomically.  Returns the new authoritative array so the frontend can
+/// update its optimistic view.
+#[tauri::command]
+pub fn upsert_saved_strategy(preset: Value) -> Result<Value, String> {
+    let root = project_root()?;
+    upsert_saved_strategy_in(&root, preset)
+}
+
+/// Delete a single saved strategy preset atomically.
+///
+/// Re-reads the latest disk array under the cross-process lock, removes the
+/// entry identified by `preset_id`, and writes the result atomically.
+/// Returns the new authoritative array.
+#[tauri::command]
+pub fn delete_saved_strategy(preset_id: String) -> Result<Value, String> {
+    let root = project_root()?;
+    delete_saved_strategy_in(&root, &preset_id)
+}
+
 #[tauri::command]
 pub fn workspace_diagnostics() -> Result<WorkspaceDiagnostics, String> {
     let root = project_root()?;
@@ -266,10 +525,11 @@ pub fn workspace_diagnostics() -> Result<WorkspaceDiagnostics, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_safe_external_http_url, is_ths_original_article_url, read_saved_strategies_from, saved_strategies_path_from_root,
-        workspace_diagnostics_from_root, write_saved_strategies_to,
+        is_safe_external_http_url, is_ths_original_article_url, read_saved_strategies_from,
+        saved_strategies_path_from_root, validate_strategy_array,
+        workspace_diagnostics_from_root, write_saved_strategies_to, upsert_saved_strategy_in,
     };
-    use serde_json::json;
+    use serde_json::{json, Value};
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -366,6 +626,49 @@ mod tests {
     }
 
     #[test]
+    fn write_saved_strategies_leaves_no_temp_file_behind() {
+        let root = unique_temp_dir("saved-strategy-atomic");
+        let payload = json!([
+            {
+                "id": "saved-atomic",
+                "name": "原子写入测试",
+                "saved_at": "2026-07-11T00:00:00Z",
+                "strategy": {
+                    "name": "原子写入测试",
+                    "market_filters": [],
+                    "entry_groups": [],
+                    "exit_rules": [],
+                    "score_threshold": null
+                }
+            }
+        ]);
+
+        write_saved_strategies_to(&root, &payload).expect("write should succeed");
+
+        let path = saved_strategies_path_from_root(&root);
+        let parent = path.parent().expect("parent dir should exist");
+        let tmp_files: Vec<_> = fs::read_dir(parent)
+            .expect("should read dir")
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_str()
+                    .map(|n| n.ends_with(".tmp"))
+                    .unwrap_or(false)
+            })
+            .collect();
+        assert!(
+            tmp_files.is_empty(),
+            "atomic write must not leave .tmp files behind"
+        );
+
+        let stored = read_saved_strategies_from(&root).expect("read should succeed");
+        assert_eq!(stored, payload);
+
+        fs::remove_dir_all(root).expect("temp tree should be removed");
+    }
+
+    #[test]
     fn workspace_diagnostics_report_runtime_paths_under_project_root() {
         let root = unique_temp_dir("workspace-diagnostics");
         let runtime_data_dir = root.join("运行产物").join("本地数据仓");
@@ -398,5 +701,436 @@ mod tests {
         assert!(diagnostics.warnings.iter().any(|item| item.contains("runtime data directory")));
 
         fs::remove_dir_all(root).expect("temp workspace tree should be removed");
+    }
+
+    #[test]
+    fn write_saved_strategies_cleans_up_tmp_when_rename_fails() {
+        // Force the atomic rename to fail by making the destination a NON-EMPTY directory.
+        // MOVEFILE_REPLACE_EXISTING only replaces files, never directories, so the rename errors.
+        let root = unique_temp_dir("saved-strategy-rename-fail");
+        let path = saved_strategies_path_from_root(&root);
+        fs::create_dir_all(&path).expect("destination dir should be created");
+        fs::write(path.join("keep.txt"), b"keep").expect("marker file should be written");
+
+        let payload = json!([
+            {
+                "id": "rename-fail",
+                "name": "重命名失败测试",
+                "saved_at": "2026-07-11T00:00:00Z",
+                "strategy": {
+                    "name": "重命名失败测试",
+                    "market_filters": [],
+                    "entry_groups": [],
+                    "exit_rules": [],
+                    "score_threshold": null
+                }
+            }
+        ]);
+
+        let result = write_saved_strategies_to(&root, &payload);
+        assert!(result.is_err(), "rename onto a directory must fail");
+
+        let parent = path.parent().expect("parent dir should exist");
+        let tmp_files: Vec<_> = fs::read_dir(parent)
+            .expect("should read dir")
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .map(|name| name.contains(".tmp"))
+                    .unwrap_or(false)
+            })
+            .collect();
+        assert!(
+            tmp_files.is_empty(),
+            "a failed rename must clean up the temporary file"
+        );
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn write_saved_strategies_preserves_original_when_payload_is_not_array() {
+        let root = unique_temp_dir("saved-strategy-invalid-payload");
+        let original = json!([
+            {
+                "id": "original",
+                "name": "原始策略",
+                "saved_at": "2026-07-11T00:00:00Z",
+                "strategy": {
+                    "name": "原始策略",
+                    "market_filters": [],
+                    "entry_groups": [],
+                    "exit_rules": [],
+                    "score_threshold": null
+                }
+            }
+        ]);
+        write_saved_strategies_to(&root, &original).expect("initial write should succeed");
+
+        let invalid = json!({ "not": "an array" });
+        let result = write_saved_strategies_to(&root, &invalid);
+        assert!(result.is_err(), "a non-array payload must be rejected");
+
+        let stored = read_saved_strategies_from(&root).expect("original file should still be readable");
+        assert_eq!(
+            stored, original,
+            "rejecting an invalid payload must never overwrite the existing file"
+        );
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn concurrent_writes_leave_a_valid_json_array_file() {
+        let root = unique_temp_dir("saved-strategy-concurrent");
+        let payloads: Vec<Value> = (0..8)
+            .map(|index| {
+                json!([
+                    {
+                        "id": format!("saved-{index}"),
+                        "name": format!("并发策略{index}"),
+                        "saved_at": "2026-07-11T00:00:00Z",
+                        "strategy": {
+                            "name": format!("并发策略{index}"),
+                            "market_filters": [],
+                            "entry_groups": [],
+                            "exit_rules": [],
+                            "score_threshold": null
+                        }
+                    }
+                ])
+            })
+            .collect();
+
+        let mut handles = Vec::new();
+        for payload in payloads.clone() {
+            let root = root.clone();
+            handles.push(std::thread::spawn(move || {
+                write_saved_strategies_to(&root, &payload).expect("concurrent write should succeed");
+            }));
+        }
+        for handle in handles {
+            handle.join().expect("write thread should not panic");
+        }
+
+        let stored = read_saved_strategies_from(&root).expect("final file should be a valid json array");
+        assert!(stored.is_array(), "final file must be a valid json array");
+        assert!(
+            payloads.contains(&stored),
+            "serialized writes must leave the file equal to one complete payload (no interleaving)"
+        );
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    // ------------------------------------------------------------------
+    // Round-4: strategy persistence hardening
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn validate_strategy_rejects_null_entry() {
+        let array = json!([null]);
+        let err = super::validate_strategy_array(&array).unwrap_err();
+        assert!(err.contains("期望一个 JSON 对象"));
+    }
+
+    #[test]
+    fn validate_strategy_rejects_missing_id() {
+        let array = json!([{
+            "name": "测试",
+            "saved_at": "2026-07-11T00:00:00Z",
+            "strategy": {
+                "name": "测试",
+                "market_filters": [],
+                "entry_groups": [],
+                "exit_rules": [],
+                "score_threshold": null
+            }
+        }]);
+        let err = super::validate_strategy_array(&array).unwrap_err();
+        assert!(err.contains("id"));
+    }
+
+    #[test]
+    fn validate_strategy_rejects_strategy_not_object() {
+        let array = json!([{
+            "id": "test-1",
+            "name": "测试",
+            "saved_at": "2026-07-11T00:00:00Z",
+            "strategy": null
+        }]);
+        let err = super::validate_strategy_array(&array).unwrap_err();
+        assert!(err.contains("strategy 必须是对象"));
+    }
+
+    #[test]
+    fn validate_strategy_rejects_missing_market_filters() {
+        let array = json!([{
+            "id": "test-1",
+            "name": "测试",
+            "saved_at": "2026-07-11T00:00:00Z",
+            "strategy": {
+                "name": "测试",
+                "entry_groups": [],
+                "exit_rules": []
+            }
+        }]);
+        let err = super::validate_strategy_array(&array).unwrap_err();
+        assert!(err.contains("market_filters"));
+    }
+
+    #[test]
+    fn validate_strategy_rejects_incomplete_nested_condition() {
+        let array = json!([{
+            "id": "test-1",
+            "name": "测试",
+            "saved_at": "2026-07-11T00:00:00Z",
+            "strategy": {
+                "name": "测试",
+                "market_filters": [{"id": "condition-1"}],
+                "entry_groups": [{"id": "g", "operator": "and", "conditions": [{}]}],
+                "exit_rules": []
+            }
+        }]);
+        let err = super::validate_strategy_array(&array).unwrap_err();
+        assert!(err.contains("condition_id"), "unexpected validation error: {err}");
+    }
+
+    #[test]
+    fn upsert_inserts_new_preset_and_returns_full_array() {
+        let root = unique_temp_dir("saved-strategy-upsert");
+        // Start with one existing entry
+        let existing = json!([{
+            "id": "existing-1",
+            "name": "既有策略",
+            "saved_at": "2026-07-11T00:00:00Z",
+            "strategy": {
+                "name": "既有策略",
+                "market_filters": [],
+                "entry_groups": [],
+                "exit_rules": [],
+                "score_threshold": null
+            }
+        }]);
+        write_saved_strategies_to(&root, &existing).expect("initial write should succeed");
+
+        let new_preset = json!({
+            "id": "new-1",
+            "name": "新策略",
+            "saved_at": "2026-07-11T01:00:00Z",
+            "strategy": {
+                "name": "新策略",
+                "market_filters": [],
+                "entry_groups": [],
+                "exit_rules": [],
+                "score_threshold": null
+            }
+        });
+
+        // Simulate upsert logic: read, insert, write, return
+        let mut current = read_saved_strategies_from(&root).expect("should read");
+        let array = current.as_array_mut().unwrap();
+        array.insert(0, new_preset.clone());
+        let updated = Value::Array(array.clone());
+        validate_strategy_array(&updated).expect("should validate");
+        write_saved_strategies_to(&root, &updated).expect("should write");
+
+        assert_eq!(updated.as_array().unwrap().len(), 2);
+        assert_eq!(updated[0]["id"], "new-1");
+        assert_eq!(updated[1]["id"], "existing-1");
+
+        let stored = read_saved_strategies_from(&root).expect("should read");
+        assert_eq!(stored, updated);
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn delete_removes_existing_preset_and_returns_remaining() {
+        let root = unique_temp_dir("saved-strategy-delete");
+        let payload = json!([
+            {
+                "id": "keep-me",
+                "name": "保留",
+                "saved_at": "2026-07-11T00:00:00Z",
+                "strategy": {
+                    "name": "保留",
+                    "market_filters": [],
+                    "entry_groups": [],
+                    "exit_rules": [],
+                    "score_threshold": null
+                }
+            },
+            {
+                "id": "remove-me",
+                "name": "删除",
+                "saved_at": "2026-07-11T00:00:00Z",
+                "strategy": {
+                    "name": "删除",
+                    "market_filters": [],
+                    "entry_groups": [],
+                    "exit_rules": [],
+                    "score_threshold": null
+                }
+            }
+        ]);
+        write_saved_strategies_to(&root, &payload).expect("initial write should succeed");
+
+        let mut current = read_saved_strategies_from(&root).expect("should read");
+        let array = current.as_array_mut().unwrap();
+        array.retain(|entry| entry.get("id").and_then(|v| v.as_str()) != Some("remove-me"));
+        write_saved_strategies_to(&root, &current).expect("should write");
+
+        let stored = read_saved_strategies_from(&root).expect("should read");
+        assert_eq!(stored.as_array().unwrap().len(), 1);
+        assert_eq!(stored[0]["id"], "keep-me");
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    fn valid_saved_strategy(id: &str) -> Value {
+        json!({
+            "id": id,
+            "name": id,
+            "saved_at": "2026-07-11T00:00:00Z",
+            "strategy": {
+                "name": id,
+                "market_filters": [],
+                "entry_groups": [],
+                "exit_rules": [],
+                "score_threshold": null
+            }
+        })
+    }
+
+    #[test]
+    fn atomic_upsert_core_preserves_concurrent_updates() {
+        let root = unique_temp_dir("saved-strategy-concurrent-upsert");
+        let first_root = root.clone();
+        let second_root = root.clone();
+        let first = std::thread::spawn(move || {
+            upsert_saved_strategy_in(&first_root, valid_saved_strategy("first"))
+                .expect("first upsert should complete")
+        });
+        let second = std::thread::spawn(move || {
+            upsert_saved_strategy_in(&second_root, valid_saved_strategy("second"))
+                .expect("second upsert should complete")
+        });
+
+        first.join().expect("first upsert thread should not panic");
+        second.join().expect("second upsert thread should not panic");
+        let stored = read_saved_strategies_from(&root).expect("saved strategies should be readable");
+        let ids: Vec<_> = stored
+            .as_array()
+            .expect("saved strategies should be an array")
+            .iter()
+            .filter_map(|item| item.get("id").and_then(Value::as_str))
+            .collect();
+        assert!(ids.contains(&"first"));
+        assert!(ids.contains(&"second"));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn write_all_and_sync_all_are_used_on_tmp_file() {
+        let root = unique_temp_dir("saved-strategy-sync");
+        let payload = json!([{
+            "id": "sync-test",
+            "name": "同步测试",
+            "saved_at": "2026-07-11T00:00:00Z",
+            "strategy": {
+                "name": "同步测试",
+                "market_filters": [],
+                "entry_groups": [],
+                "exit_rules": [],
+                "score_threshold": null
+            }
+        }]);
+
+        write_saved_strategies_to(&root, &payload).expect("write should succeed");
+
+        let stored = read_saved_strategies_from(&root).expect("read should succeed");
+        assert_eq!(stored, payload);
+
+        // Verify no .tmp files remain (cleanup succeeded)
+        let parent = saved_strategies_path_from_root(&root).parent().unwrap().to_path_buf();
+        let tmp_count = fs::read_dir(&parent)
+            .unwrap()
+            .filter(|e| {
+                e.as_ref()
+                    .ok()
+                    .and_then(|entry| entry.file_name().to_str().map(|n| n.ends_with(".tmp")))
+                    .unwrap_or(false)
+            })
+            .count();
+        assert_eq!(tmp_count, 0, "no .tmp files should remain after successful write");
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn rename_failure_cleanup_error_is_included_in_message() {
+        let root = unique_temp_dir("saved-strategy-rename-cleanup");
+        let path = saved_strategies_path_from_root(&root);
+        fs::create_dir_all(&path).expect("destination dir should be created");
+        fs::write(path.join("keep.txt"), b"keep").expect("marker file should be written");
+
+        let payload = json!([{
+            "id": "rename-cleanup",
+            "name": "重命名清理测试",
+            "saved_at": "2026-07-11T00:00:00Z",
+            "strategy": {
+                "name": "重命名清理测试",
+                "market_filters": [],
+                "entry_groups": [],
+                "exit_rules": [],
+                "score_threshold": null
+            }
+        }]);
+
+        let result = write_saved_strategies_to(&root, &payload);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err();
+        // The error message must describe the rename failure AND, if cleanup also
+        // failed, mention it.  If cleanup succeeded, mention that the tmp was cleaned.
+        assert!(
+            err_msg.contains("rename") || err_msg.contains("Rename"),
+            "error must describe the rename failure: {err_msg}"
+        );
+        // At minimum, the error message must not claim "保证清理" without
+        // acknowledging the actual outcome.
+        assert!(
+            !err_msg.contains("保证清理"),
+            "error message must not claim guaranteed cleanup: {err_msg}"
+        );
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn read_saved_strategies_rejects_corrupt_strategy_fields() {
+        let root = unique_temp_dir("saved-strategy-corrupt-fields");
+        let corrupt = json!([{
+            "id": "corrupt",
+            "name": "损坏策略",
+            "saved_at": "2026-07-11T00:00:00Z",
+            "strategy": {
+                "name": "损坏策略",
+                "market_filters": "not-an-array",
+                "entry_groups": 42,
+                "exit_rules": null
+            }
+        }]);
+        let path = saved_strategies_path_from_root(&root);
+        fs::create_dir_all(path.parent().unwrap()).expect("dir should be created");
+        fs::write(&path, serde_json::to_string_pretty(&corrupt).unwrap()).expect("write corrupt file");
+
+        let result = read_saved_strategies_from(&root);
+        assert!(result.is_err(), "corrupt strategy fields must cause load failure");
+        assert!(result.unwrap_err().contains("market_filters"));
+
+        fs::remove_dir_all(root).ok();
     }
 }

@@ -56,11 +56,13 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::backend_command,
+            commands::delete_saved_strategy,
             commands::ensure_data_service,
             commands::load_saved_strategies,
             commands::open_external_url,
             commands::open_ths_original_url,
             commands::persist_saved_strategies,
+            commands::upsert_saved_strategy,
             commands::workspace_diagnostics
         ])
         .run(tauri::generate_context!())

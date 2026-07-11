@@ -31,6 +31,22 @@ def _is_transient(exc: Exception) -> bool:
     return isinstance(exc, (requests.ConnectionError, requests.Timeout, TimeoutError, OSError))
 
 
+def should_allow_alternate_transport(
+    requester: Callable[..., Any],
+    override: bool | None = None,
+) -> bool:
+    """Determine whether a provider should fall back to curl_cffi transport.
+
+    Previously this logic was duplicated as ``_allow_public_alternate_transport``
+    on both ``MarketNewsProvider`` and ``RealtimeMarketProvider``.  Centralising
+    it here keeps the policy in one place while leaving the per-provider
+    override knob intact.
+    """
+    if override is not None:
+        return override
+    return requester is requests.get
+
+
 def resilient_get(
     requester: Callable[..., Any],
     url: str,

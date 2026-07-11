@@ -94,4 +94,16 @@ def test_release_manifests_use_one_version():
         Path("src-tauri/tauri.conf.json").read_text(encoding="utf-8")
     )["version"]
 
-    assert {package_version, python_version, cargo_version, tauri_version} == {package_version}
+    # Also check the Python package __version__ attribute.
+    init_text = Path("backend/astock_backtester/__init__.py").read_text(encoding="utf-8")
+    init_version = None
+    for line in init_text.splitlines():
+        if line.startswith("__version__"):
+            init_version = line.split("=", 1)[1].strip().strip("\"'")
+            break
+    assert init_version is not None, "__version__ not found in __init__.py"
+
+    all_versions = {
+        package_version, python_version, cargo_version, tauri_version, init_version
+    }
+    assert all_versions == {package_version}
