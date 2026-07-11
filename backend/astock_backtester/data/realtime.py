@@ -5,7 +5,7 @@ import re
 import time as monotonic_time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError, as_completed
 from dataclasses import dataclass, field
-from datetime import datetime, time, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from threading import Event, Lock
 from typing import Any, Callable, Iterable
 
@@ -13,9 +13,80 @@ import pandas as pd
 import requests
 from bs4 import BeautifulSoup
 
-from astock_backtester.data.cls import CLS_QUOTE_BASE_URL, cls_request_json
-from astock_backtester.data.http_transport import resilient_get
+from astock_backtester.data.cls import cls_request_json
+from astock_backtester.data.http_transport import resilient_get, should_allow_alternate_transport
 from astock_backtester.data.providers import normalize_symbol
+from astock_backtester.data.realtime_parsers import (
+    CLS_HOT_PLATE_URL,
+    CLS_QUOTE_HOME_URL,
+    EASTMONEY_A_SPOT_URL,
+    EASTMONEY_SECTOR_URLS,
+    INDEXES,
+    MIN_CONTROLLED_BACKUP_SECTOR_ROWS,
+    SINA_BREADTH_BATCH_SIZE,
+    SINA_HEADERS,
+    TENCENT_QUOTE_URL,
+    THS_BOARD_CODE_RE,
+    THS_BREADTH_RE,
+    THS_CONCEPT_SECTION_URL,
+    THS_HEADERS,
+    THS_HOT_TOPIC_HEADERS,
+    THS_HOT_TOPIC_URL,
+    THS_INDUSTRY_DETAIL_URL,
+    THS_INDUSTRY_HTML_URL,
+    THS_MARKET_SUMMARY_URL,
+    THS_STOCK_CODE_RE,
+    a_share_market_symbol,
+    is_valid_full_market_breadth,
+)
+from astock_backtester.data.realtime_parsers import (
+    aggregate_ths_hot_topic_rows as _aggregate_ths_hot_topic_rows,
+)
+from astock_backtester.data.realtime_parsers import (
+    append_yesterday_sector_note as _append_yesterday_sector_note,
+)
+from astock_backtester.data.realtime_parsers import (
+    breadth_from_cls_distribution as _breadth_from_cls_distribution,
+)
+from astock_backtester.data.realtime_parsers import (
+    decode_sina_response as _decode_sina_response,
+)
+from astock_backtester.data.realtime_parsers import (
+    dedupe_sectors as _dedupe_sectors,
+)
+from astock_backtester.data.realtime_parsers import (
+    extract_code_from_href as _extract_code_from_href,
+)
+from astock_backtester.data.realtime_parsers import (
+    is_renderable_snapshot as _is_renderable_snapshot,
+)
+from astock_backtester.data.realtime_parsers import (
+    market_phase as _market_phase,
+)
+from astock_backtester.data.realtime_parsers import (
+    normalize_sector_change_pct as _normalize_sector_change_pct,
+)
+from astock_backtester.data.realtime_parsers import (
+    parse_float as _parse_float,
+)
+from astock_backtester.data.realtime_parsers import (
+    parse_int as _parse_int,
+)
+from astock_backtester.data.realtime_parsers import (
+    phase_diagnostic as _phase_diagnostic,
+)
+from astock_backtester.data.realtime_parsers import (
+    quote_from_cls_home as _quote_from_cls_home,
+)
+from astock_backtester.data.realtime_parsers import (
+    quote_from_sina as _quote_from_sina,
+)
+from astock_backtester.data.realtime_parsers import (
+    sector_rows_from_cls_hot_plate as _sector_rows_from_cls_hot_plate,
+)
+from astock_backtester.data.realtime_parsers import (
+    unique_sources as _unique_sources,
+)
 from astock_backtester.data.warehouse import Warehouse
 from astock_backtester.models import (
     MarketBreadth,
@@ -23,370 +94,6 @@ from astock_backtester.models import (
     RealtimeMarketSnapshot,
     SectorMover,
 )
-
-INDEXES = [
-    ("sh000001", "上证指数"),
-    ("sz399001", "深证成指"),
-    ("sz399006", "创业板指"),
-]
-
-YESTERDAY_SECTOR_TRACKING_NOTE = "昨日强势板块追踪来自本地历史。"
-THS_HEADERS = {
-    "Referer": "https://q.10jqka.com.cn/",
-    "User-Agent": "Mozilla/5.0",
-}
-THS_HOT_TOPIC_HEADERS = {
-    "Referer": "http://zx.10jqka.com.cn/",
-    "User-Agent": "Mozilla/5.0",
-}
-SINA_HEADERS = {
-    "Referer": "https://finance.sina.com.cn/",
-    "User-Agent": "Mozilla/5.0",
-}
-SINA_BREADTH_BATCH_SIZE = 400
-MIN_FULL_MARKET_BREADTH_TOTAL = 3000
-MIN_LOCAL_BREADTH_RATIO = 0.65
-MIN_CONTROLLED_BACKUP_SECTOR_ROWS = 3
-THS_MARKET_SUMMARY_URL = "https://q.10jqka.com.cn/index/index/board/all/"
-THS_CONCEPT_SECTION_URL = "https://q.10jqka.com.cn/gn/"
-THS_INDUSTRY_HTML_URL = "https://q.10jqka.com.cn/thshy/index/field/199112/order/desc/page/{page}/"
-THS_INDUSTRY_DETAIL_URL = "https://q.10jqka.com.cn/thshy/detail/code/{board_code}/"
-THS_HOT_TOPIC_URL = "http://zx.10jqka.com.cn/event/api/getharden/date/{date}/orderby/date/orderway/desc/charset/GBK/"
-TENCENT_QUOTE_URL = "https://qt.gtimg.cn/q={symbols}"
-CLS_QUOTE_HOME_URL = f"{CLS_QUOTE_BASE_URL}/quote/index/home"
-CLS_HOT_PLATE_URL = f"{CLS_QUOTE_BASE_URL}/web_quote/plate/hot_plate"
-EASTMONEY_A_SPOT_URL = "https://82.push2.eastmoney.com/api/qt/clist/get"
-EASTMONEY_SECTOR_URLS = [
-    "https://push2.eastmoney.com/api/qt/clist/get",
-    "https://82.push2.eastmoney.com/api/qt/clist/get",
-    "https://29.push2.eastmoney.com/api/qt/clist/get",
-]
-THS_TOPIC_SPLIT_RE = re.compile(r"[+＋/、,，;；|]+")
-THS_BREADTH_RE = re.compile(r"上涨[：:\s]*(\d+)\D+下跌[：:\s]*(\d+)\D+平盘[：:\s]*(\d+)")
-THS_BOARD_CODE_RE = re.compile(r"/code/(\d+)")
-THS_STOCK_CODE_RE = re.compile(r"/(\d{6})/?")
-THS_GENERIC_TOPICS = {
-    "",
-    "A股",
-    "个股",
-    "市场",
-    "两市",
-    "沪深",
-    "题材",
-    "概念",
-    "主线",
-}
-
-
-def _parse_int(value: object) -> int | None:
-    text = str(value or "").strip().replace(",", "")
-    match = re.search(r"-?\d+", text)
-    if not match:
-        return None
-    try:
-        return int(match.group(0))
-    except ValueError:
-        return None
-
-
-def _parse_float(value: object) -> float | None:
-    text = str(value or "").strip().replace("%", "").replace(",", "")
-    if not text:
-        return None
-    try:
-        return float(text)
-    except ValueError:
-        return None
-
-
-def _normalize_change_pct(value: object) -> float | None:
-    change_pct = _parse_float(value)
-    if change_pct is None:
-        return None
-    return change_pct / 100 if abs(change_pct) > 1 else change_pct
-
-
-def _normalize_sector_change_pct(row: dict) -> float | None:
-    change_pct = _parse_float(row.get("f3", row.get("change_pct", row.get("涨跌幅"))))
-    if change_pct is None:
-        return None
-    if row.get("_change_pct_unit") == "percent":
-        return change_pct / 100
-    return change_pct / 100 if abs(change_pct) > 1 else change_pct
-
-
-def _extract_code_from_href(href: str, pattern: re.Pattern[str]) -> str | None:
-    match = pattern.search(href or "")
-    return match.group(1) if match else None
-
-
-def _clean_ths_topic_name(value: object) -> str | None:
-    topic = re.sub(r"\s+", "", str(value or ""))
-    topic = topic.strip("-_")
-    if not topic or topic in THS_GENERIC_TOPICS:
-        return None
-    if topic.endswith(("个股", "概念股")):
-        return None
-    return topic
-
-
-def _aggregate_ths_hot_topic_rows(rows: Iterable[dict]) -> list[dict]:
-    aggregated: dict[str, dict] = {}
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        reason = str(row.get("reason") or "").strip()
-        if not reason:
-            continue
-        symbol = normalize_symbol(str(row.get("code") or ""))
-        gain = _parse_float(row.get("zhangfu"))
-        turnover = _parse_float(row.get("chengjiaoe")) or 0.0
-        for raw_topic in THS_TOPIC_SPLIT_RE.split(reason):
-            topic = _clean_ths_topic_name(raw_topic)
-            if not topic:
-                continue
-            item = aggregated.setdefault(
-                topic,
-                {
-                    "name": topic,
-                    "count": 0,
-                    "gain_sum": 0.0,
-                    "turnover_sum": 0.0,
-                    "members": [],
-                    "leading_symbol": None,
-                    "leading_gain": float("-inf"),
-                    "source": "ths-hot-reason",
-                },
-            )
-            item["count"] += 1
-            if gain is not None:
-                item["gain_sum"] += gain
-                if gain > item["leading_gain"] and symbol:
-                    item["leading_gain"] = gain
-                    item["leading_symbol"] = symbol
-            item["turnover_sum"] += turnover
-            if symbol and symbol not in item["members"]:
-                item["members"].append(symbol)
-
-    ranked = sorted(
-        aggregated.values(),
-        key=lambda item: (
-            item["count"],
-            item["gain_sum"] / item["count"] if item["count"] else 0.0,
-            item["turnover_sum"],
-            item["name"],
-        ),
-        reverse=True,
-    )
-    rows_out: list[dict] = []
-    for item in ranked:
-        average_gain = item["gain_sum"] / item["count"] if item["count"] else 0.0
-        rows_out.append(
-            {
-                "name": item["name"],
-                "change_pct": average_gain,
-                "leading_symbol": item["leading_symbol"],
-                "members": item["members"],
-                "source": "ths-hot-reason",
-            }
-        )
-    return rows_out
-
-
-def _aggregate_ths_hot_topics(rows: Iterable[dict]) -> list[SectorMover]:
-    return [
-        SectorMover(
-            name=item["name"],
-            change_pct=_normalize_change_pct(item["change_pct"]) or 0.0,
-            leading_symbol=item["leading_symbol"],
-            source="ths-hot-reason",
-        )
-        for item in _aggregate_ths_hot_topic_rows(rows)
-    ]
-
-
-def _decode_sina_response(text: str) -> dict[str, list[str]]:
-    quotes: dict[str, list[str]] = {}
-    for segment in text.split(";"):
-        if "hq_str_" not in segment or "=" not in segment:
-            continue
-        key = segment.split("hq_str_", 1)[1].split("=", 1)[0].strip()
-        raw = segment.split("=", 1)[1].strip().strip('"')
-        if raw:
-            quotes[key] = raw.split(",")
-    return quotes
-
-
-def _quote_from_sina(symbol: str, name: str, values: list[str]) -> MarketIndexQuote | None:
-    try:
-        last = float(values[3])
-        previous_close = float(values[2])
-    except (IndexError, TypeError, ValueError):
-        return None
-    change = last - previous_close
-    change_pct = change / previous_close if previous_close else 0.0
-    updated_at = None
-    try:
-        updated_at = datetime.fromisoformat(f"{values[30]}T{values[31]}+08:00")
-    except (IndexError, TypeError, ValueError):
-        pass
-    return MarketIndexQuote(
-        symbol=symbol,
-        name=name,
-        last=last,
-        previous_close=previous_close,
-        change=change,
-        change_pct=change_pct,
-        source="ashare-sina",
-        updated_at=updated_at,
-    )
-
-
-def _quote_from_cls_home(row: dict) -> MarketIndexQuote | None:
-    symbol = str(row.get("secu_code") or "").strip()
-    name = str(row.get("secu_name") or symbol).strip()
-    if not symbol:
-        return None
-    last = _parse_float(row.get("last_px"))
-    if last is None:
-        return None
-    previous_close = _parse_float(row.get("preclose_px"))
-    change = _parse_float(row.get("change_px"))
-    change_pct = _normalize_change_pct(row.get("change"))
-    return MarketIndexQuote(
-        symbol=symbol,
-        name=name,
-        last=last,
-        previous_close=previous_close,
-        change=change,
-        change_pct=change_pct,
-        source="cls-quote-index",
-    )
-
-
-def _breadth_from_cls_distribution(data: dict) -> MarketBreadth | None:
-    if not isinstance(data, dict):
-        return None
-    up = _parse_int(data.get("rise_num", data.get("up_num")))
-    down = _parse_int(data.get("fall_num", data.get("down_num")))
-    flat = _parse_int(data.get("flat_num")) or 0
-    if up is None or down is None:
-        return None
-    distribution = {
-        "up_limit": _parse_int(data.get("up_num")) or 0,
-        "up_10": _parse_int(data.get("up_10")) or 0,
-        "up_8": _parse_int(data.get("up_8")) or 0,
-        "up_6": _parse_int(data.get("up_6")) or 0,
-        "up_4": _parse_int(data.get("up_4")) or 0,
-        "up_2": _parse_int(data.get("up_2")) or 0,
-        "flat": flat,
-        "down_2": _parse_int(data.get("down_2")) or 0,
-        "down_4": _parse_int(data.get("down_4")) or 0,
-        "down_6": _parse_int(data.get("down_6")) or 0,
-        "down_8": _parse_int(data.get("down_8")) or 0,
-        "down_10": _parse_int(data.get("down_10")) or 0,
-        "down_limit": _parse_int(data.get("down_num")) or 0,
-        "suspend": _parse_int(data.get("suspend_num")) or 0,
-    }
-    return MarketBreadth(
-        up=up,
-        down=down,
-        flat=flat,
-        total=up + down + flat,
-        source="cls-quote-breadth",
-        distribution=distribution,
-    )
-
-
-def _sector_rows_from_cls_hot_plate(payload: dict) -> list[dict]:
-    data = payload.get("data") if isinstance(payload, dict) else None
-    if not isinstance(data, dict):
-        return []
-    rows: list[dict] = []
-    for group in ("industry", "concept", "area"):
-        items = data.get(group)
-        if not isinstance(items, list):
-            continue
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            leader = None
-            up_stock = item.get("up_stock")
-            if isinstance(up_stock, list) and up_stock and isinstance(up_stock[0], dict):
-                leader = up_stock[0].get("secu_code")
-            rows.append(
-                {
-                    "name": item.get("secu_name"),
-                    "change_pct": item.get("change"),
-                    "leading_symbol": leader,
-                }
-            )
-    return rows
-
-
-def _dedupe_sectors(groups: Iterable[SectorMover], limit: int = 10) -> list[SectorMover]:
-    sectors: list[SectorMover] = []
-    seen: set[str] = set()
-    for group in groups:
-        if group.name in seen:
-            continue
-        sectors.append(group)
-        seen.add(group.name)
-        if len(sectors) >= limit:
-            break
-    return sectors
-
-
-def _append_yesterday_sector_note(message: str, yesterday_sectors: list[SectorMover]) -> str:
-    if not yesterday_sectors or message.endswith(YESTERDAY_SECTOR_TRACKING_NOTE):
-        return message
-    return f"{message} {YESTERDAY_SECTOR_TRACKING_NOTE}"
-
-
-def _unique_sources(values: Iterable[str | None]) -> list[str]:
-    sources: list[str] = []
-    for value in values:
-        if value and value not in sources:
-            sources.append(value)
-    return sources
-
-
-def _market_phase(now: datetime) -> str:
-    local = now.astimezone(timezone(timedelta(hours=8)))
-    if local.weekday() >= 5:
-        return "non_trading"
-    current = local.time()
-    if current < time(9, 30):
-        return "pre_open"
-    if time(11, 30) <= current < time(13, 0):
-        return "lunch_break"
-    if current >= time(15, 0):
-        return "post_close"
-    return "trading"
-
-
-def _phase_diagnostic(phase: str) -> str | None:
-    return {
-        "non_trading": "周末或非交易日，降低实时接口刷新频率。",
-        "pre_open": "盘前非连续竞价时段，降低实时接口刷新频率。",
-        "lunch_break": "午间休市，降低实时接口刷新频率。",
-        "post_close": "收盘后，降低实时接口刷新频率。",
-    }.get(phase)
-
-
-def _is_renderable_snapshot(snapshot: RealtimeMarketSnapshot) -> bool:
-    return bool(snapshot.indexes and snapshot.breadth and snapshot.breadth.total > 0 and snapshot.strong_sectors)
-
-
-def is_valid_full_market_breadth(breadth: MarketBreadth | None, local_symbol_count: int = 0) -> bool:
-    if breadth is None or breadth.total <= 0:
-        return False
-    if local_symbol_count >= MIN_FULL_MARKET_BREADTH_TOTAL:
-        return (
-            breadth.total >= MIN_FULL_MARKET_BREADTH_TOTAL
-            and breadth.total >= int(local_symbol_count * MIN_LOCAL_BREADTH_RATIO)
-        )
-    return breadth.total >= MIN_FULL_MARKET_BREADTH_TOTAL
 
 
 def unavailable_market_snapshot(message: str, *, diagnostics: list[str] | None = None) -> RealtimeMarketSnapshot:
@@ -434,18 +141,20 @@ class HeavyMarketCrawlerProvider:
     _last_successful_breadth: MarketBreadth | None = field(default=None, init=False, repr=False)
 
     def fetch_breadth(self) -> MarketBreadth | None:
+        # The provider instance is cached on ``RealtimeMarketProvider`` and can
+        # be invoked from a worker thread that may already have timed out.  It
+        # therefore must NOT retain any cross-request breadth state; every call
+        # returns a value scoped to the caller and publishes nothing shared.
         for url in [
             THS_MARKET_SUMMARY_URL,
             "https://q.10jqka.com.cn/",
         ]:
             breadth = self._fetch_public_html_breadth(url)
             if breadth is not None:
-                self._last_successful_breadth = breadth
                 return breadth
         if self.browser_provider is not None:
             breadth = self.browser_provider.fetch_breadth_from_dom(THS_MARKET_SUMMARY_URL)
             if breadth is not None:
-                self._last_successful_breadth = breadth
                 return breadth
         return None
 
@@ -481,12 +190,74 @@ class RealtimeMarketProvider:
     _last_successful_snapshot: RealtimeMarketSnapshot | None = field(default=None, init=False, repr=False)
     _state_lock: Lock = field(default_factory=Lock, init=False, repr=False)
     _heavy_market_provider: HeavyMarketCrawlerProvider | None = field(default=None, init=False, repr=False)
+    # P1-4: monotonic generation counters to determine publication rights
+    # without relying on wall-clock timestamps.
+    _request_generation: int = field(default=0, init=False, repr=False)
+    _last_snapshot_generation: int = field(default=0, init=False, repr=False)
+    # Round-4: fixed-capacity single-flight executors.  Each provider slot
+    # has its own 1-worker executor reused across requests.  An in-flight
+    # lock prevents stacking concurrent work; a new request that finds the
+    # slot busy returns None / empty immediately instead of creating yet
+    # another thread.
+    _breadth_executor: ThreadPoolExecutor | None = field(default=None, init=False, repr=False)
+    _sector_executor: ThreadPoolExecutor | None = field(default=None, init=False, repr=False)
+    _local_executor: ThreadPoolExecutor | None = field(default=None, init=False, repr=False)
+    _breadth_in_flight: Lock = field(default_factory=Lock, init=False, repr=False)
+    _sector_in_flight: Lock = field(default_factory=Lock, init=False, repr=False)
+    _local_in_flight: Lock = field(default_factory=Lock, init=False, repr=False)
 
-    def _remember_successful_snapshot(self, snapshot: RealtimeMarketSnapshot) -> None:
+    def _get_breadth_executor(self) -> ThreadPoolExecutor:
+        if self._breadth_executor is None:
+            self._breadth_executor = ThreadPoolExecutor(max_workers=1)
+        return self._breadth_executor
+
+    def _get_sector_executor(self) -> ThreadPoolExecutor:
+        if self._sector_executor is None:
+            self._sector_executor = ThreadPoolExecutor(max_workers=1)
+        return self._sector_executor
+
+    def _get_local_executor(self) -> ThreadPoolExecutor:
+        if self._local_executor is None:
+            self._local_executor = ThreadPoolExecutor(max_workers=1)
+        return self._local_executor
+
+    def _next_request_generation(self) -> int:
+        """Atomically increment and return a new request generation number."""
+        with self._state_lock:
+            self._request_generation += 1
+            return self._request_generation
+
+    def _remember_successful_snapshot(
+        self,
+        snapshot: RealtimeMarketSnapshot,
+        *,
+        generation: int | None = None,
+    ) -> None:
         with self._state_lock:
             current = self._last_successful_snapshot
-            if current is None or snapshot.updated_at >= current.updated_at:
+            if current is None:
                 self._last_successful_snapshot = snapshot.model_copy(deep=True)
+                if generation is not None:
+                    self._last_snapshot_generation = generation
+                return
+            # P1-4: production always passes generation.  For mixed-mode
+            # safety, compare BOTH generation and updated_at so a legacy
+            # call with a newer wall-clock time can never clobber a
+            # generation-tracked snapshot.  Example: gen=5 (no-generation
+            # legacy) with t=10:05 must not overwrite gen=6 with t=10:00.
+            if generation is not None:
+                should_update = generation > self._last_snapshot_generation
+            elif self._last_snapshot_generation > 0:
+                # A generation-tracked snapshot is present — a legacy
+                # (no-generation) call must never overwrite it, even
+                # when the legacy call has a newer wall-clock timestamp.
+                should_update = False
+            else:
+                should_update = snapshot.updated_at > current.updated_at
+            if should_update:
+                self._last_successful_snapshot = snapshot.model_copy(deep=True)
+                if generation is not None:
+                    self._last_snapshot_generation = generation
 
     def _retained_successful_snapshot(self) -> RealtimeMarketSnapshot | None:
         with self._state_lock:
@@ -504,6 +275,9 @@ class RealtimeMarketProvider:
 
     def market_snapshot_events(self) -> Iterable[dict[str, Any]]:
         now = datetime.now(timezone.utc)
+        # P1-4: each request gets a monotonic generation so that late
+        # arrivals cannot overwrite results from a newer request.
+        request_generation = self._next_request_generation()
         phase = _market_phase(now)
         diagnostics: list[str] = []
         breadth_diagnostics: list[str] = []
@@ -654,7 +428,7 @@ class RealtimeMarketProvider:
             diagnostics=diagnostics,
         )
         if snapshot.status == "live" and _is_renderable_snapshot(snapshot):
-            self._remember_successful_snapshot(snapshot)
+            self._remember_successful_snapshot(snapshot, generation=request_generation)
             yield {"type": "result", "snapshot": snapshot}
             return
         retained = self._retained_successful_snapshot()
@@ -671,10 +445,24 @@ class RealtimeMarketProvider:
             retained.message = _append_yesterday_sector_note(
                 f"{phase_note or '实时接口暂不可用'} 沿用最近成功行情快照。", retained.yesterday_strong_sectors
             )
-            retained.diagnostics = [
-                *diagnostics,
-                f"沿用最近成功行情快照：{retained_at.isoformat()}。",
-            ]
+            # P1-2: merge current request diagnostics + original snapshot
+            # diagnostics + retained time hint.  Deduplicate ALL sources
+            # (including current diagnostics against themselves) while
+            # keeping insertion order stable.
+            seen: set[str] = set()
+            merged_diagnostics: list[str] = []
+            for item in diagnostics:
+                if item not in seen:
+                    seen.add(item)
+                    merged_diagnostics.append(item)
+            for item in retained.diagnostics:
+                if item not in seen:
+                    seen.add(item)
+                    merged_diagnostics.append(item)
+            retained_hint = f"沿用最近成功行情快照：{retained_at.isoformat()}。"
+            if retained_hint not in seen:
+                merged_diagnostics.append(retained_hint)
+            retained.diagnostics = merged_diagnostics
             yield {"type": "result", "snapshot": retained}
             return
         yield {"type": "result", "snapshot": snapshot}
@@ -699,13 +487,40 @@ class RealtimeMarketProvider:
 
     def _fetch_live_breadth_with_budget(self, diagnostics: list[str]) -> MarketBreadth | None:
         if self.breadth_time_budget is None:
-            return self._call_live_breadth(diagnostics)
-        deadline = monotonic_time.monotonic() + self.breadth_time_budget
-        cancel_event = Event()
-        executor = ThreadPoolExecutor(max_workers=1)
-        future = executor.submit(self._call_live_breadth, diagnostics, deadline, cancel_event)
+            worker_diagnostics: list[str] = []
+            result = self._call_live_breadth(worker_diagnostics)
+            diagnostics.extend(worker_diagnostics)
+            return result
+        # Single-flight: if the breadth slot is already busy, reject
+        # immediately instead of stacking another thread.
+        if not self._breadth_in_flight.acquire(blocking=False):
+            diagnostics.append("实时红绿家数接口繁忙：上一轮请求尚未完成，已跳过本轮。")
+            return None
         try:
-            return future.result(timeout=self.breadth_time_budget)
+            deadline = monotonic_time.monotonic() + self.breadth_time_budget
+            cancel_event = Event()
+            # The worker writes only to its private diagnostics list.  The caller
+            # publishes those diagnostics ONLY when the future completes within the
+            # budget; on timeout the private list is discarded so a late worker can
+            # never pollute the shared diagnostics.
+            worker_diagnostics: list[str] = []
+            executor = self._get_breadth_executor()
+            future = executor.submit(
+                self._call_live_breadth, worker_diagnostics, deadline, cancel_event
+            )
+        except Exception:
+            self._breadth_in_flight.release()
+            raise
+        future.add_done_callback(lambda _future: self._breadth_in_flight.release())
+        try:
+            remaining = max(0.0, deadline - monotonic_time.monotonic())
+            result = future.result(timeout=remaining)
+            # Double-check: even after future.result returns, the computation
+            # itself may have exhausted the budget.  Discard the result if so.
+            if monotonic_time.monotonic() > deadline:
+                raise TimeoutError
+            diagnostics.extend(worker_diagnostics)
+            return result
         except TimeoutError:
             cancel_event.set()
             future.cancel()
@@ -714,8 +529,6 @@ class RealtimeMarketProvider:
         except Exception as exc:
             diagnostics.append(f"实时红绿家数接口失败：{exc}，已继续返回可用行情。")
             return None
-        finally:
-            executor.shutdown(wait=False, cancel_futures=True)
 
     def _fetch_live_sectors_with_budget(
         self,
@@ -723,25 +536,42 @@ class RealtimeMarketProvider:
         sector_rows_out: list[dict] | None = None,
     ) -> list[SectorMover]:
         worker_rows: list[dict] = []
+        worker_diagnostics: list[str] = []
         if self.sector_time_budget is None:
-            sectors = self._call_live_sectors(diagnostics, sector_rows_out=worker_rows)
+            sectors = self._call_live_sectors(worker_diagnostics, sector_rows_out=worker_rows)
+            diagnostics.extend(worker_diagnostics)
             if sector_rows_out is not None:
                 sector_rows_out[:] = worker_rows
             return sectors
-        deadline = monotonic_time.monotonic() + self.sector_time_budget
-        cancel_event = Event()
-        executor = ThreadPoolExecutor(max_workers=1)
-        future = executor.submit(
-            self._call_live_sectors,
-            diagnostics,
-            deadline,
-            cancel_event,
-            worker_rows,
-        )
+        # Single-flight: if the sector slot is already busy, reject
+        # immediately instead of stacking another thread.
+        if not self._sector_in_flight.acquire(blocking=False):
+            diagnostics.append("实时强势题材接口繁忙：上一轮请求尚未完成，已跳过本轮。")
+            return []
         try:
-            sectors = future.result(timeout=max(0.0, deadline - monotonic_time.monotonic()))
+            deadline = monotonic_time.monotonic() + self.sector_time_budget
+            cancel_event = Event()
+            # The worker writes only to its private diagnostics/rows.  Both are
+            # published ONLY when the future completes within the budget; on timeout
+            # they are discarded so a late worker cannot pollute shared state.
+            executor = self._get_sector_executor()
+            future = executor.submit(
+                self._call_live_sectors,
+                worker_diagnostics,
+                deadline,
+                cancel_event,
+                worker_rows,
+            )
+        except Exception:
+            self._sector_in_flight.release()
+            raise
+        future.add_done_callback(lambda _future: self._sector_in_flight.release())
+        try:
+            remaining = max(0.0, deadline - monotonic_time.monotonic())
+            sectors = future.result(timeout=remaining)
             if monotonic_time.monotonic() > deadline:
                 raise TimeoutError
+            diagnostics.extend(worker_diagnostics)
             if sector_rows_out is not None:
                 sector_rows_out[:] = worker_rows
             return sectors
@@ -753,8 +583,6 @@ class RealtimeMarketProvider:
         except Exception as exc:
             diagnostics.append(f"实时强势题材接口失败：{exc}，已回退本地题材。")
             return []
-        finally:
-            executor.shutdown(wait=False, cancel_futures=True)
 
     def _snapshot_from_local_with_budget(
         self,
@@ -766,16 +594,40 @@ class RealtimeMarketProvider:
     ) -> RealtimeMarketSnapshot:
         if self.local_snapshot_time_budget is None:
             return self._call_snapshot_from_local(now, sector_rows, skip_topic_fetch)
-        executor = ThreadPoolExecutor(max_workers=1)
-        future = executor.submit(
-            self._call_snapshot_from_local,
-            now,
-            sector_rows,
-            skip_topic_fetch,
-        )
+        # Single-flight: if the local snapshot slot is already busy, reject
+        # immediately instead of stacking another thread.
+        if not self._local_in_flight.acquire(blocking=False):
+            diagnostics.append("本地兜底行情快照繁忙：上一轮本地快照尚未完成，已跳过本轮。")
+            return unavailable_market_snapshot(
+                "本地兜底行情快照生成繁忙。",
+                diagnostics=["本地兜底行情快照繁忙：上一轮尚未完成。"],
+            )
         try:
-            return future.result(timeout=self.local_snapshot_time_budget)
+            deadline = monotonic_time.monotonic() + self.local_snapshot_time_budget
+            cancel_event = Event()
+            executor = self._get_local_executor()
+            future = executor.submit(
+                self._call_snapshot_from_local,
+                now,
+                sector_rows,
+                skip_topic_fetch,
+                deadline,
+                cancel_event,
+            )
+        except Exception:
+            self._local_in_flight.release()
+            raise
+        future.add_done_callback(lambda _future: self._local_in_flight.release())
+        try:
+            remaining = max(0.0, deadline - monotonic_time.monotonic())
+            result = future.result(timeout=remaining)
+            if monotonic_time.monotonic() > deadline:
+                raise TimeoutError
+            return result
         except TimeoutError:
+            # Signal the still-running worker so any late sector-member cache
+            # write is blocked before it can commit to shared state.
+            cancel_event.set()
             future.cancel()
             diagnostics.append(f"本地兜底行情快照超时：{self.local_snapshot_time_budget:g}秒，已继续返回可用行情。")
             return unavailable_market_snapshot(
@@ -788,8 +640,6 @@ class RealtimeMarketProvider:
                 f"本地兜底行情快照生成失败：{exc}",
                 diagnostics=[f"本地兜底行情快照失败：{exc}"],
             )
-        finally:
-            executor.shutdown(wait=False, cancel_futures=True)
 
     def _call_live_sectors(
         self,
@@ -816,18 +666,29 @@ class RealtimeMarketProvider:
         now: datetime,
         sector_rows: list[dict] | None,
         skip_topic_fetch: bool = False,
+        deadline: float | None = None,
+        cancel_event: Event | None = None,
     ) -> RealtimeMarketSnapshot:
         try:
             return self._snapshot_from_local(
                 now,
                 sector_rows=sector_rows,
                 skip_topic_fetch=skip_topic_fetch,
+                deadline=deadline,
+                cancel_event=cancel_event,
             )
         except TypeError:
             try:
-                return self._snapshot_from_local(now, sector_rows=sector_rows)
+                return self._snapshot_from_local(
+                    now,
+                    sector_rows=sector_rows,
+                    skip_topic_fetch=skip_topic_fetch,
+                )
             except TypeError:
-                return self._snapshot_from_local(now)
+                try:
+                    return self._snapshot_from_local(now, sector_rows=sector_rows)
+                except TypeError:
+                    return self._snapshot_from_local(now)
 
     def _fetch_indexes(self) -> list[MarketIndexQuote]:
         cls_quotes = self._fetch_cls_indexes()
@@ -881,6 +742,23 @@ class RealtimeMarketProvider:
             timeout = min(timeout, max_seconds)
         return min(self.timeout, timeout)
 
+    def _context_expired(
+        self,
+        cancel_event: Event | None,
+        deadline: float | None,
+    ) -> bool:
+        """Return True when the request budget is exhausted.
+
+        Unlike :meth:`_source_chain_cancelled`, this is a side-effect-free
+        check used to gate writes to cross-request shared caches without
+        emitting a diagnostic message.
+        """
+        if cancel_event is not None and cancel_event.is_set():
+            return True
+        if deadline is not None and monotonic_time.monotonic() >= deadline:
+            return True
+        return False
+
     def _source_chain_cancelled(
         self,
         cancel_event: Event | None,
@@ -912,9 +790,7 @@ class RealtimeMarketProvider:
         return True
 
     def _allow_public_alternate_transport(self) -> bool:
-        if self.allow_alternate_transport is not None:
-            return self.allow_alternate_transport
-        return self.requester is requests.get
+        return should_allow_alternate_transport(self.requester, self.allow_alternate_transport)
 
     def _request_public_html(
         self,
@@ -1307,28 +1183,10 @@ class RealtimeMarketProvider:
         return symbols
 
     def _sina_stock_symbol(self, symbol: str) -> str | None:
-        code = normalize_symbol(symbol)
-        if not code:
-            return None
-        if code.startswith(("6", "9")):
-            return f"sh{code}"
-        if code.startswith(("0", "2", "3")):
-            return f"sz{code}"
-        if code.startswith(("4", "8")):
-            return f"bj{code}"
-        return None
+        return a_share_market_symbol(symbol)
 
     def _tencent_stock_symbol(self, symbol: str) -> str | None:
-        code = normalize_symbol(symbol)
-        if not code:
-            return None
-        if code.startswith(("6", "9")):
-            return f"sh{code}"
-        if code.startswith(("0", "2", "3")):
-            return f"sz{code}"
-        if code.startswith(("4", "8")):
-            return f"bj{code}"
-        return None
+        return a_share_market_symbol(symbol)
 
     def _fetch_tencent_breadth(self, diagnostics: list[str]) -> MarketBreadth | None:
         deadline = monotonic_time.monotonic() + self.breadth_time_budget
@@ -1972,6 +1830,8 @@ class RealtimeMarketProvider:
         *,
         sector_rows: list[dict] | None = None,
         skip_topic_fetch: bool = False,
+        deadline: float | None = None,
+        cancel_event: Event | None = None,
     ) -> RealtimeMarketSnapshot:
         try:
             bars = self.warehouse.read_latest_daily_bars(days=3)
@@ -2039,12 +1899,16 @@ class RealtimeMarketProvider:
             source="local-market-group",
             sector_rows=sector_rows,
             skip_topic_fetch=skip_topic_fetch,
+            deadline=deadline,
+            cancel_event=cancel_event,
         )
         yesterday_sectors = self._local_market_groups(
             yesterday,
             source="local-yesterday-group",
             sector_rows=sector_rows,
             skip_topic_fetch=skip_topic_fetch,
+            deadline=deadline,
+            cancel_event=cancel_event,
         )
         message = _append_yesterday_sector_note(
             f"实时行情源暂不可用，已使用本地最近交易日 {latest_date.date()} 数据。",
@@ -2089,6 +1953,8 @@ class RealtimeMarketProvider:
         sector_rows: list[dict] | None = None,
         *,
         skip_topic_fetch: bool = False,
+        deadline: float | None = None,
+        cancel_event: Event | None = None,
     ) -> list[SectorMover]:
         sector_rows = [] if sector_rows is None else sector_rows
         if latest.empty:
@@ -2111,7 +1977,11 @@ class RealtimeMarketProvider:
             if not members:
                 if not board_code:
                     continue
-                members = self._fetch_board_members(board_code)
+                members = self._fetch_board_members(
+                    board_code,
+                    cancel_event=cancel_event,
+                    deadline=deadline,
+                )
             if not members:
                 continue
             valid = data[data["symbol"].isin(members)].dropna(subset=["change_pct"])
@@ -2128,7 +1998,13 @@ class RealtimeMarketProvider:
             )
         return sorted(rows, key=lambda item: item.change_pct, reverse=True)[:10]
 
-    def _fetch_board_members(self, board_code: str) -> list[str]:
+    def _fetch_board_members(
+        self,
+        board_code: str,
+        *,
+        cancel_event: Event | None = None,
+        deadline: float | None = None,
+    ) -> list[str]:
         cached = self._sector_member_cache.get(board_code)
         if cached is not None:
             return cached
@@ -2136,7 +2012,14 @@ class RealtimeMarketProvider:
             members = self._fetch_ths_board_members(board_code)
         else:
             members = []
-        self._sector_member_cache[board_code] = members
+        # The freshly read members are always returned to the current worker,
+        # but they are committed to the cross-request shared cache ONLY when the
+        # request is still within budget AND the cancel event has not been set
+        # (double-checked under the state lock to prevent TOCTOU races).
+        if not self._context_expired(cancel_event, deadline):
+            with self._state_lock:
+                if cancel_event is None or not cancel_event.is_set():
+                    self._sector_member_cache[board_code] = members
         return members
 
     def _fetch_ths_board_members(self, board_code: str) -> list[str]:

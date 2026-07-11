@@ -13,8 +13,8 @@ from astock_backtester.data.operations import (
     fetch_daily_bars_into_cache,
     import_daily_bars_into_cache,
 )
-from astock_backtester.data.realtime import (
-    _aggregate_ths_hot_topics,
+from astock_backtester.data.realtime_parsers import (
+    aggregate_ths_hot_topics as _aggregate_ths_hot_topics,
 )
 from astock_backtester.data.warehouse import Warehouse
 

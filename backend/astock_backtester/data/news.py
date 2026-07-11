@@ -12,7 +12,7 @@ from time import monotonic
 import requests
 from bs4 import BeautifulSoup
 
-from astock_backtester.data.http_transport import resilient_get
+from astock_backtester.data.http_transport import resilient_get, should_allow_alternate_transport
 from astock_backtester.models import MarketNewsItem, MarketNewsResponse
 
 POSITIVE_WORDS = ("利好", "拉升", "走强", "活跃", "增长", "抢筹", "突破")
@@ -69,9 +69,7 @@ class MarketNewsProvider:
     _last_successful_at: float = field(default=0.0, init=False, repr=False)
 
     def _allow_public_alternate_transport(self) -> bool:
-        if self.allow_alternate_transport is not None:
-            return self.allow_alternate_transport
-        return self.requester is requests.get
+        return should_allow_alternate_transport(self.requester, self.allow_alternate_transport)
 
     def _request(
         self,

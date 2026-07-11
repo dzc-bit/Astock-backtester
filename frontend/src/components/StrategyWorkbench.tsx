@@ -26,6 +26,7 @@ type Props = {
   validationExamples: string[];
   recommendedStrategies: RecommendedStrategy[];
   savedStrategies: SavedStrategyPreset[];
+  isMutatingStrategies?: boolean;
   strategySaveMessage?: string | null;
   pendingStrategySaveName?: string | null;
   onValidateCondition: (text: string) => void;
@@ -317,6 +318,7 @@ export function StrategyWorkbench({
   validationExamples,
   recommendedStrategies,
   savedStrategies,
+  isMutatingStrategies = false,
   strategySaveMessage = null,
   pendingStrategySaveName = null,
   onValidateCondition,
@@ -506,8 +508,13 @@ export function StrategyWorkbench({
           </div>
           {pendingStrategySaveName && onConfirmPendingStrategySave && onDismissPendingStrategySave ? (
             <div className="strategy-save-actions">
-              <button className="primary-button compact" type="button" onClick={onConfirmPendingStrategySave}>
-                保存策略
+              <button
+                className="primary-button compact"
+                type="button"
+                onClick={onConfirmPendingStrategySave}
+                disabled={isMutatingStrategies}
+              >
+                {isMutatingStrategies ? "保存中…" : "保存策略"}
               </button>
               <button className="secondary-button compact" type="button" onClick={onDismissPendingStrategySave}>
                 暂不保存
@@ -571,6 +578,7 @@ export function StrategyWorkbench({
                         className="secondary-button"
                         type="button"
                         onClick={() => onDeleteSavedStrategy(preset.id)}
+                        disabled={isMutatingStrategies}
                         aria-label={`删除已保存策略${preset.name}`}
                       >
                         删除

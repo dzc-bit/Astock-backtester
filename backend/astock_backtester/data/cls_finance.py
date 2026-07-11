@@ -15,13 +15,13 @@ from bs4 import BeautifulSoup
 
 from astock_backtester.data.cls import CLS_QUOTE_BASE_URL, CLS_SITE_BASE_URL, cls_request_json
 from astock_backtester.data.providers import normalize_symbol
-from astock_backtester.data.realtime import (
+from astock_backtester.data.realtime_parsers import (
     THS_HEADERS,
     THS_MARKET_SUMMARY_URL,
-    _breadth_from_cls_distribution,
-    _normalize_change_pct,
-    _parse_float,
-    _parse_int,
+    breadth_from_cls_distribution as _breadth_from_cls_distribution,
+    normalize_change_pct as _normalize_change_pct,
+    parse_float as _parse_float,
+    parse_int as _parse_int,
 )
 from astock_backtester.models import (
     ClsFinanceAnchor,

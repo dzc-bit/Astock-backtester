@@ -4,7 +4,7 @@ from time import monotonic
 
 import pytest
 import requests
-from astock_backtester.data.http_transport import resilient_get
+from astock_backtester.data.http_transport import resilient_get, should_allow_alternate_transport
 
 
 class FakeResponse:
@@ -106,3 +106,24 @@ def test_resilient_get_clamps_each_attempt_to_remaining_budget():
     )
 
     assert 0 < observed_timeout <= 0.25
+
+
+class TestShouldAllowAlternateTransport:
+    def test_default_allows_when_using_requests_get(self):
+        assert should_allow_alternate_transport(requests.get) is True
+
+    def test_custom_requester_disables_by_default(self):
+        def custom(_url, **_kwargs):
+            pass
+        assert should_allow_alternate_transport(custom) is False
+
+    def test_override_true_takes_precedence(self):
+        def custom(_url, **_kwargs):
+            pass
+        assert should_allow_alternate_transport(custom, override=True) is True
+
+    def test_override_false_takes_precedence(self):
+        assert should_allow_alternate_transport(requests.get, override=False) is False
+
+    def test_override_none_falls_back_to_default(self):
+        assert should_allow_alternate_transport(requests.get, override=None) is True

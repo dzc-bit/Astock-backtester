@@ -24,12 +24,9 @@ import {
   cloneStrategyConfig,
   createSavedStrategyPreset,
   hasSavableRules,
-  isBuiltInStrategyPreset,
-  loadSavedStrategies,
-  loadSavedStrategiesFromStore,
-  persistSavedStrategiesToStore,
   strategySignature
 } from "./savedStrategies";
+import { useSavedStrategyStore } from "./useSavedStrategyStore";
 import { StrategyWorkbench } from "./components/StrategyWorkbench";
 import { TradesTable } from "./components/TradesTable";
 import { TonghuashunBriefingPanel } from "./components/TonghuashunBriefingPanel";
@@ -277,7 +274,15 @@ export function App() {
   const [isLoadingRiskAlerts, setIsLoadingRiskAlerts] = useState(false);
   const [riskModalOpen, setRiskModalOpen] = useState(false);
   const [recommendedStrategies, setRecommendedStrategies] = useState<RecommendedStrategy[]>([]);
-  const [savedStrategies, setSavedStrategies] = useState<SavedStrategyPreset[]>(() => loadSavedStrategies());
+  // Persistence lifecycle (loading/ready/failed), single initial load, serialized
+  // mutations and out-of-order-load protection are all owned by the store.
+  const {
+    store: savedStrategyStore,
+    strategies: savedStrategies,
+    status: strategyLoadStatus,
+    isMutating: isMutatingStrategies,
+    error: strategyLoadError
+  } = useSavedStrategyStore();
   const [conditionValidation, setConditionValidation] = useState<ConditionValidationResult | null>(null);
   const [isValidatingCondition, setIsValidatingCondition] = useState(false);
   const [stockSymbolValidation, setStockSymbolValidation] = useState<StockSymbolValidationResult | null>(null);
@@ -288,20 +293,10 @@ export function App() {
   const [settingsDateTouched, setSettingsDateTouched] = useState(false);
 
   useEffect(() => {
-    let cancelled = false;
-    void loadSavedStrategiesFromStore()
-      .then((items) => {
-        if (!cancelled) {
-          setSavedStrategies(items);
-        }
-      })
-      .catch(() => {
-        // Keep built-in presets visible even if runtime persistence is unavailable.
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+    if (strategyLoadStatus === "failed" && strategyLoadError) {
+      setStrategySaveMessage(`加载已保存策略失败，仅显示内置策略：${strategyLoadError}`);
+    }
+  }, [strategyLoadStatus, strategyLoadError]);
 
   const queueStrategySavePrompt = (currentStrategy: StrategyConfig) => {
     const hasCustomEntryRule = currentStrategy.entry_groups.some((group) =>
@@ -332,18 +327,17 @@ export function App() {
   };
 
   const confirmPendingStrategySave = async () => {
-    if (!pendingStrategySave) {
+    if (!pendingStrategySave || isMutatingStrategies) {
       return;
     }
-    const nextPreset = createSavedStrategyPreset(pendingStrategySave.strategy, savedStrategies);
-    const nextSavedStrategies = [nextPreset, ...savedStrategies];
-    try {
-      await persistSavedStrategiesToStore(nextSavedStrategies);
-      setSavedStrategies(nextSavedStrategies);
-      setStrategySaveMessage(`已保存策略：${nextPreset.name}`);
+    // The store waits for the single initial load, refuses to persist unless the
+    // load succeeded, and serializes this against any other save/delete.
+    const result = await savedStrategyStore.save(pendingStrategySave.strategy);
+    if (result.ok) {
+      setStrategySaveMessage(`已保存策略：${result.savedName ?? pendingStrategySave.name}`);
       setPendingStrategySave(null);
-    } catch (caught) {
-      setStrategySaveMessage(caught instanceof Error ? `策略保存失败：${caught.message}` : "策略保存失败。");
+    } else {
+      setStrategySaveMessage(result.error ? `策略保存失败：${result.error}` : "策略保存失败。");
     }
   };
 
@@ -780,18 +774,16 @@ export function App() {
   };
 
   const deleteSavedStrategy = async (presetId: string) => {
-    if (isBuiltInStrategyPreset(presetId)) {
-      setStrategySaveMessage("内置基础策略会一直保留，不能删除。");
+    if (isMutatingStrategies) {
       return;
     }
-    const target = savedStrategies.find((item) => item.id === presetId);
-    const nextSavedStrategies = savedStrategies.filter((item) => item.id !== presetId);
-    try {
-      await persistSavedStrategiesToStore(nextSavedStrategies);
-      setSavedStrategies(nextSavedStrategies);
-      setStrategySaveMessage(target ? `已删除已保存策略：${target.name}` : "已删除已保存策略。");
-    } catch (caught) {
-      setStrategySaveMessage(caught instanceof Error ? `删除策略失败：${caught.message}` : "删除策略失败。");
+    // The store waits for the single initial load, refuses to persist unless the
+    // load succeeded, and serializes this against any other save/delete.
+    const result = await savedStrategyStore.remove(presetId);
+    if (result.ok) {
+      setStrategySaveMessage(result.removedName ? `已删除已保存策略：${result.removedName}` : "已删除已保存策略。");
+    } else {
+      setStrategySaveMessage(result.error ?? "删除策略失败。");
     }
   };
 
@@ -870,6 +862,7 @@ export function App() {
           validationExamples={conditionValidation?.examples ?? []}
           recommendedStrategies={recommendedStrategies}
           savedStrategies={savedStrategies}
+          isMutatingStrategies={isMutatingStrategies}
           strategySaveMessage={strategySaveMessage}
           pendingStrategySaveName={pendingStrategySave?.name ?? null}
           onValidateCondition={handleValidateCondition}
