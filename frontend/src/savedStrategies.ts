@@ -328,14 +328,6 @@ export async function deleteSavedStrategyFromStore(
   return [...builtInStrategyPresets(), ...customItems];
 }
 
-export async function persistSavedStrategiesToStore(items: SavedStrategyPreset[]): Promise<void> {
-  if (!isTauriRuntime()) {
-    persistSavedStrategies(items);
-    return;
-  }
-  await invoke("persist_saved_strategies", { items: serializeCustomSavedStrategies(items) });
-}
-
 export function isBuiltInStrategyPreset(presetId: string): boolean {
   return presetId.startsWith(BUILTIN_ID_PREFIX);
 }

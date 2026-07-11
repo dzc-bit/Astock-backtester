@@ -84,6 +84,9 @@ def test_service_manager_resolves_release_cache_dir_from_d_drive_workspace_data_
 
 def test_release_manifests_use_one_version():
     package_version = json.loads(Path("package.json").read_text(encoding="utf-8"))["version"]
+    package_lock = json.loads(Path("package-lock.json").read_text(encoding="utf-8"))
+    package_lock_version = package_lock["version"]
+    package_lock_root_version = package_lock["packages"][""]["version"]
     python_version = tomllib.loads(
         Path("pyproject.toml").read_text(encoding="utf-8")
     )["project"]["version"]
@@ -104,6 +107,26 @@ def test_release_manifests_use_one_version():
     assert init_version is not None, "__version__ not found in __init__.py"
 
     all_versions = {
-        package_version, python_version, cargo_version, tauri_version, init_version
+        package_version,
+        package_lock_version,
+        package_lock_root_version,
+        python_version,
+        cargo_version,
+        tauri_version,
+        init_version,
     }
-    assert all_versions == {package_version}
+    assert all_versions == {"1.3.5"}
+
+
+def test_deprecated_full_array_strategy_mutation_is_removed():
+    frontend = Path("frontend/src/savedStrategies.ts").read_text(encoding="utf-8")
+    commands = Path("src-tauri/src/commands.rs").read_text(encoding="utf-8")
+    tauri_lib = Path("src-tauri/src/lib.rs").read_text(encoding="utf-8")
+    production = "\n".join((frontend, commands, tauri_lib))
+
+    deprecated_command = "_".join(("persist", "saved", "strategies"))
+    deprecated_helper = "persist" + "SavedStrategiesToStore"
+    assert deprecated_command not in production
+    assert deprecated_helper not in production
+    assert "upsert_saved_strategy" in production
+    assert "delete_saved_strategy" in production

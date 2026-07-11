@@ -244,9 +244,8 @@ fn saved_strategies_lock_path_from_root(root: &Path) -> PathBuf {
 
 /// Dedicated synchronization boundary for saved-strategies writes.
 ///
-/// Serializes every write within this process so that concurrent
-/// `persist_saved_strategies` / `upsert_saved_strategy` / `delete_saved_strategy`
-/// calls cannot interleave.
+/// Serializes every write within this process so concurrent atomic strategy
+/// mutations cannot interleave.
 fn saved_strategies_write_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
@@ -306,6 +305,7 @@ fn write_saved_strategies_unlocked(root: &Path, items: &Value) -> Result<(), Str
     Ok(())
 }
 
+#[cfg(test)]
 fn write_saved_strategies_to(root: &Path, items: &Value) -> Result<(), String> {
     let _file_lock = SavedStrategiesFileLock::acquire(root)?;
     let _guard = saved_strategies_write_lock()
@@ -484,12 +484,6 @@ pub fn backend_command(payload: Value) -> Result<Value, String> {
 pub fn load_saved_strategies() -> Result<Value, String> {
     let root = project_root()?;
     read_saved_strategies_from(&root)
-}
-
-#[tauri::command]
-pub fn persist_saved_strategies(items: Value) -> Result<(), String> {
-    let root = project_root()?;
-    write_saved_strategies_to(&root, &items)
 }
 
 /// Upsert a single saved strategy preset atomically.

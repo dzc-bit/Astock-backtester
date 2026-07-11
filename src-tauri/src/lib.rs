@@ -61,7 +61,6 @@ pub fn run() {
             commands::load_saved_strategies,
             commands::open_external_url,
             commands::open_ths_original_url,
-            commands::persist_saved_strategies,
             commands::upsert_saved_strategy,
             commands::workspace_diagnostics
         ])

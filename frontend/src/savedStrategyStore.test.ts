@@ -286,7 +286,10 @@ describe("SavedStrategyStore over the Tauri invoke boundary", () => {
     expect(upsertCall).toBeDefined();
     expect(upsertCall![1].preset.id.startsWith("builtin-")).toBe(false);
     expect(upsertCall![1].preset.name).toBe("落盘策略");
-    expect(invokeMock.mock.calls.some((call) => call[0] === "persist_saved_strategies")).toBe(false);
+    expect(invokeMock.mock.calls.map((call) => call[0])).toEqual([
+      "load_saved_strategies",
+      "upsert_saved_strategy"
+    ]);
   });
 
   it("fails the load (and blocks persist) when invoke returns malformed entries", async () => {
@@ -303,8 +306,7 @@ describe("SavedStrategyStore over the Tauri invoke boundary", () => {
 
     const result = await store.save(savableStrategy("落盘策略"));
     expect(result.ok).toBe(false);
-    const persistCall = invokeMock.mock.calls.find((call) => call[0] === "persist_saved_strategies");
-    expect(persistCall).toBeUndefined();
+    expect(invokeMock.mock.calls.map((call) => call[0])).toEqual(["load_saved_strategies"]);
   });
 });
 
