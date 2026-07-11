@@ -66,6 +66,7 @@ pub fn build_service_args(port: u16, cache_dir: &str) -> Vec<String> {
     ]
 }
 
+#[cfg(test)]
 pub fn health_request(port: u16) -> String {
     format!("GET /ping HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n")
 }
