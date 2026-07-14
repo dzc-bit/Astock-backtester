@@ -115,7 +115,7 @@ def test_release_manifests_use_one_version():
         tauri_version,
         init_version,
     }
-    assert all_versions == {"1.3.5"}
+    assert all_versions == {"1.3.6"}
 
 
 def test_deprecated_full_array_strategy_mutation_is_removed():
