@@ -13,12 +13,14 @@ import requests
 from bs4 import BeautifulSoup
 
 from astock_backtester.data.http_transport import resilient_get, should_allow_alternate_transport
+from astock_backtester.data.cls import cls_telegraph_signed_params
 from astock_backtester.models import MarketNewsItem, MarketNewsResponse
 
 POSITIVE_WORDS = ("利好", "拉升", "走强", "活跃", "增长", "抢筹", "突破")
 NEGATIVE_WORDS = ("利空", "下跌", "退市", "风险", "调查", "亏损", "警示")
 TAG_WORDS = ("AI", "半导体", "电力设备", "政策", "融资", "退市", "ST", "券商", "地产", "新能源", "算力")
 BEIJING_TZ = timezone(timedelta(hours=8))
+CLS_TELEGRAPH_URL = "https://www.cls.cn/v1/roll/get_roll_list"
 
 
 def _sentiment(title: str, summary: str | None) -> str:
@@ -36,6 +38,21 @@ def _parse_time(value: str | None) -> datetime | None:
     try:
         return datetime.strptime(value, "%Y-%m-%d %H:%M:%S").replace(tzinfo=BEIJING_TZ)
     except ValueError:
+        return None
+
+
+def _parse_unix_time(value: object) -> datetime | None:
+    if value in (None, "", 0, "0"):
+        return None
+    try:
+        timestamp = float(str(value).strip())
+    except (TypeError, ValueError):
+        return _parse_time(str(value))
+    if timestamp > 10_000_000_000:
+        timestamp /= 1000
+    try:
+        return datetime.fromtimestamp(timestamp, tz=timezone.utc).astimezone(BEIJING_TZ)
+    except (OverflowError, OSError, ValueError):
         return None
 
 
@@ -159,6 +176,7 @@ class MarketNewsProvider:
             ("eastmoney-columns", "eastmoney-news-columns", self._fetch_eastmoney_columns),
             ("eastmoney-rolling", "eastmoney-news-rolling", self._fetch_eastmoney_rolling),
             ("eastmoney-fast-news", "eastmoney-fast-news", self._fetch_eastmoney_fast_news),
+            ("cls-telegraph", "cls-telegraph", self._fetch_cls_telegraph),
         ]
         executor = ThreadPoolExecutor(max_workers=len(source_specs))
         futures = {
@@ -333,6 +351,65 @@ class MarketNewsProvider:
                     source="东方财富7×24",
                     published_at=_parse_time(row.get("showTime")),
                     url=None,
+                    tags=_tags(title, summary),
+                    sentiment=_sentiment(title, summary),  # type: ignore[arg-type]
+                )
+            )
+        return items
+
+    def _fetch_cls_telegraph(
+        self, limit: int, diagnostics: list[str], deadline: float | None
+    ) -> list[MarketNewsItem]:
+        params = cls_telegraph_signed_params(
+            {
+                "category": "全部",
+                "last_time": "",
+                "rn": str(limit),
+            }
+        )
+        response = self._request(
+            CLS_TELEGRAPH_URL,
+            source="cls-telegraph",
+            diagnostics=diagnostics,
+            deadline=deadline,
+            params=params,
+            headers={"Referer": "https://www.cls.cn/", "User-Agent": "Mozilla/5.0"},
+        )
+        payload = response.json() or {}
+        if not isinstance(payload, dict):
+            diagnostics.append("cls-telegraph returned a non-object payload.")
+            return []
+        for key, success_codes in (("code", {"0", "200"}), ("errno", {"0"})):
+            value = payload.get(key)
+            if value is not None and str(value).strip() not in success_codes:
+                detail = str(payload.get("message") or payload.get("msg") or payload.get("error") or "").strip()
+                suffix = f": {detail}" if detail else ""
+                diagnostics.append(f"cls-telegraph business error: {key}={value}{suffix}")
+                return []
+        data = payload.get("data")
+        if not isinstance(data, dict):
+            diagnostics.append("cls-telegraph returned no mapping data.")
+            return []
+        rows = data.get("roll_data", [])
+        if not isinstance(rows, list):
+            diagnostics.append("cls-telegraph returned no roll_data list.")
+            return []
+        items: list[MarketNewsItem] = []
+        for row in rows[:limit]:
+            if not isinstance(row, dict):
+                continue
+            title = _clean_html_text(str(row.get("title") or row.get("brief") or ""))
+            summary = _clean_html_text(str(row.get("brief") or row.get("content") or "")) or None
+            if not title:
+                continue
+            url = str(row.get("shareurl") or row.get("url") or "").strip() or None
+            items.append(
+                MarketNewsItem(
+                    title=title[:160],
+                    summary=summary if summary != title else None,
+                    source="财联社电报",
+                    published_at=_parse_unix_time(row.get("ctime") or row.get("time")),
+                    url=url,
                     tags=_tags(title, summary),
                     sentiment=_sentiment(title, summary),  # type: ignore[arg-type]
                 )

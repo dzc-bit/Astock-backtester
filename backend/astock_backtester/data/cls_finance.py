@@ -5,9 +5,11 @@ import re
 import shutil
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from pathlib import Path
+from threading import Lock
+from time import monotonic
 from typing import Any, Callable
 
 import requests
@@ -19,6 +21,7 @@ from astock_backtester.data.realtime_parsers import (
     THS_HEADERS,
     THS_MARKET_SUMMARY_URL,
     breadth_from_cls_distribution as _breadth_from_cls_distribution,
+    breadth_from_cls_home_data as _breadth_from_cls_home_data,
     normalize_change_pct as _normalize_change_pct,
     parse_float as _parse_float,
     parse_int as _parse_int,
@@ -35,6 +38,7 @@ from astock_backtester.models import (
 
 CLS_FINANCE_URL = "https://www.cls.cn/finance"
 CLS_TLINE_URL = f"{CLS_QUOTE_BASE_URL}/quote/index/tline"
+CLS_HOME_URL = f"{CLS_QUOTE_BASE_URL}/quote/index/home"
 CLS_INDEX_BASIC_URL = f"{CLS_QUOTE_BASE_URL}/quote/index/basic"
 CLS_STOCK_EMOTION_URL = f"{CLS_QUOTE_BASE_URL}/v2/quote/a/stock/emotion"
 CLS_UP_DOWN_ANALYSIS_URL = f"{CLS_QUOTE_BASE_URL}/quote/index/up_down_analysis"
@@ -66,32 +70,190 @@ THS_MARKET_DEGREE_RE = re.compile(
 )
 
 
+def _cls_payload_data(payload: Any, diagnostics: list[str], source: str) -> Any | None:
+    if not isinstance(payload, dict):
+        diagnostics.append(f"{source}读取失败：响应不是对象。")
+        return None
+    for key, success_codes in (("code", {"0", "200"}), ("errno", {"0"})):
+        value = payload.get(key)
+        if value is not None and str(value).strip() not in success_codes:
+            detail = str(payload.get("message") or payload.get("msg") or payload.get("error") or "").strip()
+            suffix = f"：{detail}" if detail else ""
+            diagnostics.append(f"{source}读取失败：CLS 业务错误 {key}={value}{suffix}")
+            return None
+    if "data" not in payload:
+        diagnostics.append(f"{source}读取失败：响应缺少 data 字段。")
+        return None
+    return payload["data"]
+
+
 @dataclass
 class ClsFinanceProvider:
     requester: Callable[..., requests.Response] = requests.get
     timeout: float = 5.0
     browser_cookie_getter: Callable[[], str | None] | None = None
+    cache_ttl: float = 3.0
+    recent_success_ttl: float = 15 * 60.0
+    _refresh_lock: Lock = field(default_factory=Lock, init=False, repr=False)
+    _cached_response: ClsFinanceResponse | None = field(default=None, init=False, repr=False)
+    _cached_until: float = field(default=0.0, init=False, repr=False)
+    _last_successful_response: ClsFinanceResponse | None = field(default=None, init=False, repr=False)
+    _last_successful_at: float = field(default=0.0, init=False, repr=False)
 
     def current_board(self) -> ClsFinanceResponse:
+        with self._refresh_lock:
+            now = monotonic()
+            if (
+                self._cached_response is not None
+                and self.cache_ttl > 0
+                and now < self._cached_until
+            ):
+                return self._cached_response.model_copy(deep=True)
+
+            response, failed_list_fields = self._fetch_current_board()
+            fetched_at = monotonic()
+            response, used_recent_success = self._merge_recent_success(
+                response,
+                fetched_at,
+                failed_list_fields=failed_list_fields,
+            )
+            successful = self._is_successful_response(response)
+            if successful and not used_recent_success:
+                self._last_successful_response = response.model_copy(deep=True)
+                self._last_successful_at = fetched_at
+            if successful or used_recent_success:
+                self._cached_response = response.model_copy(deep=True)
+                self._cached_until = min(
+                    fetched_at + max(0.0, self.cache_ttl),
+                    self._last_successful_at + self.recent_success_ttl
+                    if self._last_successful_at and self.recent_success_ttl > 0
+                    else fetched_at + max(0.0, self.cache_ttl),
+                )
+            else:
+                self._cached_response = None
+                self._cached_until = 0.0
+            return response.model_copy(deep=True)
+
+    def _merge_recent_success(
+        self,
+        response: ClsFinanceResponse,
+        fetched_at: float,
+        *,
+        failed_list_fields: set[str],
+    ) -> tuple[ClsFinanceResponse, bool]:
+        previous = self._last_successful_response
+        if (
+            previous is None
+            or self.recent_success_ttl <= 0
+            or fetched_at - self._last_successful_at > self.recent_success_ttl
+        ):
+            return response, False
+
+        retained = response.model_copy(deep=True)
+        previous = previous.model_copy(deep=True)
+        reused_fields: list[str] = []
+        for field_name in ("tline", "anchors", "up_pool"):
+            if (
+                field_name in failed_list_fields
+                and not getattr(retained, field_name)
+                and getattr(previous, field_name)
+            ):
+                setattr(retained, field_name, getattr(previous, field_name))
+                reused_fields.append(field_name)
+        if retained.preclose_px is None and previous.preclose_px is not None:
+            retained.preclose_px = previous.preclose_px
+            reused_fields.append("preclose_px")
+
+        current_emotion = retained.emotion
+        previous_emotion = previous.emotion
+        if current_emotion is None and previous_emotion is not None:
+            retained.emotion = previous_emotion
+            reused_fields.append("emotion")
+        elif current_emotion is not None and previous_emotion is not None:
+            for field_name in (
+                "market_degree",
+                "market_degree_source",
+                "market_degree_label",
+                "shsz_balance",
+                "shsz_balance_change",
+                "breadth",
+                "up_limit",
+                "open_limit",
+                "performance",
+            ):
+                if getattr(current_emotion, field_name) is None and getattr(previous_emotion, field_name) is not None:
+                    setattr(current_emotion, field_name, getattr(previous_emotion, field_name))
+                    reused_fields.append(f"emotion.{field_name}")
+
+        if not reused_fields:
+            return response, False
+        retained.source = f"{retained.source}+recent-success-cache"
+        retained.diagnostics = [
+            *retained.diagnostics,
+            "recent_success_cache_used for missing CLS finance fields: "
+            + ", ".join(reused_fields),
+        ]
+        return retained, True
+
+    def _is_successful_response(self, response: ClsFinanceResponse) -> bool:
+        emotion = response.emotion
+        has_emotion_data = emotion is not None and any(
+            (
+                emotion.market_degree is not None,
+                bool(emotion.shsz_balance),
+                bool(emotion.shsz_balance_change),
+                emotion.breadth is not None,
+                emotion.up_limit is not None,
+                emotion.open_limit is not None,
+                bool(emotion.performance),
+            )
+        )
+        return bool(
+            response.tline
+            or response.anchors
+            or response.preclose_px is not None
+            or has_emotion_data
+            or response.up_pool
+        )
+
+    def _fetch_current_board(self) -> tuple[ClsFinanceResponse, set[str]]:
         diagnostics: list[str] = []
         today = date.today().isoformat()
+        tline_diagnostic_count = len(diagnostics)
         tline = self._read_tline(diagnostics)
+        tline_failed = len(diagnostics) > tline_diagnostic_count
+        anchors_diagnostic_count = len(diagnostics)
         anchors = self._read_anchors(today, diagnostics)
+        anchors_failed = len(diagnostics) > anchors_diagnostic_count
         preclose_px = self._read_preclose(diagnostics)
         emotion = self._read_emotion(diagnostics)
         ths_market_degree = self._read_ths_market_degree(diagnostics)
         emotion = self._with_market_degree_source(emotion, ths_market_degree)
+        up_pool_diagnostic_count = len(diagnostics)
         up_pool = self._read_up_pool(diagnostics)
-        return ClsFinanceResponse(
-            updated_at=datetime.now(timezone.utc),
-            source="cls-finance",
-            source_url=CLS_FINANCE_URL,
-            preclose_px=preclose_px,
-            tline=tline,
-            anchors=anchors,
-            emotion=emotion,
-            up_pool=up_pool,
-            diagnostics=diagnostics,
+        up_pool_failed = len(diagnostics) > up_pool_diagnostic_count
+        failed_list_fields = {
+            field_name
+            for field_name, failed in (
+                ("tline", tline_failed),
+                ("anchors", anchors_failed),
+                ("up_pool", up_pool_failed),
+            )
+            if failed
+        }
+        return (
+            ClsFinanceResponse(
+                updated_at=datetime.now(timezone.utc),
+                source="cls-finance",
+                source_url=CLS_FINANCE_URL,
+                preclose_px=preclose_px,
+                tline=tline,
+                anchors=anchors,
+                emotion=emotion,
+                up_pool=up_pool,
+                diagnostics=diagnostics,
+            ),
+            failed_list_fields,
         )
 
     def _read_tline(self, diagnostics: list[str]) -> list[ClsFinanceTlinePoint]:
@@ -100,8 +262,10 @@ class ClsFinanceProvider:
         except Exception as exc:
             diagnostics.append(f"财联社分时线读取失败：{exc}")
             return []
-        rows = payload.get("data", []) if isinstance(payload, dict) else []
+        rows = _cls_payload_data(payload, diagnostics, "财联社分时线")
         if not isinstance(rows, list):
+            if rows is not None:
+                diagnostics.append("财联社分时线读取失败：data 不是列表。")
             return []
         points: list[ClsFinanceTlinePoint] = []
         for row in rows:
@@ -119,6 +283,8 @@ class ClsFinanceProvider:
                     change=_normalize_change_pct(row.get("change")),
                 )
             )
+        if rows and not points:
+            diagnostics.append("CLS tline response contained no parseable rows.")
         return points
 
     def _read_anchors(self, cdate: str, diagnostics: list[str]) -> list[ClsFinanceAnchor]:
@@ -132,8 +298,10 @@ class ClsFinanceProvider:
         except Exception as exc:
             diagnostics.append(f"财联社盘面锚点读取失败：{exc}")
             return []
-        rows = payload.get("data", []) if isinstance(payload, dict) else []
+        rows = _cls_payload_data(payload, diagnostics, "财联社盘面锚点")
         if not isinstance(rows, list):
+            if rows is not None:
+                diagnostics.append("财联社盘面锚点读取失败：data 不是列表。")
             return []
         anchors: list[ClsFinanceAnchor] = []
         for row in rows:
@@ -156,6 +324,8 @@ class ClsFinanceProvider:
                     url=f"https://www.cls.cn/plate?code={code}" if code.startswith("cls") else None,
                 )
             )
+        if rows and not anchors:
+            diagnostics.append("CLS anchors response contained no parseable rows.")
         return anchors
 
     def _read_preclose(self, diagnostics: list[str]) -> float | None:
@@ -169,22 +339,50 @@ class ClsFinanceProvider:
         except Exception as exc:
             diagnostics.append(f"财联社指数昨收读取失败：{exc}")
             return None
-        data = payload.get("data", {}) if isinstance(payload, dict) else {}
-        return _parse_float(data.get("preclose_px")) if isinstance(data, dict) else None
+        data = _cls_payload_data(payload, diagnostics, "财联社指数昨收")
+        if not isinstance(data, dict):
+            if data is not None:
+                diagnostics.append("财联社指数昨收读取失败：data 不是对象。")
+            return None
+        return _parse_float(data.get("preclose_px"))
 
     def _read_emotion(self, diagnostics: list[str]) -> ClsFinanceEmotion | None:
         try:
             payload = cls_request_json(self.requester, CLS_STOCK_EMOTION_URL, timeout=self.timeout)
         except Exception as exc:
             diagnostics.append(f"财联社市场热度读取失败：{exc}")
-            return None
-        data = payload.get("data", {}) if isinstance(payload, dict) else {}
+            breadth, up_limit, open_limit = self._read_home_distribution(diagnostics)
+            if breadth is None and up_limit is None and open_limit is None:
+                return None
+            return ClsFinanceEmotion(
+                breadth=breadth,
+                up_limit=up_limit,
+                open_limit=open_limit,
+            )
+        data = _cls_payload_data(payload, diagnostics, "财联社市场热度")
         if not isinstance(data, dict):
-            return None
+            if data is not None:
+                diagnostics.append("财联社市场热度读取失败：data 不是对象。")
+            breadth, up_limit, open_limit = self._read_home_distribution(diagnostics)
+            if breadth is None and up_limit is None and open_limit is None:
+                return None
+            return ClsFinanceEmotion(
+                breadth=breadth,
+                up_limit=up_limit,
+                open_limit=open_limit,
+            )
         breadth = _breadth_from_cls_distribution(data.get("up_down_dis", {}))
         if breadth is not None:
             breadth.source = "cls-finance-emotion"
+        home_up_limit: int | None = None
+        home_open_limit: int | None = None
+        if breadth is None:
+            breadth, home_up_limit, home_open_limit = self._read_home_distribution(diagnostics)
         market_degree = _parse_float(data.get("market_degree"))
+        up_ratio_num = data.get("up_ratio_num")
+        up_limit = _parse_int(str(up_ratio_num)) if up_ratio_num is not None else None
+        up_open_num = data.get("up_open_num")
+        open_limit = _parse_int(str(up_open_num)) if up_open_num is not None else None
         return ClsFinanceEmotion(
             market_degree=market_degree,
             market_degree_source=CLS_MARKET_DEGREE_SOURCE if market_degree is not None else None,
@@ -192,9 +390,36 @@ class ClsFinanceProvider:
             shsz_balance=str(data.get("shsz_balance") or "").strip() or None,
             shsz_balance_change=str(data.get("shsz_balance_change_px") or "").strip() or None,
             breadth=breadth,
-            up_limit=_parse_int(data.get("up_ratio_num")),
-            open_limit=_parse_int(data.get("up_open_num")),
+            up_limit=up_limit if up_limit is not None else home_up_limit,
+            open_limit=open_limit if open_limit is not None else home_open_limit,
             performance=str(data.get("performance") or "").strip() or None,
+        )
+
+    def _read_home_distribution(
+        self,
+        diagnostics: list[str],
+    ) -> tuple[Any, int | None, int | None]:
+        try:
+            payload = cls_request_json(self.requester, CLS_HOME_URL, timeout=self.timeout)
+        except Exception as exc:
+            diagnostics.append(f"CLS homepage distribution fallback failed: {exc}")
+            return None, None, None
+        data = _cls_payload_data(payload, diagnostics, "CLS 首页涨跌分布兜底")
+        if not isinstance(data, dict):
+            if data is not None:
+                diagnostics.append("CLS 首页涨跌分布兜底失败：data 不是对象。")
+            return None, None, None
+        breadth = _breadth_from_cls_home_data(data)
+        if breadth is not None:
+            breadth.source = "cls-finance-home"
+            diagnostics.append("CLS homepage distribution fallback used after emotion endpoint failure.")
+        distribution = data.get("up_down_dis")
+        if not isinstance(distribution, dict):
+            return breadth, None, None
+        return (
+            breadth,
+            _parse_int(distribution.get("up_num")),
+            _parse_int(distribution.get("up_open_num")),
         )
 
     def _read_up_pool(self, diagnostics: list[str]) -> list[ClsFinancePoolItem]:
@@ -208,8 +433,10 @@ class ClsFinanceProvider:
         except Exception as exc:
             diagnostics.append(f"财联社涨停池读取失败：{exc}")
             return []
-        rows = payload.get("data", []) if isinstance(payload, dict) else []
+        rows = _cls_payload_data(payload, diagnostics, "财联社涨停池")
         if not isinstance(rows, list):
+            if rows is not None:
+                diagnostics.append("财联社涨停池读取失败：data 不是列表。")
             return []
         items: list[ClsFinancePoolItem] = []
         for row in rows[:20]:
@@ -245,6 +472,8 @@ class ClsFinanceProvider:
                     plates=plates,
                 )
             )
+        if rows and not items:
+            diagnostics.append("CLS up-pool response contained no parseable rows.")
         return items
 
     def _read_ths_market_degree(self, diagnostics: list[str]) -> float | None:

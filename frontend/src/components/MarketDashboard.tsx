@@ -70,7 +70,8 @@ function sourceLabel(source: string | null | undefined): string | null {
       "eastmoney-industry-sector": "东方财富行业板块",
       "local-latest": "本地最近交易日",
       "local-market-group": "本地板块聚合",
-      "local-yesterday-group": "本地昨日板块"
+      "local-yesterday-group": "本地昨日板块",
+      "eastmoney-yesterday-limit-up": "东方财富昨日涨停池"
     }[source] ?? source
   );
 }

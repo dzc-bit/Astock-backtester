@@ -14,7 +14,9 @@ from astock_backtester.data.realtime_parsers import (
     a_share_market_symbol,
     aggregate_ths_hot_topic_rows,
     append_yesterday_sector_note,
+    aggregate_yesterday_limit_up_sectors,
     breadth_from_cls_distribution,
+    breadth_from_cls_home_data,
     clean_ths_topic_name,
     decode_sina_response,
     dedupe_sectors,
@@ -36,6 +38,9 @@ from astock_backtester.models import MarketBreadth, SectorMover
 class TestParseInt:
     def test_plain_int(self):
         assert parse_int(123) == 123
+
+    def test_numeric_zero(self):
+        assert parse_int(0) == 0
 
     def test_string_with_commas(self):
         assert parse_int("1,234") == 1234
@@ -194,8 +199,47 @@ class TestBreadthFromClsDistribution:
         assert breadth_from_cls_distribution({}) is None
         assert breadth_from_cls_distribution({"rise_num": "100"}) is None
 
+    def test_keeps_numeric_zero_rise_and_fall_counts(self):
+        breadth = breadth_from_cls_distribution({"rise_num": 0, "fall_num": 0, "flat_num": 8})
+
+        assert breadth is not None
+        assert breadth.up == 0
+        assert breadth.down == 0
+        assert breadth.total == 8
+
     def test_non_dict(self):
         assert breadth_from_cls_distribution("not a dict") is None
+
+
+class TestBreadthFromClsHomeData:
+    def test_reads_distribution_from_home_payload(self):
+        breadth = breadth_from_cls_home_data(
+            {
+                "up_down_dis": {
+                    "rise_num": 3919,
+                    "fall_num": 1215,
+                    "flat_num": 67,
+                    "up_num": 85,
+                    "down_num": 25,
+                }
+            }
+        )
+
+        assert breadth is not None
+        assert breadth.total == 5201
+        assert breadth.up == 3919
+        assert breadth.down == 1215
+
+    def test_ignores_index_constituent_counts_when_full_distribution_missing(self):
+        breadth = breadth_from_cls_home_data(
+            {
+                "index_quote": [
+                    {"secu_code": "sh000001", "up_num": 1621, "down_num": 537, "flat_num": 24}
+                ]
+            }
+        )
+
+        assert breadth is None
 
 
 class TestSectorRowsFromClsHotPlate:
@@ -218,6 +262,40 @@ class TestSectorRowsFromClsHotPlate:
         assert sector_rows_from_cls_hot_plate({"data": {}}) == []
 
 
+class TestAggregateYesterdayLimitUpSectors:
+    def test_ranks_sectors_by_follow_through_and_count(self):
+        sectors = aggregate_yesterday_limit_up_sectors(
+            [
+                {"name": "算力", "industry": "通信设备", "pct": 0.08, "code": "000001"},
+                {"name": "机器人", "industry": "通信设备", "pct": 0.02, "code": "000002"},
+                {"name": "黄金", "industry": "贵金属", "pct": -0.01, "code": "000003"},
+            ],
+            source="eastmoney-yesterday-limit-up",
+        )
+
+        assert [item.name for item in sectors] == ["通信设备", "贵金属"]
+        assert sectors[0].change_pct == 0.05
+        assert sectors[0].leading_symbol == "000001"
+
+    def test_keeps_a_zero_zdp_follow_through_value(self):
+        sectors = aggregate_yesterday_limit_up_sectors(
+            [{"industry": "Zero sector", "zdp": 0, "code": "000001"}]
+        )
+
+        assert sectors[0].change_pct == 0.0
+
+    def test_treats_one_point_zdp_as_one_percent(self):
+        sectors = aggregate_yesterday_limit_up_sectors(
+            [
+                {"industry": "Up sector", "zdp": "1.00", "code": "000001"},
+                {"industry": "Down sector", "zdp": "-1.00", "code": "000002"},
+            ]
+        )
+
+        changes = {sector.name: sector.change_pct for sector in sectors}
+        assert changes == {"Up sector": 0.01, "Down sector": -0.01}
+
+
 class TestDedupeSectors:
     def test_dedup_by_name(self):
         sectors = [
@@ -237,9 +315,24 @@ class TestDedupeSectors:
 class TestAppendYesterdaySectorNote:
     def test_adds_note(self):
         result = append_yesterday_sector_note(
-            "msg", [SectorMover(name="半导体", change_pct=0.01, source="test")]
+            "msg", [SectorMover(name="半导体", change_pct=0.01, source="local-yesterday-group")]
         )
         assert "昨日强势板块追踪来自本地历史" in result
+
+    def test_names_the_eastmoney_yesterday_limit_up_source(self):
+        result = append_yesterday_sector_note(
+            "msg",
+            [
+                SectorMover(
+                    name="Semiconductor",
+                    change_pct=0.01,
+                    source="eastmoney-yesterday-limit-up",
+                )
+            ],
+        )
+
+        assert "东方财富昨日涨停池" in result
+        assert "本地历史" not in result
 
     def test_no_sectors(self):
         assert append_yesterday_sector_note("msg", []) == "msg"
@@ -247,7 +340,7 @@ class TestAppendYesterdaySectorNote:
     def test_already_has_note(self):
         msg = "msg 昨日强势板块追踪来自本地历史。"
         assert append_yesterday_sector_note(
-            msg, [SectorMover(name="半导体", change_pct=0.01, source="test")]
+            msg, [SectorMover(name="半导体", change_pct=0.01, source="local-yesterday-group")]
         ) == msg
 
 

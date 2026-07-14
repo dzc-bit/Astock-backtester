@@ -19,6 +19,20 @@ CLS_HEADERS = {
 }
 
 
+def cls_telegraph_signed_params(params: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Build the signature required by the CLS rolling-telegraph endpoint."""
+    signed = {**(params or {})}
+    for key, value in CLS_APP_PARAMS.items():
+        signed.setdefault(key, value)
+    query = "&".join(
+        f"{key}={signed[key]}"
+        for key in sorted(signed, key=lambda item: str(item).upper())
+    )
+    digest = hashlib.sha1(query.encode("utf-8")).hexdigest()
+    signed["sign"] = hashlib.md5(digest.encode("ascii")).hexdigest()
+    return signed
+
+
 def cls_signed_params(params: dict[str, Any] | None = None) -> dict[str, Any]:
     signed = {**(params or {})}
     for key, value in CLS_APP_PARAMS.items():

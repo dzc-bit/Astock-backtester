@@ -24,6 +24,25 @@ describe("workspace desktop layout", () => {
     expect(styles).toMatch(/\.data-center\s*\{[^}]*grid-column:\s*1\s*\/\s*-1;/s);
   });
 
+  it("keeps the data center in a responsive single-column layout without desktop overflow", () => {
+    expect(styles).toMatch(/\.data-center\s+\.table-wrap\s*\{[^}]*overflow-x:\s*hidden;/s);
+    expect(styles).toMatch(/\.data-center\s+table\s*\{[^}]*min-width:\s*0;/s);
+    expect(styles).toMatch(/\.data-center\s+td\s*\{[^}]*overflow-wrap:\s*anywhere;/s);
+  });
+
+  it("lets data-center status and source labels wrap inside narrow table cells", () => {
+    expect(styles).toMatch(
+      /\.data-center\s+\.health-pill\s*\{[^}]*box-sizing:\s*border-box;[^}]*max-width:\s*100%;[^}]*min-width:\s*0;[^}]*white-space:\s*normal;[^}]*overflow-wrap:\s*anywhere;/s
+    );
+    expect(styles).toMatch(/\.data-center\s+td:last-child\s+small\s*\{[^}]*max-width:\s*100%;[^}]*overflow-wrap:\s*anywhere;/s);
+  });
+
+  it("keeps CLS diagnostics scrollable within the fixed-height finance panel", () => {
+    expect(styles).toMatch(
+      /\.cls-finance-diagnostics\s*\{[^}]*max-height:\s*120px;[^}]*overflow-y:\s*auto;[^}]*overscroll-behavior:\s*contain;/s
+    );
+  });
+
   it("keeps realtime market index quotes in a compact row instead of stacking full width", () => {
     expect(styles).toMatch(/\.market-news-layout,\s*\.market-insight-layout\s*\{[^}]*grid-template-columns:\s*minmax\(620px,\s*1\.45fr\)\s*minmax\(360px,\s*0\.9fr\);/s);
     expect(styles).toMatch(/\.index-quote\s*\{\s*grid-column:\s*auto;\s*\}/s);

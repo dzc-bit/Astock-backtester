@@ -1,6 +1,7 @@
 mod commands;
 mod python_runtime;
 mod service_manager;
+mod updater_preflight;
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -62,6 +63,7 @@ pub fn run() {
             commands::open_external_url,
             commands::open_ths_original_url,
             commands::upsert_saved_strategy,
+            updater_preflight::updater_preflight,
             commands::workspace_diagnostics
         ])
         .run(tauri::generate_context!())

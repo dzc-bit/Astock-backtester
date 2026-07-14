@@ -97,6 +97,23 @@ function marketDegreeSentiment(emotion: ClsFinanceEmotion | null): "positive" | 
   return value >= (isTonghuashunMarketDegree(emotion) ? 5 : 50) ? "positive" : "neutral";
 }
 
+function hasAvailableFinanceFields(finance: ClsFinanceResponse): boolean {
+  const emotion = finance.emotion;
+  return (
+    finance.preclose_px != null ||
+    finance.tline.length > 0 ||
+    finance.anchors.length > 0 ||
+    finance.up_pool.length > 0 ||
+    emotion?.market_degree != null ||
+    Boolean(emotion?.shsz_balance) ||
+    Boolean(emotion?.shsz_balance_change) ||
+    emotion?.breadth != null ||
+    emotion?.up_limit != null ||
+    emotion?.open_limit != null ||
+    Boolean(emotion?.performance)
+  );
+}
+
 function buildBriefingCards(finance: ClsFinanceResponse) {
   const emotion = finance.emotion ?? null;
   const anchorNames = finance.anchors.map((anchor) => anchor.name);
@@ -234,6 +251,9 @@ export function ClsFinancePanel({ finance, isLoading = false }: Props) {
   const upPool = finance?.up_pool ?? [];
   const anchors = finance?.anchors.slice(0, 8) ?? [];
   const briefingCards = finance ? buildBriefingCards(finance) : [];
+  const usingRecentSuccess = finance?.source.includes("+recent-success-cache") ?? false;
+  const financeUnavailable = Boolean(finance && !usingRecentSuccess && !hasAvailableFinanceFields(finance));
+  const financeDiagnostics = finance?.diagnostics ?? [];
 
   return (
     <section className="surface cls-finance-panel" aria-label="财联社看盘">
@@ -243,7 +263,7 @@ export function ClsFinancePanel({ finance, isLoading = false }: Props) {
           <h2>财联社看盘</h2>
         </div>
         <div className="cls-finance-actions">
-          {finance ? (
+          {finance && !financeUnavailable ? (
             <button className="secondary-button compact cls-finance-detail-button" type="button" onClick={() => setIsPoolOpen(true)}>
               <Eye size={15} aria-hidden="true" />
               查看涨停明细
@@ -251,15 +271,39 @@ export function ClsFinancePanel({ finance, isLoading = false }: Props) {
           ) : null}
           <span className="status-pill compact cls-finance-source">
             <RadioTower size={15} aria-hidden="true" />
-            {finance ? `更新 ${formatTime(finance.updated_at)}` : isLoading ? "加载中" : "待连接"}
+            {finance
+              ? `${financeUnavailable ? "CLS 数据暂不可用" : usingRecentSuccess ? "最近成功数据" : "CLS 实时数据"} / 更新 ${formatTime(finance.updated_at)}`
+              : isLoading
+                ? "加载中"
+                : "待连接"}
           </span>
         </div>
       </div>
+
+      {finance && financeDiagnostics.length > 0 ? (
+        <div
+          className={`cls-finance-diagnostics ${usingRecentSuccess ? "is-stale" : ""}`}
+          role="status"
+          aria-label="财联社数据诊断"
+          tabIndex={0}
+        >
+          <strong>{usingRecentSuccess ? "最近成功数据" : "财联社数据诊断"}</strong>
+          <span>来源 {finance.source}</span>
+          {financeDiagnostics.map((item, index) => (
+            <span key={`${item}-${index}`}>{item}</span>
+          ))}
+        </div>
+      ) : null}
 
       {!finance ? (
         <div className="empty-state">
           <strong>{isLoading ? "正在加载财联社看盘" : "暂无财联社看盘"}</strong>
           <span>后端 `/market/finance` 返回后，会显示财联社盘面分时、市场热度、涨停明细和盘面锚点。</span>
+        </div>
+      ) : financeUnavailable ? (
+        <div className="empty-state">
+          <strong>CLS 数据暂不可用</strong>
+          <span>当前未取得可展示的财联社看盘字段，请查看上方数据诊断。</span>
         </div>
       ) : (
         <div className="cls-finance-body">

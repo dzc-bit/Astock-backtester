@@ -64,6 +64,58 @@ def test_news_provider_uses_alternate_transport_and_reports_source_diagnostics()
     )
 
 
+def test_news_provider_uses_signed_cls_telegraph_source():
+    class FakeResponse:
+        def raise_for_status(self):
+            return
+
+        def json(self):
+            return {
+                "errno": 0,
+                "data": {
+                    "roll_data": [
+                        {
+                            "title": "财联社测试快讯",
+                            "brief": "市场事件摘要",
+                            "content": "市场事件摘要",
+                            "ctime": 1784018850,
+                            "shareurl": "https://www.cls.cn/detail/1",
+                        }
+                    ]
+                },
+            }
+
+    def requester(url, **kwargs):
+        if "/v1/roll/get_roll_list" in url:
+            params = kwargs.get("params") or {}
+            assert params.get("sign")
+            return FakeResponse()
+        raise OSError(f"unavailable source: {url}")
+
+    provider = MarketNewsProvider(requester=requester, time_budget=None, cache_ttl=0)
+
+    response = provider.latest_news(limit=5)
+
+    assert response.items[0].source == "财联社电报"
+    assert response.items[0].url == "https://www.cls.cn/detail/1"
+    assert "cls-telegraph" in response.source
+
+
+def test_signed_cls_telegraph_reports_a_business_error():
+    class FakeResponse:
+        def raise_for_status(self):
+            return
+
+        def json(self):
+            return {"errno": 401, "message": "signature invalid", "data": {}}
+
+    diagnostics: list[str] = []
+    provider = MarketNewsProvider(requester=lambda _url, **_kwargs: FakeResponse())
+
+    assert provider._fetch_cls_telegraph(5, diagnostics, None) == []
+    assert any("errno=401" in item for item in diagnostics)
+
+
 def test_news_provider_does_not_start_sources_after_total_budget_expires():
     calls = 0
 
@@ -147,6 +199,7 @@ def test_news_provider_overlapping_calls_share_one_upstream_refresh():
     provider._fetch_eastmoney_columns = slow_columns
     provider._fetch_eastmoney_rolling = lambda _limit, _diagnostics, _deadline: []
     provider._fetch_eastmoney_fast_news = lambda _limit, _diagnostics, _deadline: []
+    provider._fetch_cls_telegraph = lambda _limit, _diagnostics, _deadline: []
 
     first = Thread(target=lambda: responses.append(provider.latest_news(limit=18)))
     second = Thread(target=lambda: responses.append(provider.latest_news(limit=24)))
@@ -176,6 +229,7 @@ def test_news_provider_uses_explicit_recent_success_when_refresh_fails():
     provider._fetch_eastmoney_columns = columns
     provider._fetch_eastmoney_rolling = lambda _limit, _diagnostics, _deadline: []
     provider._fetch_eastmoney_fast_news = lambda _limit, _diagnostics, _deadline: []
+    provider._fetch_cls_telegraph = lambda _limit, _diagnostics, _deadline: []
 
     successful = provider.latest_news()
     failing = True
@@ -246,6 +300,7 @@ def test_recent_success_cache_does_not_outlive_stale_ttl(monkeypatch):
     provider._fetch_eastmoney_columns = columns
     provider._fetch_eastmoney_rolling = lambda _limit, _diagnostics, _deadline: []
     provider._fetch_eastmoney_fast_news = lambda _limit, _diagnostics, _deadline: []
+    provider._fetch_cls_telegraph = lambda _limit, _diagnostics, _deadline: []
 
     assert provider.latest_news().source == "eastmoney-columns"
     failing = True
