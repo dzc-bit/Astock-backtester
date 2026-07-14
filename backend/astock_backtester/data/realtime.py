@@ -4,6 +4,7 @@ import json
 import re
 import time as monotonic_time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError, as_completed
+from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from threading import Event, Lock
@@ -17,10 +18,12 @@ from astock_backtester.data.cls import cls_request_json
 from astock_backtester.data.http_transport import resilient_get, should_allow_alternate_transport
 from astock_backtester.data.providers import normalize_symbol
 from astock_backtester.data.realtime_parsers import (
+    BEIJING_TZ,
     CLS_HOT_PLATE_URL,
     CLS_QUOTE_HOME_URL,
     EASTMONEY_A_SPOT_URL,
     EASTMONEY_SECTOR_URLS,
+    EASTMONEY_YESTERDAY_LIMIT_UP_URL,
     INDEXES,
     MIN_CONTROLLED_BACKUP_SECTOR_ROWS,
     SINA_BREADTH_BATCH_SIZE,
@@ -43,10 +46,13 @@ from astock_backtester.data.realtime_parsers import (
     aggregate_ths_hot_topic_rows as _aggregate_ths_hot_topic_rows,
 )
 from astock_backtester.data.realtime_parsers import (
+    aggregate_yesterday_limit_up_sectors as _aggregate_yesterday_limit_up_sectors,
+)
+from astock_backtester.data.realtime_parsers import (
     append_yesterday_sector_note as _append_yesterday_sector_note,
 )
 from astock_backtester.data.realtime_parsers import (
-    breadth_from_cls_distribution as _breadth_from_cls_distribution,
+    breadth_from_cls_home_data as _breadth_from_cls_home_data,
 )
 from astock_backtester.data.realtime_parsers import (
     decode_sina_response as _decode_sina_response,
@@ -88,6 +94,7 @@ from astock_backtester.data.realtime_parsers import (
     unique_sources as _unique_sources,
 )
 from astock_backtester.data.warehouse import Warehouse
+from astock_backtester.data.trading_calendar import a_share_trade_dates
 from astock_backtester.models import (
     MarketBreadth,
     MarketIndexQuote,
@@ -174,6 +181,12 @@ class HeavyMarketCrawlerProvider:
 
 
 @dataclass
+class _ClsHomeFlight:
+    event: Event
+    payload: dict[str, Any] | None = None
+
+
+@dataclass
 class RealtimeMarketProvider:
     warehouse: Warehouse
     timeout: float = 4.0
@@ -186,6 +199,9 @@ class RealtimeMarketProvider:
     sector_source_timeout: float = 0.8
     local_snapshot_time_budget: float = 2.0
     allow_eastmoney_breadth_fallback: bool = False
+    cls_home_cache_ttl: float = 1.5
+    yesterday_sector_time_budget: float = 1.0
+    yesterday_sector_cache_ttl: float = 15 * 60.0
     _sector_member_cache: dict[str, list[str]] = field(default_factory=dict, init=False, repr=False)
     _last_successful_snapshot: RealtimeMarketSnapshot | None = field(default=None, init=False, repr=False)
     _state_lock: Lock = field(default_factory=Lock, init=False, repr=False)
@@ -205,6 +221,18 @@ class RealtimeMarketProvider:
     _breadth_in_flight: Lock = field(default_factory=Lock, init=False, repr=False)
     _sector_in_flight: Lock = field(default_factory=Lock, init=False, repr=False)
     _local_in_flight: Lock = field(default_factory=Lock, init=False, repr=False)
+    _cls_home_cache: dict[str, Any] | None = field(default=None, init=False, repr=False)
+    _cls_home_cached_at: float = field(default=0.0, init=False, repr=False)
+    _cls_home_lock: Lock = field(default_factory=Lock, init=False, repr=False)
+    _cls_home_in_flight: _ClsHomeFlight | None = field(default=None, init=False, repr=False)
+    _yesterday_sector_cache_date: str | None = field(default=None, init=False, repr=False)
+    _yesterday_sector_cache: list[SectorMover] = field(default_factory=list, init=False, repr=False)
+    _yesterday_sector_cached_at: float = field(default=0.0, init=False, repr=False)
+    _yesterday_sector_diagnostics_date: str | None = field(default=None, init=False, repr=False)
+    _yesterday_sector_diagnostics: list[str] = field(default_factory=list, init=False, repr=False)
+    _yesterday_sector_lock: Lock = field(default_factory=Lock, init=False, repr=False)
+    _yesterday_sector_executor: ThreadPoolExecutor | None = field(default=None, init=False, repr=False)
+    _yesterday_sector_in_flight: bool = field(default=False, init=False, repr=False)
 
     def _get_breadth_executor(self) -> ThreadPoolExecutor:
         if self._breadth_executor is None:
@@ -278,10 +306,13 @@ class RealtimeMarketProvider:
         # P1-4: each request gets a monotonic generation so that late
         # arrivals cannot overwrite results from a newer request.
         request_generation = self._next_request_generation()
+        self._clear_cls_home_completed_cache()
         phase = _market_phase(now)
         diagnostics: list[str] = []
+        index_diagnostics: list[str] = []
         breadth_diagnostics: list[str] = []
         sector_diagnostics: list[str] = []
+        yesterday_sector_diagnostics: list[str] = []
         phase_note = _phase_diagnostic(phase)
         if phase_note:
             diagnostics.append(phase_note)
@@ -289,10 +320,13 @@ class RealtimeMarketProvider:
         indexes: list[MarketIndexQuote] = []
         live_breadth: MarketBreadth | None = None
         live_sectors: list[SectorMover] = []
+        self._yesterday_sector_snapshot_or_schedule(yesterday_sector_diagnostics)
+        yesterday_sectors, has_yesterday_sector_result = self._yesterday_sector_cache_snapshot_for_current_pool()
+        diagnostics.extend(yesterday_sector_diagnostics)
         live_sector_rows: list[dict] = []
         with ThreadPoolExecutor(max_workers=3) as executor:
             futures = {
-                executor.submit(self._fetch_indexes): "indexes",
+                executor.submit(self._call_indexes, index_diagnostics): "indexes",
                 executor.submit(self._fetch_live_breadth_with_budget, breadth_diagnostics): "breadth",
                 executor.submit(
                     self._fetch_live_sectors_with_budget,
@@ -314,7 +348,7 @@ class RealtimeMarketProvider:
                         "indexes": indexes,
                         "updated_at": now,
                         "market_phase": phase,
-                        "diagnostics": list(diagnostics),
+                        "diagnostics": [*diagnostics, *index_diagnostics],
                     }
                 elif event_type == "breadth":
                     live_breadth = value
@@ -325,7 +359,7 @@ class RealtimeMarketProvider:
                         "market_phase": phase,
                         "diagnostics": [*diagnostics, *breadth_diagnostics],
                     }
-                else:
+                elif event_type == "sectors":
                     live_sectors = value
                     yield {
                         "type": "sectors",
@@ -334,16 +368,18 @@ class RealtimeMarketProvider:
                         "market_phase": phase,
                         "diagnostics": [*diagnostics, *sector_diagnostics],
                     }
+        diagnostics.extend(index_diagnostics)
         diagnostics.extend(breadth_diagnostics)
         diagnostics.extend(sector_diagnostics)
-        has_live_context = bool(indexes and live_breadth and live_sectors)
+        current_indexes = indexes
+        has_current_live_context = bool(current_indexes and live_breadth is not None and live_sectors)
         skip_local_topic_fetch = any(
             item.startswith(("实时强势题材接口超时", "实时强势题材接口失败"))
             for item in sector_diagnostics
         )
         local_snapshot = (
             None
-            if has_live_context
+            if has_current_live_context
             else self._snapshot_from_local_with_budget(
                 now,
                 diagnostics,
@@ -351,9 +387,39 @@ class RealtimeMarketProvider:
                 skip_topic_fetch=skip_local_topic_fetch,
             )
         )
-        strong_sectors = live_sectors or (local_snapshot.strong_sectors if local_snapshot else [])
-        yesterday_sectors = local_snapshot.yesterday_strong_sectors if local_snapshot else []
-        breadth = live_breadth or (local_snapshot.breadth if local_snapshot else None)
+        retained = self._retained_successful_snapshot()
+        retained_fields: list[str] = []
+
+        indexes = current_indexes
+        if not indexes:
+            if retained and retained.indexes:
+                indexes = retained.indexes
+                retained_fields.append("indexes")
+            elif local_snapshot:
+                indexes = local_snapshot.indexes
+
+        breadth = live_breadth
+        if breadth is None:
+            if retained and retained.breadth is not None:
+                breadth = retained.breadth
+                retained_fields.append("breadth")
+            elif local_snapshot:
+                breadth = local_snapshot.breadth
+
+        strong_sectors = live_sectors
+        if not strong_sectors:
+            if retained and retained.strong_sectors:
+                strong_sectors = retained.strong_sectors
+                retained_fields.append("strong_sectors")
+            elif local_snapshot:
+                strong_sectors = local_snapshot.strong_sectors
+
+        if not has_yesterday_sector_result:
+            if retained and retained.yesterday_strong_sectors:
+                yesterday_sectors = retained.yesterday_strong_sectors
+                retained_fields.append("yesterday_strong_sectors")
+            else:
+                yesterday_sectors = local_snapshot.yesterday_strong_sectors if local_snapshot else []
         if not live_breadth and breadth:
             yield {
                 "type": "breadth",
@@ -380,34 +446,44 @@ class RealtimeMarketProvider:
                 "market_phase": phase,
                 "diagnostics": list(diagnostics),
             }
-        has_partial_realtime_context = bool(indexes or live_breadth or live_sectors)
-        status = "live" if has_live_context else ("stale" if has_partial_realtime_context else local_snapshot.status)
+        has_partial_realtime_context = bool(current_indexes or live_breadth is not None or live_sectors)
+        status = (
+            "live"
+            if has_current_live_context and not retained_fields
+            else ("stale" if retained_fields or has_partial_realtime_context else local_snapshot.status)
+        )
         if local_snapshot and not live_breadth and local_snapshot.diagnostics:
             diagnostics.extend(local_snapshot.diagnostics)
-        if not indexes:
+        if retained_fields and retained:
+            diagnostics.extend(retained.diagnostics)
+            diagnostics.append(
+                "沿用最近成功行情快照："
+                f"fields={','.join(retained_fields)}; snapshot_at={retained.updated_at.isoformat()}。"
+            )
+        if not current_indexes:
             diagnostics.append("实时指数接口暂不可用，尝试使用最近成功快照或本地最近交易日。")
-        if local_snapshot and indexes and not live_breadth and local_snapshot.breadth:
+        if local_snapshot and current_indexes and live_breadth is None and local_snapshot.breadth:
             diagnostics.append("实时红绿家数接口暂不可用，已回退到本地最近交易日统计。")
-        if local_snapshot and indexes and not live_breadth and local_snapshot.breadth is None:
+        if local_snapshot and current_indexes and live_breadth is None and local_snapshot.breadth is None:
             diagnostics.append("实时红绿家数接口暂不可用，本地最近交易日红绿宽度也不完整，已隐藏该宽度统计。")
-        if local_snapshot and indexes and not live_sectors and local_snapshot.strong_sectors:
+        if local_snapshot and current_indexes and not live_sectors and local_snapshot.strong_sectors:
             diagnostics.append("实时强势题材接口暂不可用，已回退到本地最近交易日题材聚合。")
         source_parts: list[str] = []
         if indexes:
             source_parts.extend(_unique_sources(quote.source for quote in indexes))
-        if live_breadth:
-            source_parts.append(live_breadth.source)
-        elif local_snapshot and local_snapshot.breadth:
-            source_parts.append(local_snapshot.breadth.source)
-        if live_sectors:
-            source_parts.append(live_sectors[0].source)
-        elif local_snapshot and local_snapshot.strong_sectors:
-            source_parts.append(local_snapshot.strong_sectors[0].source)
+        if breadth is not None:
+            source_parts.append(breadth.source)
+        if strong_sectors:
+            source_parts.append(strong_sectors[0].source)
         if yesterday_sectors:
-            source_parts.append("local-yesterday-group")
-        source = "+".join(source_parts) if source_parts else (local_snapshot.source if local_snapshot else "live")
-        if not indexes:
-            message = local_snapshot.message
+            source_parts.extend(_unique_sources(sector.source for sector in yesterday_sectors))
+        source = "+".join(source_parts) if source_parts else (
+            local_snapshot.source if local_snapshot else (retained.source if retained else "live")
+        )
+        if retained_fields and not source.endswith("+retained-last-success"):
+            source = f"{source}+retained-last-success"
+        if not current_indexes:
+            message = retained.message if retained_fields and retained else local_snapshot.message
         else:
             message = self._build_live_message(
                 live_breadth,
@@ -415,6 +491,12 @@ class RealtimeMarketProvider:
                 index_source=indexes[0].source if indexes else None,
             )
         message = _append_yesterday_sector_note(message, yesterday_sectors)
+        seen_diagnostics: set[str] = set()
+        diagnostics = [
+            item
+            for item in diagnostics
+            if not (item in seen_diagnostics or seen_diagnostics.add(item))
+        ]
         snapshot = RealtimeMarketSnapshot(
             status=status,
             source=source,
@@ -431,8 +513,7 @@ class RealtimeMarketProvider:
             self._remember_successful_snapshot(snapshot, generation=request_generation)
             yield {"type": "result", "snapshot": snapshot}
             return
-        retained = self._retained_successful_snapshot()
-        if retained is not None and not indexes:
+        if retained is not None and not indexes and not retained_fields:
             retained_at = retained.updated_at
             retained.status = "stale"
             retained.updated_at = now
@@ -690,8 +771,15 @@ class RealtimeMarketProvider:
                 except TypeError:
                     return self._snapshot_from_local(now)
 
-    def _fetch_indexes(self) -> list[MarketIndexQuote]:
-        cls_quotes = self._fetch_cls_indexes()
+    def _call_indexes(self, diagnostics: list[str]) -> list[MarketIndexQuote]:
+        try:
+            return self._fetch_indexes(diagnostics)
+        except TypeError:
+            return self._fetch_indexes()
+
+    def _fetch_indexes(self, diagnostics: list[str] | None = None) -> list[MarketIndexQuote]:
+        diagnostics = diagnostics if diagnostics is not None else []
+        cls_quotes = self._fetch_cls_indexes(diagnostics)
         if cls_quotes:
             return cls_quotes
         symbols = ",".join(symbol for symbol, _ in INDEXES)
@@ -715,21 +803,357 @@ class RealtimeMarketProvider:
         return quotes
 
     def _fetch_cls_home_payload(self) -> dict[str, Any]:
-        return cls_request_json(
-            self.requester,
-            CLS_QUOTE_HOME_URL,
-            timeout=min(self.timeout, 2.5),
-        )
+        now = monotonic_time.monotonic()
+        with self._cls_home_lock:
+            if (
+                self._cls_home_cache is not None
+                and self.cls_home_cache_ttl > 0
+                and now - self._cls_home_cached_at <= self.cls_home_cache_ttl
+            ):
+                return deepcopy(self._cls_home_cache)
+            flight = self._cls_home_in_flight
+            if flight is None:
+                flight = _ClsHomeFlight(event=Event())
+                self._cls_home_in_flight = flight
+                owner = True
+            else:
+                owner = False
 
-    def _fetch_cls_indexes(self) -> list[MarketIndexQuote]:
+        if not owner:
+            wait_timeout = max(0.5, min(float(self.timeout), 3.0) + 0.25)
+            if not flight.event.wait(timeout=wait_timeout):
+                raise TimeoutError("CLS home single-flight request timed out")
+            with self._cls_home_lock:
+                if flight.payload is not None:
+                    return deepcopy(flight.payload)
+            raise RuntimeError("CLS home single-flight request failed")
+
+        try:
+            payload = cls_request_json(
+                self.requester,
+                CLS_QUOTE_HOME_URL,
+                timeout=min(self.timeout, 2.5),
+            )
+            self._validate_cls_home_payload(payload)
+            with self._cls_home_lock:
+                self._cls_home_cache = deepcopy(payload)
+                self._cls_home_cached_at = monotonic_time.monotonic()
+                flight.payload = deepcopy(payload)
+            return payload
+        finally:
+            with self._cls_home_lock:
+                if self._cls_home_in_flight is flight:
+                    self._cls_home_in_flight = None
+                flight.event.set()
+
+    def _clear_cls_home_completed_cache(self) -> None:
+        with self._cls_home_lock:
+            self._cls_home_cache = None
+            self._cls_home_cached_at = 0.0
+
+    def _validate_cls_home_payload(self, payload: dict[str, Any]) -> None:
+        code = payload.get("code")
+        if code not in (None, 0, "0", 200, "200"):
+            detail = str(
+                payload.get("message") or payload.get("msg") or payload.get("error") or ""
+            ).strip()
+            suffix = f": {detail}" if detail else ""
+            raise RuntimeError(f"CLS home response rejected with code={code}{suffix}")
+        data = payload.get("data")
+        if not isinstance(data, dict):
+            raise RuntimeError("CLS home response has no mapping data")
+        index_rows = data.get("index_quote")
+        has_parseable_index = isinstance(index_rows, list) and any(
+            _quote_from_cls_home(row) is not None for row in index_rows if isinstance(row, dict)
+        )
+        if not has_parseable_index and _breadth_from_cls_home_data(data) is None:
+            raise RuntimeError(
+                "CLS home response has no usable parseable index_quote or complete up_down_dis field"
+            )
+
+    def _trade_date_on_or_before(self, candidate: pd.Timestamp) -> str:
+        candidate = pd.Timestamp(candidate).normalize()
+        while not a_share_trade_dates(candidate, candidate):
+            candidate -= pd.Timedelta(days=1)
+        return candidate.date().isoformat()
+
+    def _latest_trade_date(self) -> str:
+        today = pd.Timestamp(datetime.now(timezone.utc).astimezone(BEIJING_TZ).date()).normalize()
+        return self._trade_date_on_or_before(today)
+
+    def _previous_trade_date(self) -> str:
+        today = pd.Timestamp(datetime.now(timezone.utc).astimezone(BEIJING_TZ).date()).normalize()
+        return self._trade_date_on_or_before(today - pd.Timedelta(days=1))
+
+    def _yesterday_pool_dates(self) -> tuple[str, str]:
+        as_of_date = self._latest_trade_date()
+        pool_date = self._trade_date_on_or_before(pd.Timestamp(as_of_date) - pd.Timedelta(days=1))
+        return as_of_date, pool_date
+
+    def _yesterday_sector_cache_snapshot_for_current_pool(self) -> tuple[list[SectorMover], bool]:
+        _, target_date = self._yesterday_pool_dates()
+        with self._yesterday_sector_lock:
+            if self._yesterday_sector_cache_date != target_date:
+                return [], False
+            return deepcopy(self._yesterday_sector_cache), True
+
+    def _yesterday_sector_snapshot_or_schedule(
+        self,
+        diagnostics: list[str],
+    ) -> list[SectorMover]:
+        _, target_date = self._yesterday_pool_dates()
+        now = monotonic_time.monotonic()
+        with self._yesterday_sector_lock:
+            has_cached_result = self._yesterday_sector_cache_date == target_date
+            if (
+                has_cached_result
+                and now - self._yesterday_sector_cached_at <= self.yesterday_sector_cache_ttl
+            ):
+                diagnostics.extend(self._yesterday_sector_diagnostics)
+                return deepcopy(self._yesterday_sector_cache)
+            if self._yesterday_sector_diagnostics_date == target_date:
+                diagnostics.extend(self._yesterday_sector_diagnostics)
+            if self._yesterday_sector_in_flight:
+                diagnostics.append("eastmoney-yesterday-limit-up tracking refresh is still running.")
+                if has_cached_result:
+                    diagnostics.append(
+                        "eastmoney-yesterday-limit-up recent-success cache used as stale fallback while refresh is running."
+                    )
+                    return deepcopy(self._yesterday_sector_cache)
+                return []
+            self._yesterday_sector_in_flight = True
+            if self._yesterday_sector_executor is None:
+                self._yesterday_sector_executor = ThreadPoolExecutor(max_workers=1)
+            executor = self._yesterday_sector_executor
+
+        worker_diagnostics: list[str] = []
+        try:
+            future = executor.submit(self._fetch_yesterday_strong_sectors, worker_diagnostics)
+        except Exception as exc:
+            with self._yesterday_sector_lock:
+                self._yesterday_sector_in_flight = False
+            diagnostics.append(f"eastmoney-yesterday-limit-up background refresh failed: {exc}")
+            if has_cached_result:
+                diagnostics.append(
+                    "eastmoney-yesterday-limit-up recent-success cache used as stale fallback after refresh scheduling failed."
+                )
+                return deepcopy(self._yesterday_sector_cache)
+            return []
+
+        def release(done) -> None:
+            try:
+                done.result()
+            except Exception as exc:
+                worker_diagnostics.append(f"eastmoney-yesterday-limit-up background refresh failed: {exc}")
+            with self._yesterday_sector_lock:
+                self._yesterday_sector_in_flight = False
+                self._yesterday_sector_diagnostics_date = target_date
+                self._yesterday_sector_diagnostics = list(worker_diagnostics)
+
+        future.add_done_callback(release)
+        diagnostics.append("eastmoney-yesterday-limit-up tracking refresh scheduled in background.")
+        if has_cached_result:
+            diagnostics.append(
+                "eastmoney-yesterday-limit-up recent-success cache used as stale fallback while refresh is scheduled."
+            )
+            return deepcopy(self._yesterday_sector_cache)
+        return []
+
+    def _fetch_yesterday_strong_sectors(
+        self,
+        diagnostics: list[str],
+        *,
+        deadline: float | None = None,
+        cancel_event: Event | None = None,
+    ) -> list[SectorMover]:
+        if self._source_chain_cancelled(cancel_event, deadline, diagnostics, "yesterday-sector"):
+            return []
+        as_of_date, target_date = self._yesterday_pool_dates()
+        now = monotonic_time.monotonic()
+        with self._yesterday_sector_lock:
+            if (
+                self._yesterday_sector_cache_date == target_date
+                and now - self._yesterday_sector_cached_at <= self.yesterday_sector_cache_ttl
+            ):
+                return deepcopy(self._yesterday_sector_cache)
+
+        request_budget = min(self.yesterday_sector_time_budget, self.timeout, 2.5)
+        request_deadline = monotonic_time.monotonic() + request_budget
+        if deadline is not None:
+            request_deadline = min(request_deadline, deadline)
+
+        page_size = 100
+        max_pages = 3
+        pool: list[dict] = []
+        expected_total: int | None = None
+        expected_pages: int | None = None
+        more_pages_expected = False
+        partial_result = False
+        for page_index in range(max_pages):
+            remaining = request_deadline - monotonic_time.monotonic()
+            if remaining <= 0:
+                if pool:
+                    partial_result = True
+                    diagnostics.append(
+                        "eastmoney-yesterday-limit-up partial result: "
+                        f"fetched {len(pool)} of {expected_total or 'an unknown number of'} pool rows before timeout."
+                    )
+                    break
+                diagnostics.append("eastmoney-yesterday-limit-up request timed out before the first page.")
+                return []
+            try:
+                response = self.requester(
+                    EASTMONEY_YESTERDAY_LIMIT_UP_URL,
+                    timeout=max(0.05, remaining),
+                    headers={
+                        "Referer": "https://quote.eastmoney.com/ztb/detail",
+                        "User-Agent": "Mozilla/5.0",
+                    },
+                    params={
+                        "ut": "7eea3edcaed734bea9cbfc24409ed989",
+                        "dpt": "wz.ztzt",
+                        "date": as_of_date.replace("-", ""),
+                        "Pageindex": str(page_index),
+                        "pagesize": str(page_size),
+                        "sort": "zs:desc",
+                        "ft": "1",
+                        "l": "0",
+                    },
+                )
+                response.raise_for_status()
+                payload = response.json() or {}
+            except Exception as exc:
+                if pool:
+                    partial_result = True
+                    diagnostics.append(
+                        "eastmoney-yesterday-limit-up partial result: "
+                        f"page={page_index} failed after {len(pool)} pool rows: {exc}"
+                    )
+                    break
+                diagnostics.append(f"eastmoney-yesterday-limit-up request failed: {exc}")
+                return []
+
+            if isinstance(payload, dict) and "rc" in payload:
+                rc = _parse_int(payload.get("rc"))
+                if rc != 0:
+                    detail = str(
+                        payload.get("message") or payload.get("msg") or payload.get("error") or ""
+                    ).strip()
+                    suffix = f": {detail}" if detail else ""
+                    diagnostics.append(
+                        f"eastmoney-yesterday-limit-up logical failure: rc={payload.get('rc')}{suffix}"
+                    )
+                    return []
+
+            data = payload.get("data") if isinstance(payload, dict) else None
+            page_pool = data.get("pool") if isinstance(data, dict) else None
+            if not isinstance(page_pool, list):
+                if pool:
+                    partial_result = True
+                    diagnostics.append(
+                        "eastmoney-yesterday-limit-up partial result: "
+                        f"page={page_index} returned no valid pool list after {len(pool)} pool rows."
+                    )
+                    break
+                diagnostics.append("eastmoney-yesterday-limit-up returned no valid pool list.")
+                return []
+            pool.extend(item for item in page_pool if isinstance(item, dict))
+
+            if expected_total is None:
+                for key in ("tc", "count", "total", "total_count", "totalCount"):
+                    value = _parse_int(data.get(key))
+                    if value is not None:
+                        expected_total = value
+                        break
+            if expected_pages is None:
+                for key in ("page_count", "pageCount", "pages", "total_pages", "totalPages"):
+                    value = _parse_int(data.get(key))
+                    if value is not None:
+                        expected_pages = value
+                        break
+
+            more_pages_expected = (
+                (expected_total is not None and len(pool) < expected_total)
+                or (expected_pages is not None and page_index + 1 < expected_pages)
+                or (expected_total is None and expected_pages is None and len(page_pool) >= page_size)
+            )
+            if not more_pages_expected:
+                break
+            if not page_pool:
+                partial_result = True
+                diagnostics.append(
+                    "eastmoney-yesterday-limit-up partial result: "
+                    f"page={page_index} was empty after {len(pool)} pool rows."
+                )
+                break
+        else:
+            if more_pages_expected:
+                partial_result = True
+                diagnostics.append(
+                    "eastmoney-yesterday-limit-up partial result: "
+                    f"fetched {len(pool)} of {expected_total or 'an unknown number of'} pool rows "
+                    f"within the {max_pages}-page request budget."
+                )
+
+        rows: list[dict] = []
+        for item in pool:
+            raw_change_key = "zdp"
+            raw_change = item.get("zdp")
+            if raw_change in (None, "", "--", "-"):
+                raw_change_key = "pct"
+                raw_change = item.get("pct")
+            if raw_change in (None, "", "--", "-"):
+                raw_change_key = "change_pct"
+                raw_change = item.get("change_pct")
+            row = {
+                "code": item.get("c") or item.get("code"),
+                "name": item.get("n") or item.get("name"),
+                "industry": (
+                    item.get("hybk_name")
+                    or item.get("hybk")
+                    or item.get("industry")
+                    or item.get("sector")
+                ),
+            }
+            row[raw_change_key] = raw_change
+            rows.append(row)
+        sectors = _aggregate_yesterday_limit_up_sectors(rows)
+        is_complete_empty_pool = expected_total == 0 and not pool
+        if not sectors and not is_complete_empty_pool:
+            diagnostics.append(
+                "eastmoney-yesterday-limit-up returned no valid pool rows "
+                f"for pool_date={target_date}, as_of_date={as_of_date}."
+            )
+            return []
+        if not partial_result:
+            with self._yesterday_sector_lock:
+                self._yesterday_sector_cache_date = target_date
+                self._yesterday_sector_cache = deepcopy(sectors)
+                self._yesterday_sector_cached_at = monotonic_time.monotonic()
+        else:
+            diagnostics.append("eastmoney-yesterday-limit-up partial result was not cached.")
+        diagnostics.append(
+            "eastmoney-yesterday-limit-up tracking loaded "
+            f"pool_date={target_date}, as_of_date={as_of_date}, sectors={len(sectors)}."
+        )
+        return sectors
+
+    def _fetch_cls_indexes(self, diagnostics: list[str] | None = None) -> list[MarketIndexQuote]:
+        diagnostics = diagnostics if diagnostics is not None else []
         try:
             payload = self._fetch_cls_home_payload()
-        except Exception:
+        except Exception as exc:
+            diagnostics.append(f"CLS home index source failed: {exc}")
             return []
-        rows = payload.get("data", {}).get("index_quote", []) if isinstance(payload, dict) else []
+        data = payload.get("data") if isinstance(payload, dict) else None
+        rows = data.get("index_quote") if isinstance(data, dict) else None
         if not isinstance(rows, list):
+            diagnostics.append("CLS home index source has no valid index_quote field.")
             return []
         quotes = [quote for row in rows if isinstance(row, dict) and (quote := _quote_from_cls_home(row))]
+        if not quotes:
+            diagnostics.append("CLS home index source returned no parseable index quotes.")
+            return []
         preferred = {symbol for symbol, _ in INDEXES}
         ordered = [quote for quote in quotes if quote.symbol in preferred]
         return ordered or quotes[: len(INDEXES)]
@@ -1041,7 +1465,7 @@ class RealtimeMarketProvider:
         cancel_event: Event | None = None,
     ) -> MarketBreadth | None:
         fetchers: list[tuple[str, Callable[[], MarketBreadth | None]]] = [
-            ("财联社涨跌分布", self._fetch_cls_breadth),
+            ("财联社涨跌分布", lambda: self._call_cls_breadth(diagnostics)),
             (
                 "同花顺市场总览",
                 lambda: self._call_ths_market_summary_breadth(diagnostics, deadline, cancel_event),
@@ -1072,10 +1496,20 @@ class RealtimeMarketProvider:
                 return breadth
         return None
 
-    def _fetch_cls_breadth(self) -> MarketBreadth | None:
+    def _call_cls_breadth(self, diagnostics: list[str]) -> MarketBreadth | None:
+        try:
+            return self._fetch_cls_breadth(diagnostics)
+        except TypeError:
+            return self._fetch_cls_breadth()
+
+    def _fetch_cls_breadth(self, diagnostics: list[str] | None = None) -> MarketBreadth | None:
+        diagnostics = diagnostics if diagnostics is not None else []
         payload = self._fetch_cls_home_payload()
-        distribution = payload.get("data", {}).get("up_down_dis", {}) if isinstance(payload, dict) else {}
-        return _breadth_from_cls_distribution(distribution)
+        data = payload.get("data", {}) if isinstance(payload, dict) else {}
+        breadth = _breadth_from_cls_home_data(data)
+        if breadth is None:
+            diagnostics.append("CLS home breadth source has no valid up_down_dis field.")
+        return breadth
 
     def _breadth_is_complete(
         self,

@@ -480,6 +480,40 @@ body {
   gap: 8px;
 }
 
+.cls-finance-diagnostics {
+  display: grid;
+  gap: 5px;
+  max-height: 120px;
+  margin: 0 0 10px;
+  border: 1px dashed #cfe0f5;
+  border-radius: 8px;
+  background: #f8fbff;
+  color: #526071;
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-y: auto;
+  overflow-wrap: anywhere;
+  overscroll-behavior: contain;
+}
+
+.cls-finance-diagnostics strong {
+  color: #1d4ed8;
+}
+
+.cls-finance-diagnostics span {
+  overflow-wrap: anywhere;
+}
+
+.cls-finance-diagnostics.is-stale {
+  border-color: #fed7aa;
+  background: #fff7ed;
+}
+
+.cls-finance-diagnostics.is-stale strong {
+  color: #b45309;
+}
+
 .cls-finance-detail-button {
   border-color: #f3b0a5;
   background: #fff7f3;
@@ -1619,6 +1653,8 @@ body {
 
 .data-center {
   grid-column: 1 / -1;
+  min-width: 0;
+  width: 100%;
 }
 
 .results-trades-grid {
@@ -1716,6 +1752,37 @@ button:hover {
   overflow-x: auto;
 }
 
+.data-center .table-wrap {
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: hidden;
+}
+
+.data-center table {
+  min-width: 0;
+  table-layout: fixed;
+}
+
+.data-center td {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.data-center .health-pill {
+  display: inline-block;
+  box-sizing: border-box;
+  max-width: 100%;
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.data-center td:last-child small {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
 .trades-scroll {
   flex: 1 1 0;
   min-height: 0;
@@ -1797,6 +1864,7 @@ td small {
 .service-summary {
   display: grid;
   gap: 4px;
+  min-width: 0;
 }
 
 .service-summary span {
@@ -1809,12 +1877,19 @@ td small {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 10px;
+  min-width: 0;
 }
 
 .service-actions {
   display: flex;
   gap: 10px;
   flex-wrap: wrap;
+  min-width: 0;
+}
+
+.service-actions button {
+  max-width: 100%;
+  white-space: normal;
 }
 
 .service-log-list {
@@ -1898,7 +1973,8 @@ td small {
   font-size: 12px;
   line-height: 1.4;
   margin-top: 3px;
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .coverage-details {

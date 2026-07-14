@@ -1352,7 +1352,7 @@ def test_service_realtime_market_snapshot_prefers_ths_concept_page_and_skips_eas
         assert response["strong_sectors"][0]["name"] == "电力设备"
         assert response["strong_sectors"][0]["source"] == "ths-concept-section"
         assert "沪市主板" not in [item["name"] for item in response["strong_sectors"]]
-        assert not any("eastmoney.com" in url for url, _ in requested_requests)
+        assert not any("eastmoney.com/api/qt/clist/get" in url for url, _ in requested_requests)
     finally:
         server.shutdown()
         thread.join(timeout=5)

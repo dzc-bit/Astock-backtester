@@ -22,6 +22,7 @@ INDEXES = [
 ]
 
 YESTERDAY_SECTOR_TRACKING_NOTE = "昨日强势板块追踪来自本地历史。"
+EASTMONEY_YESTERDAY_SECTOR_TRACKING_NOTE = "昨日强势板块追踪来自东方财富昨日涨停池。"
 
 BEIJING_TZ = timezone(timedelta(hours=8))
 
@@ -50,6 +51,7 @@ TENCENT_QUOTE_URL = "https://qt.gtimg.cn/q={symbols}"
 CLS_QUOTE_HOME_URL = f"{CLS_QUOTE_BASE_URL}/quote/index/home"
 CLS_HOT_PLATE_URL = f"{CLS_QUOTE_BASE_URL}/web_quote/plate/hot_plate"
 EASTMONEY_A_SPOT_URL = "https://82.push2.eastmoney.com/api/qt/clist/get"
+EASTMONEY_YESTERDAY_LIMIT_UP_URL = "https://push2ex.eastmoney.com/getYesterdayZTPool"
 EASTMONEY_SECTOR_URLS = [
     "https://push2.eastmoney.com/api/qt/clist/get",
     "https://82.push2.eastmoney.com/api/qt/clist/get",
@@ -74,7 +76,7 @@ THS_GENERIC_TOPICS = {
 
 
 def parse_int(value: object) -> int | None:
-    text = str(value or "").strip().replace(",", "")
+    text = str("" if value is None else value).strip().replace(",", "")
     match = re.search(r"-?\d+", text)
     if not match:
         return None
@@ -85,7 +87,7 @@ def parse_int(value: object) -> int | None:
 
 
 def parse_float(value: object) -> float | None:
-    text = str(value or "").strip().replace("%", "").replace(",", "")
+    text = str("" if value is None else value).strip().replace("%", "").replace(",", "")
     if not text:
         return None
     try:
@@ -293,6 +295,19 @@ def breadth_from_cls_distribution(data: dict) -> MarketBreadth | None:
     )
 
 
+def breadth_from_cls_home_data(data: dict) -> MarketBreadth | None:
+    """Read the full-market distribution embedded in the CLS home payload.
+
+    The home response also contains per-index constituent counts.  Those are
+    intentionally ignored here because they are not a full A-share breadth
+    snapshot.
+    """
+    if not isinstance(data, dict):
+        return None
+    distribution = data.get("up_down_dis")
+    return breadth_from_cls_distribution(distribution) if isinstance(distribution, dict) else None
+
+
 def sector_rows_from_cls_hot_plate(payload: dict) -> list[dict]:
     data = payload.get("data") if isinstance(payload, dict) else None
     if not isinstance(data, dict):
@@ -319,6 +334,79 @@ def sector_rows_from_cls_hot_plate(payload: dict) -> list[dict]:
     return rows
 
 
+def aggregate_yesterday_limit_up_sectors(
+    rows: Iterable[dict],
+    *,
+    source: str = "eastmoney-yesterday-limit-up",
+) -> list[SectorMover]:
+    """Aggregate yesterday's limit-up pool by its reported industry.
+
+    ``change_pct`` is the average follow-through move supplied by the pool
+    endpoint.  It is a tracking signal, not a substitute for a live sector
+    quote, so the source remains explicit in the returned model.
+    """
+    grouped: dict[str, dict[str, object]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        name = ""
+        for key in ("industry", "sector", "plate", "hybk", "name"):
+            candidate = str(row.get(key) or "").strip()
+            if candidate:
+                name = candidate
+                break
+        if not name:
+            continue
+        raw_change = None
+        raw_change_key = None
+        for key in ("zdp", "pct", "change_pct", "change"):
+            if row.get(key) not in (None, "", "--", "-"):
+                raw_change = row.get(key)
+                raw_change_key = key
+                break
+        if raw_change_key == "zdp":
+            value = parse_float(raw_change)
+            change_pct = value / 100 if value is not None else None
+        else:
+            change_pct = normalize_change_pct(raw_change)
+        if change_pct is None:
+            continue
+        symbol = normalize_symbol(str(row.get("code") or row.get("symbol") or ""))
+        item = grouped.setdefault(
+            name,
+            {
+                "count": 0,
+                "change_sum": 0.0,
+                "leading_symbol": None,
+                "leading_change": float("-inf"),
+            },
+        )
+        item["count"] = int(item["count"]) + 1
+        item["change_sum"] = float(item["change_sum"]) + change_pct
+        if symbol and change_pct > float(item["leading_change"]):
+            item["leading_symbol"] = symbol
+            item["leading_change"] = change_pct
+
+    ranked = sorted(
+        grouped.items(),
+        key=lambda pair: (
+            int(pair[1]["count"]),
+            float(pair[1]["change_sum"]) / int(pair[1]["count"]),
+            pair[0],
+        ),
+        reverse=True,
+    )
+    return [
+        SectorMover(
+            name=name,
+            change_pct=float(item["change_sum"]) / int(item["count"]),
+            leading_symbol=item["leading_symbol"] or None,
+            source=source,
+        )
+        for name, item in ranked[:10]
+    ]
+
+
 def dedupe_sectors(groups: Iterable[SectorMover], limit: int = 10) -> list[SectorMover]:
     sectors: list[SectorMover] = []
     seen: set[str] = set()
@@ -333,9 +421,21 @@ def dedupe_sectors(groups: Iterable[SectorMover], limit: int = 10) -> list[Secto
 
 
 def append_yesterday_sector_note(message: str, yesterday_sectors: list[SectorMover]) -> str:
-    if not yesterday_sectors or message.endswith(YESTERDAY_SECTOR_TRACKING_NOTE):
+    known_notes = (YESTERDAY_SECTOR_TRACKING_NOTE, EASTMONEY_YESTERDAY_SECTOR_TRACKING_NOTE)
+    while matching_note := next((item for item in known_notes if message.endswith(item)), None):
+        message = message[: -len(matching_note)].rstrip()
+    if not yesterday_sectors:
         return message
-    return f"{message} {YESTERDAY_SECTOR_TRACKING_NOTE}"
+    sources = unique_sources(sector.source for sector in yesterday_sectors)
+    if "eastmoney-yesterday-limit-up" in sources:
+        note = EASTMONEY_YESTERDAY_SECTOR_TRACKING_NOTE
+    elif any(source.startswith("local-") or source == "local" for source in sources):
+        note = YESTERDAY_SECTOR_TRACKING_NOTE
+    elif sources:
+        note = f"昨日强势板块追踪来源：{'、'.join(sources)}。"
+    else:
+        note = "昨日强势板块追踪来源未标记。"
+    return f"{message} {note}" if message else note
 
 
 def unique_sources(values: Iterable[str | None]) -> list[str]:

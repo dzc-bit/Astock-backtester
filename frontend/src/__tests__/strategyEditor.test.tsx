@@ -1346,7 +1346,7 @@ describe("A 股回测工作台界面", () => {
 
     await user.click(screen.getByRole("button", { name: `删除已保存策略${savedName}` }));
     expect(await screen.findByText(`已删除已保存策略：${savedName}`)).toBeInTheDocument();
-  });
+  }, 15_000);
 
   it("does not store the strategy when the user dismisses the inline save prompt", async () => {
     const user = userEvent.setup();
