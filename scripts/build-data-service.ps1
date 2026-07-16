@@ -6,9 +6,12 @@ $ErrorActionPreference = "Stop"
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $bundledPython = Join-Path $repoRoot ".tools\python-3.11.9\python.exe"
+$projectPython = Join-Path $repoRoot ".tools\python-build\Scripts\python.exe"
 if (-not $Python) {
   if (Test-Path $bundledPython) {
     $Python = $bundledPython
+  } elseif (Test-Path $projectPython) {
+    $Python = $projectPython
   } else {
     $Python = "python"
   }
