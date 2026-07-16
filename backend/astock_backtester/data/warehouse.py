@@ -11,7 +11,6 @@ import pyarrow.parquet as pq
 from astock_backtester.data.importer import normalize_daily_bars
 from astock_backtester.models import DatasetCoverage
 
-
 OHLC_COLUMNS = ["open", "high", "low", "close"]
 KNOWN_CAPITAL_FLOW_SOURCE_GAP_DATES = {
     pd.Timestamp("2018-08-07"),
@@ -143,7 +142,7 @@ class Warehouse:
         for path in paths:
             try:
                 available_columns = set(pq.ParquetFile(path).schema_arrow.names)
-            except Exception:
+            except FileNotFoundError:
                 continue
             selected_columns = ["symbol"]
             if start_date or end_date:
@@ -247,7 +246,7 @@ class Warehouse:
         for path in paths:
             try:
                 available_columns = set(pq.ParquetFile(path).schema_arrow.names)
-            except Exception:
+            except FileNotFoundError:
                 continue
             selected_columns = [column for column in wanted_columns if column in available_columns]
             if "symbol" not in selected_columns or "trade_date" not in selected_columns:
@@ -386,7 +385,7 @@ class Warehouse:
     def _safe_read_parquet(self, path: Path, **kwargs) -> pd.DataFrame:
         try:
             return pd.read_parquet(path, **kwargs)
-        except Exception:
+        except FileNotFoundError:
             return pd.DataFrame()
 
 

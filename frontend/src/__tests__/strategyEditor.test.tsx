@@ -73,6 +73,14 @@ const demoResult = {
   preflight_issues: []
 };
 
+async function flushAsyncEffects(): Promise<void> {
+  await act(async () => {
+    for (let index = 0; index < 10; index += 1) {
+      await Promise.resolve();
+    }
+  });
+}
+
 describe("A 股回测工作台界面", () => {
   beforeEach(() => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
@@ -410,6 +418,151 @@ describe("A 股回测工作台界面", () => {
     expect(await screen.findByRole("heading", { name: "资讯与事件" })).toBeInTheDocument();
     expect(screen.getAllByText("政策利好推动科技板块走强").length).toBeGreaterThan(0);
     expect(await screen.findByText("日线行情")).toBeInTheDocument();
+  });
+
+  it("不会让慢速推荐策略阻塞其他首屏行情板块", async () => {
+    apiMocks.loadRecommendedStrategies.mockImplementation(() => new Promise(() => undefined));
+
+    render(<App />);
+
+    await waitFor(() => expect(apiMocks.loadClsFinance).toHaveBeenCalled());
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(screen.getByText("PCB")).toBeInTheDocument();
+    expect(screen.getAllByText("政策利好推动科技板块走强").length).toBeGreaterThan(0);
+  });
+
+  it("会独立重试失败的推荐策略，并在覆盖更新后重新读取", async () => {
+    vi.useRealTimers();
+    vi.useFakeTimers();
+    vi.clearAllMocks();
+    let releaseHealth: () => void = () => {};
+    apiMocks.loadDataServiceHealth.mockImplementationOnce(() => new Promise((resolve) => {
+      releaseHealth = () => resolve({
+        ok: true,
+        cache_path: "C:\\cache",
+        port: 9010,
+        coverage: [
+          { dataset: "daily_bars", symbols: 2, start_date: "2024-01-02", end_date: "2024-01-08", missing_rows: 0 }
+        ]
+      });
+    }));
+    apiMocks.loadRecommendedStrategies.mockRejectedValueOnce(new Error("recommendations starting"));
+
+    render(<App />);
+
+    await flushAsyncEffects();
+    expect(apiMocks.loadRecommendedStrategies).toHaveBeenCalledTimes(1);
+    expect(apiMocks.loadMarketNews).toHaveBeenCalledTimes(1);
+    expect(apiMocks.loadClsFinance).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2_999);
+    });
+    expect(apiMocks.loadRecommendedStrategies).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    await flushAsyncEffects();
+    expect(apiMocks.loadRecommendedStrategies).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      releaseHealth();
+      await Promise.resolve();
+    });
+    await flushAsyncEffects();
+    expect(apiMocks.loadRecommendedStrategies).toHaveBeenCalledTimes(3);
+  });
+
+  it("uses the three-second market retry when yesterday tracking is still running", async () => {
+    vi.useRealTimers();
+    vi.useFakeTimers();
+    vi.clearAllMocks();
+    const pendingSnapshot = {
+      status: "live",
+      source: "test",
+      updated_at: "2026-05-27T10:30:00Z",
+      market_phase: "trading",
+      indexes: [],
+      breadth: null,
+      strong_sectors: [],
+      yesterday_strong_sectors: [],
+      message: "昨日涨停板块仍在加载",
+      diagnostics: ["eastmoney-yesterday-limit-up tracking refresh scheduled in background."]
+    };
+    apiMocks.loadRealtimeMarketSnapshot.mockResolvedValue(pendingSnapshot);
+    apiMocks.loadRealtimeMarketSnapshotStream.mockImplementation(async (_baseUrl, handlers = {}) => {
+      handlers.onSnapshot?.(pendingSnapshot);
+      return pendingSnapshot;
+    });
+
+    render(<App />);
+
+    await flushAsyncEffects();
+    expect(apiMocks.loadRealtimeMarketSnapshotStream).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2_999);
+    });
+    expect(apiMocks.loadRealtimeMarketSnapshotStream).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    await flushAsyncEffects();
+    expect(apiMocks.loadRealtimeMarketSnapshotStream).toHaveBeenCalledTimes(2);
+  });
+
+  it("retries failed independent first-screen modules after three seconds without duplicate requests", async () => {
+    vi.useRealTimers();
+    vi.useFakeTimers();
+    vi.clearAllMocks();
+    apiMocks.loadMarketNews.mockRejectedValueOnce(new Error("news starting"));
+    apiMocks.loadClsFinance.mockRejectedValueOnce(new Error("finance starting"));
+    apiMocks.loadNewsSummary.mockRejectedValueOnce(new Error("summary starting"));
+    apiMocks.loadRiskAlerts.mockRejectedValueOnce(new Error("risk starting"));
+    const failedBriefings = new Set(["fupan", "zaopan"]);
+    apiMocks.loadMarketBriefing.mockImplementation((_baseUrl, kind) => {
+      if (failedBriefings.delete(kind)) {
+        return Promise.reject(new Error(`${kind} starting`));
+      }
+      return Promise.resolve({
+        kind,
+        updated_at: "2026-05-27T10:30:00Z",
+        source: "retry-test",
+        summary: "",
+        sections: [],
+        diagnostics: []
+      });
+    });
+
+    render(<App />);
+
+    await flushAsyncEffects();
+    expect(apiMocks.loadMarketNews).toHaveBeenCalledTimes(1);
+    expect(apiMocks.loadMarketBriefing).toHaveBeenCalledTimes(2);
+    expect(apiMocks.loadClsFinance).toHaveBeenCalledTimes(1);
+    expect(apiMocks.loadNewsSummary).toHaveBeenCalledTimes(1);
+    expect(apiMocks.loadRiskAlerts).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2_999);
+    });
+    expect(apiMocks.loadMarketNews).toHaveBeenCalledTimes(1);
+    expect(apiMocks.loadMarketBriefing).toHaveBeenCalledTimes(2);
+    expect(apiMocks.loadClsFinance).toHaveBeenCalledTimes(1);
+    expect(apiMocks.loadNewsSummary).toHaveBeenCalledTimes(1);
+    expect(apiMocks.loadRiskAlerts).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    await flushAsyncEffects();
+    expect(apiMocks.loadMarketNews).toHaveBeenCalledTimes(2);
+    expect(apiMocks.loadMarketBriefing).toHaveBeenCalledTimes(4);
+    expect(apiMocks.loadClsFinance).toHaveBeenCalledTimes(2);
+    expect(apiMocks.loadNewsSummary).toHaveBeenCalledTimes(2);
+    expect(apiMocks.loadRiskAlerts).toHaveBeenCalledTimes(2);
   });
 
   it("aborts the active realtime stream when the workspace unmounts", async () => {

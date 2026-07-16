@@ -1494,6 +1494,10 @@ class RealtimeMarketProvider:
                 lambda: self._call_cls_breadth(diagnostics, deadline, cancel_event),
             ),
             (
+                "同花顺市场总览",
+                lambda: self._call_ths_market_summary_breadth(diagnostics, deadline, cancel_event),
+            ),
+            (
                 "同花顺涨跌分布",
                 lambda: self._fetch_ths_indexflash_breadth(diagnostics, deadline, cancel_event),
             ),

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import logging
 import time
 
+import astock_backtester.data.risk as risk_module
 import pandas as pd
-
 from astock_backtester.data.risk import RiskAlertProvider
 from astock_backtester.data.warehouse import Warehouse
 
@@ -27,6 +28,21 @@ class FakeTextResponse:
 
     def json(self) -> dict:
         return {}
+
+
+def test_risk_provider_logs_packaged_watchlist_lookup_failure(tmp_path, monkeypatch, caplog):
+    provider = RiskAlertProvider(Warehouse(tmp_path), include_packaged_watchlist=True)
+
+    def missing_package_resources(*_args, **_kwargs):
+        raise RuntimeError("package resources unavailable")
+
+    monkeypatch.setattr(risk_module.resources, "files", missing_package_resources)
+
+    with caplog.at_level(logging.WARNING, logger="astock_backtester.data.risk"):
+        paths = provider._watchlist_paths()
+
+    assert len(paths) == 1
+    assert "packaged risk watchlist" in caplog.text
 
 
 def test_risk_provider_uses_short_external_timeout(tmp_path):

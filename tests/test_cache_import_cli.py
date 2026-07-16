@@ -1,7 +1,9 @@
+import logging
+
+from astock_backtester.cli import handle_command
 from astock_backtester.data.cache import LocalCache
 from astock_backtester.data.importer import normalize_daily_bars
 from astock_backtester.sample_data import sample_daily_bars
-from astock_backtester.cli import handle_command
 
 
 def test_normalize_daily_bars_accepts_required_columns():
@@ -35,15 +37,17 @@ def test_local_cache_reports_dataset_coverage(tmp_path):
     assert str(daily.start_date) == "2024-01-02"
 
 
-def test_local_cache_ignores_corrupt_daily_bars_parquet(tmp_path):
+def test_local_cache_logs_corrupt_daily_bars_parquet(tmp_path, caplog):
     cache = LocalCache(tmp_path)
     cache.daily_bars_path.write_bytes(b"not a parquet file")
 
-    loaded = cache.read_daily_bars()
-    coverage = cache.coverage()
+    with caplog.at_level(logging.WARNING, logger="astock_backtester.data.cache"):
+        loaded = cache.read_daily_bars()
+        coverage = cache.coverage()
 
     assert loaded.empty
     assert all(item.symbols == 0 for item in coverage)
+    assert "cached daily-bars parquet" in caplog.text
 
 
 def test_cli_coverage_command_returns_daily_bars_dataset(tmp_path):

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import logging
 import re
-from importlib import resources
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from importlib import resources
 from typing import Callable
 
 import pandas as pd
@@ -14,7 +16,7 @@ from astock_backtester.data.providers import normalize_symbol
 from astock_backtester.data.warehouse import Warehouse
 from astock_backtester.models import RiskAlertItem, RiskAlertsResponse
 
-
+logger = logging.getLogger(__name__)
 _SINA_SIMPLE_QUOTE_RE = re.compile(r'hq_str_s_(?:sh|sz|bj)(?P<symbol>\d{6})="(?P<body>[^"]*)"')
 
 
@@ -141,8 +143,8 @@ class RiskAlertProvider:
         if self.include_packaged_watchlist:
             try:
                 paths.append(resources.files("astock_backtester.data").joinpath("potential_risk_watchlist.csv"))
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("packaged risk watchlist lookup failed: %s", exc, exc_info=True)
         return paths
 
     def _read_watchlist_frame(self) -> pd.DataFrame:
