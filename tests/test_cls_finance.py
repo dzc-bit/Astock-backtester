@@ -75,6 +75,47 @@ def _finance_payloads():
     }
 
 
+def test_cls_finance_tline_explicitly_requests_the_shanghai_index():
+    requested_params = {}
+
+    def requester(_url, **kwargs):
+        requested_params.update(kwargs["params"])
+        return _FakeResponse(
+            {"code": 200, "data": [{"date": 20260714, "minute": 930, "last_px": 3960}]}
+        )
+
+    points = ClsFinanceProvider(requester=requester)._read_tline([])
+
+    assert points
+    assert requested_params["secu_code"] == "sh000001"
+
+
+def test_cls_finance_tline_sorts_points_by_date_and_minute():
+    def requester(_url, **_kwargs):
+        return _FakeResponse(
+            {
+                "code": 200,
+                "data": [
+                    {"date": 20260715, "minute": 1300, "last_px": 3970},
+                    {"date": 20260714, "minute": 1500, "last_px": 3960},
+                    {"date": 20260715, "minute": 930, "last_px": 3950},
+                    {"date": 20260714, "minute": 930, "last_px": 3940},
+                    {"date": 20260715, "minute": 930, "last_px": 3951},
+                ],
+            }
+        )
+
+    points = ClsFinanceProvider(requester=requester)._read_tline([])
+
+    assert [(point.date, point.minute, point.last_px) for point in points] == [
+        (20260714, 930, 3940),
+        (20260714, 1500, 3960),
+        (20260715, 930, 3950),
+        (20260715, 930, 3951),
+        (20260715, 1300, 3970),
+    ]
+
+
 def test_cls_finance_reuses_recent_success_after_transient_source_failure():
     payloads = _finance_payloads()
     should_fail = False

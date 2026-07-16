@@ -2,20 +2,30 @@ from __future__ import annotations
 
 import json
 import os
-import time
 import threading
+import time
 from types import SimpleNamespace
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 import pandas as pd
-
-from astock_backtester.sample_data import sample_daily_bars
+from astock_backtester.data.news import _parse_time
 from astock_backtester.data.realtime import HeavyMarketCrawlerProvider, RealtimeMarketProvider
 from astock_backtester.data.warehouse import Warehouse
-from astock_backtester.data.news import _parse_time
-from astock_backtester.models import DatasetCoverage, MarketBreadth, MarketIndexQuote, RealtimeMarketSnapshot, SectorMover
-from astock_backtester.service import ClientDisconnected, DataServiceHandler, create_server
+from astock_backtester.models import (
+    DatasetCoverage,
+    MarketBreadth,
+    MarketIndexQuote,
+    RealtimeMarketSnapshot,
+    SectorMover,
+)
+from astock_backtester.sample_data import sample_daily_bars
+from astock_backtester.service import (
+    ClientDisconnected,
+    DataServiceHandler,
+    DataServiceState,
+    create_server,
+)
 
 
 def _request_json(method: str, url: str, payload: dict | None = None) -> dict:
@@ -127,6 +137,56 @@ def test_service_health_returns_json_when_warehouse_coverage_fails(tmp_path):
     finally:
         server.shutdown()
         thread.join(timeout=5)
+
+
+def test_service_state_records_warehouse_coverage_failure_before_cache_fallback(
+    tmp_path,
+    monkeypatch,
+):
+    state = DataServiceState(tmp_path, port=0)
+
+    def broken_coverage():
+        raise OSError("corrupt warehouse partition")
+
+    monkeypatch.setattr(state.warehouse, "coverage", broken_coverage)
+
+    state._read_coverage_snapshot()
+
+    assert any("warehouse coverage read failed" in item["message"] for item in state.logs)
+
+
+def test_capital_flow_backfill_records_symbol_source_failure_before_provider_fallback(
+    tmp_path,
+    monkeypatch,
+):
+    state = DataServiceState(tmp_path, port=0)
+
+    def broken_symbols(**_kwargs):
+        raise OSError("corrupt warehouse partition")
+
+    monkeypatch.setattr(state.warehouse, "read_daily_symbols", broken_symbols)
+    monkeypatch.setattr(state.provider, "list_symbols", lambda: ["000001"])
+    handler = object.__new__(DataServiceHandler)
+    handler.server = SimpleNamespace(state=state)
+
+    assert handler._capital_flow_backfill_symbols() == ["000001"]
+    assert any("capital-flow symbol read failed" in item["message"] for item in state.logs)
+
+
+def test_sync_symbols_records_internal_attribute_error_before_provider_fallback(
+    tmp_path,
+    monkeypatch,
+):
+    state = DataServiceState(tmp_path, port=0)
+
+    def broken_symbols(**_kwargs):
+        raise AttributeError("broken warehouse schema")
+
+    monkeypatch.setattr(state.warehouse, "read_daily_symbols", broken_symbols)
+    monkeypatch.setattr(state.provider, "list_symbols", lambda: ["000001"])
+
+    assert state.sync_symbols(None, None) == ["000001"]
+    assert any("warehouse symbol read failed" in item["message"] for item in state.logs)
 
 
 def test_service_ping_is_lightweight(tmp_path):
@@ -1033,7 +1093,12 @@ def test_service_backtest_stream_reads_warmup_history_before_requested_start(tmp
 
 
 def test_service_streams_serialized_trade_blocked_event(tmp_path, basic_settings):
-    from astock_backtester.models import ConditionGroup, ConditionNode, ConditionOperator, StrategyConfig
+    from astock_backtester.models import (
+        ConditionGroup,
+        ConditionNode,
+        ConditionOperator,
+        StrategyConfig,
+    )
 
     frame = pd.DataFrame(
         [
@@ -4048,6 +4113,9 @@ def test_service_returns_recommended_strategies(tmp_path):
             }
         )
     )
+    refresh_finished = server.state._start_coverage_refresh(force=True)
+    assert refresh_finished is not None
+    assert refresh_finished.wait(timeout=5)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -4061,6 +4129,35 @@ def test_service_returns_recommended_strategies(tmp_path):
         assert "极端追高压力测试" not in names
         assert response["items"][0]["strategy"]["entry_groups"][0]["conditions"]
         assert response["items"][0]["example_conditions"]
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_service_recommended_strategies_use_the_cached_coverage_snapshot(tmp_path, monkeypatch):
+    from astock_backtester.models import DatasetCoverage
+
+    server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
+    with server.state._coverage_lock:
+        server.state._coverage_snapshot = [
+            DatasetCoverage(dataset="daily_bars", symbols=1, start_date="2024-01-02", end_date="2024-01-03", missing_rows=0),
+            DatasetCoverage(dataset="market_cap", symbols=1, start_date="2024-01-02", end_date="2024-01-03", missing_rows=0),
+            DatasetCoverage(dataset="capital_flow", symbols=0, start_date=None, end_date=None, missing_rows=0),
+        ]
+
+    def coverage_must_not_run():
+        raise AssertionError("recommended strategies must use the service coverage snapshot")
+
+    monkeypatch.setattr(server.state.warehouse, "coverage", coverage_must_not_run)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        response = _request_json("GET", f"http://127.0.0.1:{port}/strategy/recommended")
+
+        names = [item["name"] for item in response["items"]]
+        assert "放量突破" in names
+        assert "资金趋势跟随" not in names
     finally:
         server.shutdown()
         thread.join(timeout=5)

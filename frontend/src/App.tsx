@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 import { Activity, Database, Flame, Gauge, ShieldAlert } from "lucide-react";
 import {
   loadClsFinance,
@@ -31,7 +31,12 @@ import { StrategyWorkbench } from "./components/StrategyWorkbench";
 import { TradesTable } from "./components/TradesTable";
 import { TonghuashunBriefingPanel } from "./components/TonghuashunBriefingPanel";
 import { UpdatePanel } from "./components/UpdatePanel";
-import { detectMarketSessionPhase, initialMarketRefreshMeta, refreshIntervalForPhase } from "./marketRefresh";
+import {
+  detectMarketSessionPhase,
+  initialMarketRefreshMeta,
+  refreshIntervalForMarketResult,
+  refreshIntervalForPhase
+} from "./marketRefresh";
 import { defaultSettings, defaultStrategy } from "./strategyDefaults";
 import type {
   BacktestResult,
@@ -118,6 +123,51 @@ function recentTradingDateRangeEnding(endDate: string, days = 5): { startDate: s
     }
   }
   return { startDate: formatLocalDate(start), endDate };
+}
+
+const INDEPENDENT_MODULE_REFRESH_MS = 120_000;
+const INDEPENDENT_MODULE_RETRY_MS = 3_000;
+
+type IndependentModuleLoader = (isCancelled: () => boolean) => Promise<boolean>;
+
+function useIndependentModuleRefresh(enabled: boolean, loader: IndependentModuleLoader): void {
+  useEffect(() => {
+    if (!enabled) {
+      return;
+    }
+    let cancelled = false;
+    let inFlight = false;
+    let timer: number | undefined;
+
+    const refresh = async () => {
+      if (cancelled || inFlight) {
+        return;
+      }
+      inFlight = true;
+      let succeeded = false;
+      try {
+        succeeded = await loader(() => cancelled);
+      } catch {
+        succeeded = false;
+      } finally {
+        inFlight = false;
+        if (!cancelled) {
+          timer = window.setTimeout(
+            refresh,
+            succeeded ? INDEPENDENT_MODULE_REFRESH_MS : INDEPENDENT_MODULE_RETRY_MS
+          );
+        }
+      }
+    };
+
+    void refresh();
+    return () => {
+      cancelled = true;
+      if (timer !== undefined) {
+        window.clearTimeout(timer);
+      }
+    };
+  }, [enabled, loader]);
 }
 
 function latestDailyCoverage(coverage: DatasetCoverage[]): DatasetCoverage | undefined {
@@ -270,6 +320,8 @@ export function App() {
   const [fupanBriefing, setFupanBriefing] = useState<MarketBriefingResponse | null>(null);
   const [zaopanBriefing, setZaopanBriefing] = useState<MarketBriefingResponse | null>(null);
   const [isLoadingNews, setIsLoadingNews] = useState(false);
+  const [isLoadingClsFinance, setIsLoadingClsFinance] = useState(false);
+  const [isLoadingNewsSummary, setIsLoadingNewsSummary] = useState(false);
   const [riskAlerts, setRiskAlerts] = useState<RiskAlertsResponse | null>(null);
   const [isLoadingRiskAlerts, setIsLoadingRiskAlerts] = useState(false);
   const [riskModalOpen, setRiskModalOpen] = useState(false);
@@ -470,9 +522,14 @@ export function App() {
           }
           setMarketSnapshot((current) => (snapshot.status === "unavailable" && current ? current : snapshot));
           const nextPhase = snapshot.market_phase ?? phase;
+          const nextInterval = refreshIntervalForMarketResult(
+            nextPhase,
+            snapshot.diagnostics,
+            snapshot.status === "unavailable"
+          );
+          nextRefreshMs = nextInterval;
           setMarketRefreshMeta((current) => {
             const usingLastSuccess = snapshot.status === "unavailable" && Boolean(current.last_success_at);
-            nextRefreshMs = refreshIntervalForPhase(nextPhase, snapshot.status === "unavailable");
             return {
               phase: nextPhase,
               status: isPartial ? "refreshing" : usingLastSuccess ? "using_last_success" : snapshot.status === "unavailable" ? "unavailable" : "idle",
@@ -492,7 +549,7 @@ export function App() {
                   ? current.last_success_at ?? null
                   : snapshot.updated_at,
               last_error: snapshot.status === "unavailable" ? snapshot.message : undefined,
-              next_refresh_ms: nextRefreshMs
+              next_refresh_ms: nextInterval
             };
           });
         };
@@ -509,9 +566,14 @@ export function App() {
           if (!cancelled) {
             setMarketSnapshot((current) => (snapshot.status === "unavailable" && current ? current : snapshot));
             const nextPhase = snapshot.market_phase ?? phase;
+            const nextInterval = refreshIntervalForMarketResult(
+              nextPhase,
+              snapshot.diagnostics,
+              snapshot.status === "unavailable"
+            );
+            nextRefreshMs = nextInterval;
             setMarketRefreshMeta((current) => {
               const usingLastSuccess = snapshot.status === "unavailable" && Boolean(current.last_success_at);
-              nextRefreshMs = refreshIntervalForPhase(nextPhase, snapshot.status === "unavailable");
               return {
                 phase: nextPhase,
                 status: usingLastSuccess ? "using_last_success" : snapshot.status === "unavailable" ? "unavailable" : "idle",
@@ -525,7 +587,7 @@ export function App() {
                         : "非交易时段，使用最近数据",
                 last_success_at: snapshot.status === "unavailable" ? current.last_success_at ?? null : snapshot.updated_at,
                 last_error: snapshot.status === "unavailable" ? snapshot.message : undefined,
-                next_refresh_ms: nextRefreshMs
+                next_refresh_ms: nextInterval
               };
             });
           }
@@ -567,49 +629,144 @@ export function App() {
     };
   }, [dataService]);
 
-  const refreshNews = async () => {
+  const loadNews = useCallback(async (isCancelled: () => boolean): Promise<boolean> => {
     if (!dataService) {
-      return;
+      return false;
     }
     setIsLoadingNews(true);
     try {
-      const [newsResult, fupanResult, zaopanResult, financeResult, summaryResult] = await Promise.allSettled([
-        loadMarketNews(dataService.base_url),
-        loadMarketBriefing(dataService.base_url, "fupan"),
-        loadMarketBriefing(dataService.base_url, "zaopan"),
-        loadClsFinance(dataService.base_url),
-        loadNewsSummary(dataService.base_url)
-      ]);
-      if (newsResult.status === "fulfilled") {
-        setMarketNews(newsResult.value);
+      const response = await loadMarketNews(dataService.base_url);
+      if (!isCancelled()) {
+        setMarketNews(response);
       }
-      if (fupanResult.status === "fulfilled") {
-        setFupanBriefing(fupanResult.value);
-      }
-      if (zaopanResult.status === "fulfilled") {
-        setZaopanBriefing(zaopanResult.value);
-      }
-      if (financeResult.status === "fulfilled") {
-        setClsFinance(financeResult.value);
-      }
-      if (summaryResult.status === "fulfilled") {
-        setNewsSummary(summaryResult.value);
-      }
+      return true;
+    } catch {
+      // Keep the last successful news list visible while this module retries.
+      return false;
     } finally {
-      setIsLoadingNews(false);
+      if (!isCancelled()) {
+        setIsLoadingNews(false);
+      }
     }
+  }, [dataService]);
+
+  const refreshNews = () => {
+    void loadNews(() => false);
   };
 
-  const refreshRiskAlerts = async () => {
+  const loadFupan = useCallback(async (isCancelled: () => boolean): Promise<boolean> => {
     if (!dataService) {
-      return;
+      return false;
+    }
+    try {
+      const response = await loadMarketBriefing(dataService.base_url, "fupan");
+      if (!isCancelled() && response) {
+        setFupanBriefing(response);
+      }
+      return Boolean(response);
+    } catch {
+      // Fupan keeps its latest independent result.
+      return false;
+    }
+  }, [dataService]);
+
+  const loadZaopan = useCallback(async (isCancelled: () => boolean): Promise<boolean> => {
+    if (!dataService) {
+      return false;
+    }
+    try {
+      const response = await loadMarketBriefing(dataService.base_url, "zaopan");
+      if (!isCancelled() && response) {
+        setZaopanBriefing(response);
+      }
+      return Boolean(response);
+    } catch {
+      // Zaopan keeps its latest independent result.
+      return false;
+    }
+  }, [dataService]);
+
+  const loadFinance = useCallback(async (isCancelled: () => boolean): Promise<boolean> => {
+    if (!dataService) {
+      return false;
+    }
+    setIsLoadingClsFinance(true);
+    try {
+      const response = await loadClsFinance(dataService.base_url);
+      if (!isCancelled()) {
+        setClsFinance(response);
+      }
+      return true;
+    } catch {
+      // Finance data is independent from news and retains its last response.
+      return false;
+    } finally {
+      if (!isCancelled()) {
+        setIsLoadingClsFinance(false);
+      }
+    }
+  }, [dataService]);
+
+  const loadSummary = useCallback(async (isCancelled: () => boolean): Promise<boolean> => {
+    if (!dataService) {
+      return false;
+    }
+    setIsLoadingNewsSummary(true);
+    try {
+      const response = await loadNewsSummary(dataService.base_url);
+      if (!isCancelled()) {
+        setNewsSummary(response);
+      }
+      return true;
+    } catch {
+      // The summary is allowed to lag independently of the source news list.
+      return false;
+    } finally {
+      if (!isCancelled()) {
+        setIsLoadingNewsSummary(false);
+      }
+    }
+  }, [dataService]);
+
+  const loadRiskAlertData = useCallback(async (isCancelled: () => boolean): Promise<boolean> => {
+    if (!dataService) {
+      return false;
     }
     setIsLoadingRiskAlerts(true);
     try {
-      setRiskAlerts(await loadRiskAlerts(dataService.base_url));
+      const response = await loadRiskAlerts(dataService.base_url);
+      if (!isCancelled()) {
+        setRiskAlerts(response);
+      }
+      return true;
+    } catch {
+      // Preserve the last risk result when only this endpoint fails.
+      return false;
     } finally {
-      setIsLoadingRiskAlerts(false);
+      if (!isCancelled()) {
+        setIsLoadingRiskAlerts(false);
+      }
     }
+  }, [dataService]);
+
+  const loadRecommendations = useCallback(async (isCancelled: () => boolean): Promise<boolean> => {
+    if (!dataService) {
+      return false;
+    }
+    try {
+      const response = await loadRecommendedStrategies(dataService.base_url);
+      if (!isCancelled() && response) {
+        setRecommendedStrategies(response.items);
+      }
+      return Boolean(response);
+    } catch {
+      // Recommendations remain independent when the cached coverage snapshot is refreshing.
+      return false;
+    }
+  }, [coverage, dataService]);
+
+  const refreshRiskAlerts = () => {
+    void loadRiskAlertData(() => false);
   };
 
   const validateConditionText = async (text: string, mode: "entry" | "exit" = "entry"): Promise<ConditionValidationResult> => {
@@ -686,56 +843,13 @@ export function App() {
     }
   };
 
-  useEffect(() => {
-    if (!dataService) {
-      return;
-    }
-    let cancelled = false;
-    const loadAuxiliaryData = async () => {
-      const [newsResult, fupanResult, zaopanResult, financeResult, summaryResult, riskResult, recommendedResult] = await Promise.allSettled([
-        loadMarketNews(dataService.base_url),
-        loadMarketBriefing(dataService.base_url, "fupan"),
-        loadMarketBriefing(dataService.base_url, "zaopan"),
-        loadClsFinance(dataService.base_url),
-        loadNewsSummary(dataService.base_url),
-        loadRiskAlerts(dataService.base_url),
-        loadRecommendedStrategies(dataService.base_url)
-      ]);
-      if (cancelled) {
-        return;
-      }
-      if (newsResult.status === "fulfilled") {
-        setMarketNews(newsResult.value);
-      }
-      if (fupanResult.status === "fulfilled") {
-        setFupanBriefing(fupanResult.value);
-      }
-      if (zaopanResult.status === "fulfilled") {
-        setZaopanBriefing(zaopanResult.value);
-      }
-      if (financeResult.status === "fulfilled") {
-        setClsFinance(financeResult.value);
-      }
-      if (summaryResult.status === "fulfilled") {
-        setNewsSummary(summaryResult.value);
-      }
-      if (riskResult.status === "fulfilled") {
-        setRiskAlerts(riskResult.value);
-      }
-      if (recommendedResult.status === "fulfilled") {
-        setRecommendedStrategies(recommendedResult.value.items);
-      }
-    };
-    void loadAuxiliaryData();
-    const timer = window.setInterval(() => {
-      void refreshNews();
-      void refreshRiskAlerts();
-    }, 120_000);
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-    };
-  }, [dataService]);
+  useIndependentModuleRefresh(Boolean(dataService), loadNews);
+  useIndependentModuleRefresh(Boolean(dataService), loadFupan);
+  useIndependentModuleRefresh(Boolean(dataService), loadZaopan);
+  useIndependentModuleRefresh(Boolean(dataService), loadFinance);
+  useIndependentModuleRefresh(Boolean(dataService), loadSummary);
+  useIndependentModuleRefresh(Boolean(dataService), loadRiskAlertData);
+  useIndependentModuleRefresh(Boolean(dataService), loadRecommendations);
 
   const coverageSymbols = coverage.reduce((sum, item) => sum + item.symbols, 0);
   const liveHeatRatio = marketSnapshot?.breadth && marketSnapshot.breadth.total > 0
@@ -748,7 +862,7 @@ export function App() {
     ? clsFinance?.emotion?.market_degree_label ?? "同花顺大盘评级"
     : "同花顺大盘评级";
   const marketDegreeNote = marketDegree == null
-    ? isLoadingNews ? "正在读取同花顺大盘评分" : "同花顺评分暂不可用"
+    ? isLoadingClsFinance ? "正在读取同花顺大盘评分" : "同花顺评分暂不可用"
     : marketDegreeLabel;
   const issueCount = result?.preflight_issues.length ?? 0;
   const riskAlertCount = riskAlerts?.items.length ?? 0;
@@ -806,8 +920,8 @@ export function App() {
         <NewsPanel news={marketNews} isLoading={isLoadingNews} onRefresh={refreshNews} />
       </div>
       <div className="market-insight-layout">
-        <ClsFinancePanel finance={clsFinance} isLoading={isLoadingNews} />
-        <NewsSummaryPanel summary={newsSummary} isLoading={isLoadingNews} />
+        <ClsFinancePanel finance={clsFinance} isLoading={isLoadingClsFinance} />
+        <NewsSummaryPanel summary={newsSummary} isLoading={isLoadingNewsSummary} />
       </div>
       <TonghuashunBriefingPanel fupan={fupanBriefing} zaopan={zaopanBriefing} />
       <section className="summary-band" aria-label="工作台概览">

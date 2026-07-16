@@ -1,11 +1,15 @@
-import { Activity, Eye, Flame, Gauge, RadioTower, Sparkles, X } from "lucide-react";
+import { invoke } from "@tauri-apps/api/core";
+import { Activity, ExternalLink, Eye, Flame, Gauge, RadioTower, Sparkles, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import type { ClsFinanceEmotion, ClsFinancePoolItem, ClsFinanceResponse } from "../types";
+import { isTauriRuntime } from "../tauriRuntime";
+import type { ClsFinanceEmotion, ClsFinancePoolItem, ClsFinanceResponse, ClsFinanceTlinePoint } from "../types";
 
 type Props = {
   finance: ClsFinanceResponse | null;
   isLoading?: boolean;
 };
+
+const CLS_FINANCE_PAGE_URL = "https://www.cls.cn/finance";
 
 function formatTime(value: string | null | undefined): string {
   if (!value) {
@@ -33,11 +37,6 @@ function compactText(value: string | null | undefined, maxLength = 48): string {
     return normalized;
   }
   return `${normalized.slice(0, maxLength).trimEnd()}...`;
-}
-
-function formatMinute(minute: number): string {
-  const value = minute.toString().padStart(4, "0");
-  return `${value.slice(0, 2)}:${value.slice(2)}`;
 }
 
 function joinNames(names: string[], maxItems = 4): string {
@@ -155,22 +154,82 @@ function buildBriefingCards(finance: ClsFinanceResponse) {
   ];
 }
 
-function tlinePath(finance: ClsFinanceResponse): string {
-  const points = finance.tline.slice(-80);
-  if (points.length === 0) {
-    return "";
+type TlineChart = {
+  path: string;
+  latestChange: number | null;
+  range: number;
+};
+
+function minuteOfDay(value: number): number | null {
+  const hour = Math.floor(value / 100);
+  const minute = value % 100;
+  if (hour < 0 || hour > 23 || minute < 0 || minute >= 60) {
+    return null;
   }
-  const values = points.map((point) => point.last_px);
-  const min = Math.min(...values, finance.preclose_px ?? values[0]);
-  const max = Math.max(...values, finance.preclose_px ?? values[0]);
-  const span = max - min || 1;
-  return points
-    .map((point, index) => {
-      const x = points.length === 1 ? 0 : (index / (points.length - 1)) * 100;
-      const y = 80 - ((point.last_px - min) / span) * 60;
-      return `${index === 0 ? "M" : "L"} ${x.toFixed(2)} ${y.toFixed(2)}`;
+  return hour * 60 + minute;
+}
+
+function tradingPosition(point: ClsFinanceTlinePoint): { x: number; session: "morning" | "afternoon" } | null {
+  const minute = minuteOfDay(point.minute);
+  if (minute == null) {
+    return null;
+  }
+  const morningOpen = 9 * 60 + 30;
+  const morningClose = 11 * 60 + 30;
+  const afternoonOpen = 13 * 60;
+  const afternoonClose = 15 * 60;
+  if (minute >= morningOpen && minute <= morningClose) {
+    return { x: 7 + ((minute - morningOpen) / (morningClose - morningOpen)) * 40, session: "morning" };
+  }
+  if (minute >= afternoonOpen && minute <= afternoonClose) {
+    return { x: 53 + ((minute - afternoonOpen) / (afternoonClose - afternoonOpen)) * 40, session: "afternoon" };
+  }
+  return null;
+}
+
+function pointChange(point: ClsFinanceTlinePoint, preclose: number | null | undefined): number | null {
+  if (preclose != null && preclose > 0) {
+    return point.last_px / preclose - 1;
+  }
+  return point.change ?? null;
+}
+
+function buildTlineChart(finance: ClsFinanceResponse): TlineChart {
+  const chartPoints = finance.tline
+    .map((point) => {
+      const position = tradingPosition(point);
+      const change = pointChange(point, finance.preclose_px);
+      return position && change != null ? { ...position, change } : null;
+    })
+    .filter((point): point is { x: number; session: "morning" | "afternoon"; change: number } => point !== null);
+  const range = Math.max(0.003, ...chartPoints.map((point) => Math.abs(point.change)));
+  let previousSession: "morning" | "afternoon" | null = null;
+  const path = chartPoints
+    .map((point) => {
+      const y = Math.max(10, Math.min(90, 50 - (point.change / range) * 38));
+      const command = previousSession === point.session ? "L" : "M";
+      previousSession = point.session;
+      return `${command} ${point.x.toFixed(2)} ${y.toFixed(2)}`;
     })
     .join(" ");
+  const latestPoint = finance.tline.at(-1);
+  return {
+    path,
+    latestChange: latestPoint ? pointChange(latestPoint, finance.preclose_px) : null,
+    range,
+  };
+}
+
+async function openFinancePage(url: string | null | undefined): Promise<void> {
+  const target = url?.trim();
+  if (!target) {
+    return;
+  }
+  if (isTauriRuntime()) {
+    await invoke("open_external_url", { url: target });
+    return;
+  }
+  window.open(target, "_blank", "noopener,noreferrer");
 }
 
 function LimitUpPoolDialog({
@@ -245,9 +304,10 @@ function LimitUpPoolDialog({
 
 export function ClsFinancePanel({ finance, isLoading = false }: Props) {
   const [isPoolOpen, setIsPoolOpen] = useState(false);
+  const financePageUrl = finance?.source_url?.trim() || CLS_FINANCE_PAGE_URL;
   const emotion = finance?.emotion ?? null;
   const latestPoint = finance?.tline.at(-1) ?? null;
-  const path = finance ? tlinePath(finance) : "";
+  const tlineChart = finance ? buildTlineChart(finance) : null;
   const upPool = finance?.up_pool ?? [];
   const anchors = finance?.anchors.slice(0, 8) ?? [];
   const briefingCards = finance ? buildBriefingCards(finance) : [];
@@ -263,6 +323,15 @@ export function ClsFinancePanel({ finance, isLoading = false }: Props) {
           <h2>财联社看盘</h2>
         </div>
         <div className="cls-finance-actions">
+          <button
+            className="icon-button cls-finance-open-button"
+            type="button"
+            aria-label="打开财联社看盘页"
+            title="打开财联社看盘页"
+            onClick={() => void openFinancePage(financePageUrl)}
+          >
+            <ExternalLink size={16} aria-hidden="true" />
+          </button>
           {finance && !financeUnavailable ? (
             <button className="secondary-button compact cls-finance-detail-button" type="button" onClick={() => setIsPoolOpen(true)}>
               <Eye size={15} aria-hidden="true" />
@@ -313,17 +382,42 @@ export function ClsFinancePanel({ finance, isLoading = false }: Props) {
                 <span>上证分时</span>
                 <strong>{latestPoint ? latestPoint.last_px.toFixed(2) : "--"}</strong>
               </div>
-              <span className={(latestPoint?.change ?? 0) >= 0 ? "market-up" : "market-down"}>
-                {formatPercent(latestPoint?.change)}
+              <span className={(tlineChart?.latestChange ?? 0) >= 0 ? "market-up" : "market-down"}>
+                {formatPercent(tlineChart?.latestChange)}
               </span>
             </div>
-            <svg className="cls-finance-tline" viewBox="0 0 100 90" role="img" aria-label="财联社上证指数分时线" preserveAspectRatio="none">
-              <line x1="0" x2="100" y1="50" y2="50" />
-              {path ? <path d={path} /> : null}
+            <div className="cls-finance-chart-context">
+              <span>昨收 {finance.preclose_px != null ? finance.preclose_px.toFixed(2) : "--"}</span>
+              <span>范围 +/-{tlineChart ? `${(tlineChart.range * 100).toFixed(2)}%` : "--"}</span>
+            </div>
+            <svg
+              className="cls-finance-tline"
+              viewBox="0 0 100 100"
+              role="img"
+              aria-label="财联社上证指数分时线，以昨收为零轴"
+              preserveAspectRatio="none"
+            >
+              <line className="cls-finance-gridline" x1="7" x2="93" y1="12" y2="12" />
+              <line className="cls-finance-baseline" x1="7" x2="93" y1="50" y2="50" aria-label="上证指数昨收基准" />
+              <line className="cls-finance-gridline" x1="7" x2="93" y1="88" y2="88" />
+              {tlineChart?.path ? (
+                <path
+                  className={
+                    (tlineChart.latestChange ?? 0) > 0
+                      ? "is-up"
+                      : (tlineChart.latestChange ?? 0) < 0
+                        ? "is-down"
+                        : "is-flat"
+                  }
+                  d={tlineChart.path}
+                />
+              ) : null}
             </svg>
             <div className="cls-finance-ticks">
-              <span>{finance.tline[0] ? formatMinute(finance.tline[0].minute) : "--"}</span>
-              <span>{latestPoint ? formatMinute(latestPoint.minute) : "--"}</span>
+              <span>09:30</span>
+              <span>11:30</span>
+              <span>13:00</span>
+              <span>15:00</span>
             </div>
           </div>
 

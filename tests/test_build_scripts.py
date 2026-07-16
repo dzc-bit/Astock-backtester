@@ -31,6 +31,9 @@ def test_build_data_service_bundles_ths_cookie_worker_for_desktop_score():
     assert "jsdom" in script
     assert "ths-cookie-worker.cjs" in script
     assert "xhr-sync-worker.js" in script
+    assert "THS_COOKIE_TIMEOUT_MS" in script
+    assert "setTimeout(resolve, 25)" in script
+    assert "setTimeout(resolve, 3000)" not in script
 
 
 def test_build_data_service_collects_curl_cffi_native_dependencies():

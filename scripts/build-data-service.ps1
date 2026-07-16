@@ -91,6 +91,7 @@ const THS_CHAMELEON_URL = "https://s.thsi.cn/js/chameleon/chameleon.1.7.min.1781
 const THS_MARKET_BOARD_URL = "http://q.10jqka.com.cn/index/index/board";
 
 (async () => {
+  const timeoutMs = Math.max(200, Number(process.env.THS_COOKIE_TIMEOUT_MS || "1200"));
   const virtualConsole = new VirtualConsole();
   virtualConsole.on("error", () => {});
   virtualConsole.on("warn", () => {});
@@ -105,10 +106,21 @@ const THS_MARKET_BOARD_URL = "http://q.10jqka.com.cn/index/index/board";
       userAgent: "Mozilla/5.0"
     }
   );
-  await new Promise((resolve) => setTimeout(resolve, 3000));
-  const cookie = dom.window.document.cookie || "";
-  dom.window.close();
-  process.stdout.write(cookie);
+  const deadline = Date.now() + timeoutMs;
+  let cookie = "";
+  try {
+    while (Date.now() < deadline) {
+      cookie = dom.window.document.cookie || "";
+      if (/(?:^|;\s*)v=/.test(cookie)) {
+        process.stdout.write(cookie);
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  } finally {
+    dom.window.close();
+  }
+  process.exit(1);
 })().catch(() => process.exit(1));
 '@ | Set-Content -LiteralPath $cookieWorkerEntry -Encoding UTF8
 & $bundledNode $esbuildBin $cookieWorkerEntry `
