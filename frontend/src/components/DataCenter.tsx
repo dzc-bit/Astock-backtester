@@ -69,6 +69,16 @@ function operationMessage(result: OperationResultMessage): string {
   return result.logs.at(-1)?.message ?? "数据操作已完成";
 }
 
+function connectionErrorMessage(error: unknown): string {
+  if (error instanceof Error && error.message.trim()) {
+    return error.message;
+  }
+  if (typeof error === "string" && error.trim()) {
+    return error;
+  }
+  return "本地数据服务连接失败，请重试。";
+}
+
 function isSyncRunning(job: SyncJobStatus | null): boolean {
   return job?.status === "running" || job?.status === "cancelling";
 }
@@ -264,9 +274,9 @@ export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceRead
         const range = await refreshServiceState(status);
         await refreshDetails(status, [], range.startDate, range.endDate);
       })
-      .catch((error: Error) => {
+      .catch((error: unknown) => {
         if (!cancelled) {
-          setMessage(error.message);
+          setMessage(connectionErrorMessage(error));
         }
       });
     return () => {

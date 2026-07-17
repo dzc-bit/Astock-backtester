@@ -5,7 +5,7 @@ mod updater_preflight;
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use tauri::WebviewWindowBuilder;
+use tauri::{WebviewUrl, WebviewWindowBuilder};
 
 fn runtime_workspace_root_from(start: &Path) -> Option<PathBuf> {
     for candidate in start.ancestors() {
@@ -27,13 +27,15 @@ fn webview_data_dir_from_exe(exe_path: &Path) -> Option<PathBuf> {
 }
 
 fn build_main_window(app: &mut tauri::App) -> tauri::Result<()> {
-    let window_config = app
+    let mut window_config = app
         .config()
         .app
         .windows
         .first()
-        .expect("main window config should exist");
-    let mut builder = WebviewWindowBuilder::from_config(app.handle(), window_config)?;
+        .expect("main window config should exist")
+        .clone();
+    window_config.url = WebviewUrl::App("index.html".into());
+    let mut builder = WebviewWindowBuilder::from_config(app.handle(), &window_config)?;
     if let Ok(exe_path) = std::env::current_exe() {
         if let Some(data_dir) = webview_data_dir_from_exe(&exe_path) {
             builder = builder.data_directory(data_dir);

@@ -117,6 +117,22 @@ describe("DataCenter", () => {
     expect(apiMocks.loadDailyBarsCoverage).not.toHaveBeenCalled();
   });
 
+  it("shows string errors returned by the desktop service command", async () => {
+    apiMocks.ensureDataService.mockRejectedValueOnce(
+      "localhost data service did not become healthy before the startup deadline"
+    );
+
+    render(<DataCenter cacheDir=".astock-cache" coverage={[]} onCoverageChange={vi.fn()} />);
+
+    const status = screen.getByRole("status", { name: "数据中心状态" });
+    await waitFor(() =>
+      expect(status).toHaveTextContent(
+        "localhost data service did not become healthy before the startup deadline"
+      )
+    );
+    expect(screen.getByText("本地服务未连接")).toBeInTheDocument();
+  });
+
   it("does not block service readiness while health coverage refresh continues in the background", async () => {
     const refreshedCoverage = [
       { dataset: "daily_bars", symbols: 5000, start_date: "2015-01-05", end_date: "2026-06-05", missing_rows: 0 }

@@ -386,14 +386,23 @@ fn choose_port() -> Result<u16, String> {
     Ok(port)
 }
 
-fn wait_for_verified_health(
+fn service_startup_timeout() -> Duration {
+    Duration::from_secs(30)
+}
+
+fn service_probe_timeout() -> Duration {
+    Duration::from_secs(2)
+}
+
+fn wait_for_verified_health_with_timeout(
     port: u16,
     cache_dir: &str,
     process_id: Option<u32>,
     expected_executable_path: Option<&Path>,
     expected_executable_sha256: Option<&str>,
+    timeout: Duration,
 ) -> Result<(), String> {
-    let deadline = Instant::now() + Duration::from_secs(8);
+    let deadline = Instant::now() + timeout;
     let mut last_error = format!("localhost data service did not become healthy on port {port}");
     while Instant::now() < deadline {
         if let Ok(mut stream) = TcpStream::connect(("127.0.0.1", port)) {
@@ -419,6 +428,23 @@ fn wait_for_verified_health(
     Err(last_error)
 }
 
+fn wait_for_verified_health(
+    port: u16,
+    cache_dir: &str,
+    process_id: Option<u32>,
+    expected_executable_path: Option<&Path>,
+    expected_executable_sha256: Option<&str>,
+) -> Result<(), String> {
+    wait_for_verified_health_with_timeout(
+        port,
+        cache_dir,
+        process_id,
+        expected_executable_path,
+        expected_executable_sha256,
+        service_startup_timeout(),
+    )
+}
+
 fn is_verified_healthy(
     port: u16,
     cache_dir: &str,
@@ -426,12 +452,13 @@ fn is_verified_healthy(
     expected_executable_path: Option<&Path>,
     expected_executable_sha256: Option<&str>,
 ) -> bool {
-    wait_for_verified_health(
+    wait_for_verified_health_with_timeout(
         port,
         cache_dir,
         process_id,
         expected_executable_path,
         expected_executable_sha256,
+        service_probe_timeout(),
     )
     .is_ok()
 }
@@ -540,7 +567,7 @@ impl DataServiceManager {
             if let Some(lock) = wait_for_locked_service(
                 &resolved_cache_dir,
                 &lock_path,
-                Duration::from_secs(10),
+                service_startup_timeout(),
                 expected_executable_path.as_deref(),
                 expected_executable_sha256.as_deref(),
             ) {
@@ -629,7 +656,7 @@ mod tests {
         build_service_args, cached_service_matches, choose_populated_cache_dir, health_request,
         file_sha256, packaged_service_relative_path, read_service_lock, service_health_request,
         hidden_process_creation_flags, locked_service_expected_identity, require_recreated_service_lock, service_lock_path, should_use_packaged_service,
-        stop_child_after_start_failure, try_create_service_lock, runtime_data_candidates_from,
+        service_startup_timeout, stop_child_after_start_failure, try_create_service_lock, runtime_data_candidates_from,
         validate_service_health, workspace_cache_candidates_from_root, ServiceLockPayload,
     };
     use std::fs;
@@ -656,6 +683,14 @@ mod tests {
         let raw = service_health_request(9123);
         assert!(raw.contains("GET /identity HTTP/1.1"));
         assert!(raw.contains("Host: 127.0.0.1:9123"));
+    }
+
+    #[test]
+    fn packaged_onefile_service_has_a_cold_start_budget() {
+        assert!(
+            service_startup_timeout() >= std::time::Duration::from_secs(20),
+            "the packaged sidecar can spend more than 8 seconds unpacking before it serves /identity"
+        );
     }
 
     #[test]
