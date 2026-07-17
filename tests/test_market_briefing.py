@@ -328,6 +328,56 @@ def test_market_briefing_provider_reports_article_expansion_failures_in_diagnost
     assert response.diagnostics == ["同花顺文章详情抓取失败：A股收评：机器人走强 - anti crawler"]
 
 
+def test_market_briefing_provider_limits_slow_article_expansion_attempts():
+    index_html = """
+    <html><body>
+      <div id="fpzj">A股复盘摘要</div>
+      <div class="fp_item_hd"><h2>同花顺解盘</h2></div>
+      <div class="fp_item_cnt">
+        <a href="http://stock.10jqka.com.cn/20260605/c677247169.shtml" title="第一篇">第一篇</a>
+        <a href="http://stock.10jqka.com.cn/20260605/c677247170.shtml" title="第二篇">第二篇</a>
+        <a href="http://stock.10jqka.com.cn/20260605/c677247171.shtml" title="第三篇">第三篇</a>
+        <a href="http://stock.10jqka.com.cn/20260605/c677247172.shtml" title="第四篇">第四篇</a>
+      </div>
+    </body></html>
+    """
+    calls: list[tuple[str, float]] = []
+
+    def requester(url: str, **kwargs):
+        calls.append((url, kwargs["timeout"]))
+        if url == THS_FUPAN_URL:
+            return FakeHtmlResponse(index_html)
+        raise RuntimeError("slow article")
+
+    response = MarketBriefingProvider(timeout=8.0, requester=requester).latest_fupan()
+
+    article_calls = [call for call in calls if call[0] != THS_FUPAN_URL]
+    assert len(article_calls) == 1
+    assert article_calls[0][1] == 1.5
+    assert response.diagnostics == ["同花顺文章详情抓取失败：第一篇 - slow article"]
+
+
+def test_market_briefing_provider_bounds_empty_page_and_market_fallback_timeouts():
+    calls: list[tuple[str, float]] = []
+
+    def requester(url: str, **kwargs):
+        calls.append((url, kwargs["timeout"]))
+        if url in {THS_FUPAN_URL, THS_REFERER}:
+            return FakeHtmlResponse("")
+        raise RuntimeError("fallback unavailable")
+
+    response = MarketBriefingProvider(timeout=8.0, requester=requester).latest_fupan()
+
+    assert response.source == "ths-fupan+local-brief"
+    assert calls == [
+        (THS_FUPAN_URL, 3.0),
+        (THS_REFERER, 1.0),
+        (THS_FUPAN_URL, 3.0),
+        ("https://hq.sinajs.cn/list=sh000001,sz399001,sz399006", 2.0),
+        ("https://82.push2.eastmoney.com/api/qt/clist/get", 2.0),
+    ]
+
+
 def test_market_briefing_provider_parses_ths_zaopan_summary_and_tables():
     html = """
     <html><body>

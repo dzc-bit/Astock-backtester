@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import logging
 import math
 
 import pandas as pd
-
 from astock_backtester.data.cache import LocalCache
 from astock_backtester.data.importer import normalize_daily_bars
 from astock_backtester.data.operations import (
+    _read_existing_daily_bars,
     build_daily_bars_coverage,
     build_service_health,
     fetch_capital_flow_into_cache,
@@ -70,6 +71,47 @@ def test_cache_merge_preserves_existing_optional_values(tmp_path):
     assert merged["close"] == 20.5
     assert merged["float_market_cap"] == 9_100_000_000.0
     assert merged["main_net_inflow"] == 1_600_000.0
+
+
+def test_read_existing_daily_bars_logs_warehouse_failure_before_cache_fallback(tmp_path, caplog):
+    class BrokenWarehouse:
+        def read_daily_bars(self, **_kwargs):
+            raise OSError("corrupt warehouse partition")
+
+    cache = LocalCache(tmp_path)
+    cache.write_daily_bars(
+        _bars(
+            [
+                (
+                    "AAA",
+                    "2026-06-18",
+                    10.0,
+                    11.0,
+                    9.0,
+                    10.5,
+                    1000,
+                    0.1,
+                    9_000_000_000.0,
+                    1.0,
+                    False,
+                    False,
+                    90,
+                ),
+            ]
+        )
+    )
+
+    with caplog.at_level(logging.WARNING, logger="astock_backtester.data.operations"):
+        result = _read_existing_daily_bars(
+            cache,
+            BrokenWarehouse(),
+            symbols=["AAA"],
+            start_date="2026-06-18",
+            end_date="2026-06-18",
+        )
+
+    assert result["symbol"].tolist() == ["AAA"]
+    assert "warehouse daily-bars read failed" in caplog.text
 
 
 def test_importer_keeps_missing_capital_flow_as_missing():

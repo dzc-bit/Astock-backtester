@@ -46,6 +46,20 @@ it("does not mix commentary into live intraday snapshots", () => {
   expect(screen.queryByText(/行情评价：/)).not.toBeInTheDocument();
 });
 
+it("shows an empty yesterday-sector result after its background tracking completes", () => {
+  render(
+    <MarketDashboard
+      snapshot={buildSnapshot({
+        yesterday_strong_sectors: [],
+        diagnostics: ["eastmoney-yesterday-limit-up tracking loaded pool_date=2026-05-26, as_of_date=2026-05-27, sectors=0."]
+      })}
+    />
+  );
+
+  expect(screen.getByText("暂无昨日强势板块")).toBeInTheDocument();
+  expect(screen.queryByText("正在加载昨日板块数据")).not.toBeInTheDocument();
+});
+
 it("shows refresh fallback metadata while preserving the last successful snapshot", () => {
   render(
     <MarketDashboard

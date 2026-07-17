@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Sequence
 from datetime import datetime
 from typing import Any
@@ -10,8 +11,8 @@ from astock_backtester.data.cache import LocalCache
 from astock_backtester.data.importer import normalize_daily_bars
 from astock_backtester.data.trading_calendar import a_share_trade_dates
 from astock_backtester.data.warehouse import (
-    KNOWN_CAPITAL_FLOW_SOURCE_GAP_DATES,
     KNOWN_CAPITAL_FLOW_LISTING_LAG_DAYS,
+    KNOWN_CAPITAL_FLOW_SOURCE_GAP_DATES,
     Warehouse,
     _uses_symbol_capital_flow_source_start,
 )
@@ -24,9 +25,9 @@ from astock_backtester.models import (
     ServiceLogEntry,
 )
 
-
 DailyBarsFetcher = Callable[[Sequence[str], str, str], pd.DataFrame]
 CapitalFlowFetcher = Callable[[Sequence[str], str, str], dict[str, Any]]
+logger = logging.getLogger(__name__)
 
 
 def _date_range(start_date: pd.Timestamp, end_date: pd.Timestamp) -> set[pd.Timestamp]:
@@ -55,7 +56,12 @@ def build_daily_bars_coverage(
         try:
             bars = warehouse.read_daily_bars(symbols=symbols, start_date=start_date, end_date=end_date)
             used_warehouse = not bars.empty
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "warehouse daily-bars read failed; falling back to cache: %s",
+                exc,
+                exc_info=True,
+            )
             bars = pd.DataFrame()
             used_warehouse = False
     if bars.empty:
@@ -578,8 +584,12 @@ def _read_existing_daily_bars(
             warehouse_frame = warehouse.read_daily_bars(symbols=symbols, start_date=start_date, end_date=end_date)
             if not warehouse_frame.empty:
                 frames.append(warehouse_frame)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning(
+                "warehouse daily-bars read failed; falling back to cache: %s",
+                exc,
+                exc_info=True,
+            )
     cache_frame = cache.read_daily_bars()
     if not cache_frame.empty:
         selected = {str(symbol) for symbol in symbols}
@@ -965,11 +975,20 @@ def _safe_coverage(cache: LocalCache, warehouse: Warehouse | None) -> list[Datas
             coverage = warehouse.coverage()
             if any(item.symbols > 0 for item in coverage):
                 return coverage
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning(
+                "warehouse coverage read failed; falling back to cache: %s",
+                exc,
+                exc_info=True,
+            )
     try:
         return cache.coverage()
-    except Exception:
+    except Exception as exc:
+        logger.warning(
+            "cache coverage read failed; returning an empty snapshot: %s",
+            exc,
+            exc_info=True,
+        )
         return [
             DatasetCoverage(dataset="daily_bars", symbols=0, start_date=None, end_date=None),
             DatasetCoverage(dataset="market_cap", symbols=0, start_date=None, end_date=None),
@@ -990,12 +1009,22 @@ def build_service_health(
 ) -> ServiceHealth:
     try:
         coverage = warehouse.coverage()
-    except Exception:
+    except Exception as exc:
+        logger.warning(
+            "warehouse coverage read failed; falling back to cache: %s",
+            exc,
+            exc_info=True,
+        )
         coverage = []
     if not any(item.symbols > 0 for item in coverage):
         try:
             coverage = cache.coverage()
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "cache coverage read failed; returning an empty snapshot: %s",
+                exc,
+                exc_info=True,
+            )
             coverage = [
                 DatasetCoverage(dataset="daily_bars", symbols=0, start_date=None, end_date=None),
                 DatasetCoverage(dataset="market_cap", symbols=0, start_date=None, end_date=None),

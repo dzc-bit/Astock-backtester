@@ -15,6 +15,11 @@ import requests
 from bs4 import BeautifulSoup
 
 from astock_backtester.data.cls import cls_request_json
+from astock_backtester.data.cls_finance import (
+    THS_MARKET_INDEXFLASH_URLS,
+    THS_MARKET_SCORE_HEADERS,
+    read_ths_browser_cookie,
+)
 from astock_backtester.data.http_transport import resilient_get, should_allow_alternate_transport
 from astock_backtester.data.providers import normalize_symbol
 from astock_backtester.data.realtime_parsers import (
@@ -26,6 +31,7 @@ from astock_backtester.data.realtime_parsers import (
     EASTMONEY_YESTERDAY_LIMIT_UP_URL,
     INDEXES,
     MIN_CONTROLLED_BACKUP_SECTOR_ROWS,
+    MIN_FULL_MARKET_BREADTH_TOTAL,
     SINA_BREADTH_BATCH_SIZE,
     SINA_HEADERS,
     TENCENT_QUOTE_URL,
@@ -93,8 +99,8 @@ from astock_backtester.data.realtime_parsers import (
 from astock_backtester.data.realtime_parsers import (
     unique_sources as _unique_sources,
 )
-from astock_backtester.data.warehouse import Warehouse
 from astock_backtester.data.trading_calendar import a_share_trade_dates
+from astock_backtester.data.warehouse import Warehouse
 from astock_backtester.models import (
     MarketBreadth,
     MarketIndexQuote,
@@ -193,6 +199,7 @@ class RealtimeMarketProvider:
     requester: Callable[..., requests.Response] = requests.get
     alternate_requester: Callable[..., Any] | None = None
     allow_alternate_transport: bool | None = None
+    ths_cookie_getter: Callable[[float], str | None] | None = None
     breadth_time_budget: float = 2.0
     breadth_source_timeout: float = 0.8
     sector_time_budget: float = 3.0
@@ -802,7 +809,19 @@ class RealtimeMarketProvider:
                 quotes.append(quote)
         return quotes
 
-    def _fetch_cls_home_payload(self) -> dict[str, Any]:
+    def _fetch_cls_home_payload(
+        self,
+        *,
+        timeout: float | None = None,
+        deadline: float | None = None,
+    ) -> dict[str, Any]:
+        request_timeout = min(self.timeout, 2.5) if timeout is None else min(self.timeout, timeout)
+        if deadline is not None:
+            remaining = deadline - monotonic_time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("CLS home request budget exhausted")
+            request_timeout = min(request_timeout, remaining)
+        request_timeout = max(0.05, request_timeout)
         now = monotonic_time.monotonic()
         with self._cls_home_lock:
             if (
@@ -820,7 +839,12 @@ class RealtimeMarketProvider:
                 owner = False
 
         if not owner:
-            wait_timeout = max(0.5, min(float(self.timeout), 3.0) + 0.25)
+            wait_timeout = min(request_timeout + 0.1, max(0.05, min(float(self.timeout), 3.0) + 0.25))
+            if deadline is not None:
+                remaining = deadline - monotonic_time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("CLS home single-flight request budget exhausted")
+                wait_timeout = min(wait_timeout, remaining)
             if not flight.event.wait(timeout=wait_timeout):
                 raise TimeoutError("CLS home single-flight request timed out")
             with self._cls_home_lock:
@@ -832,7 +856,7 @@ class RealtimeMarketProvider:
             payload = cls_request_json(
                 self.requester,
                 CLS_QUOTE_HOME_URL,
-                timeout=min(self.timeout, 2.5),
+                timeout=request_timeout,
             )
             self._validate_cls_home_payload(payload)
             with self._cls_home_lock:
@@ -1465,10 +1489,17 @@ class RealtimeMarketProvider:
         cancel_event: Event | None = None,
     ) -> MarketBreadth | None:
         fetchers: list[tuple[str, Callable[[], MarketBreadth | None]]] = [
-            ("财联社涨跌分布", lambda: self._call_cls_breadth(diagnostics)),
+            (
+                "财联社涨跌分布",
+                lambda: self._call_cls_breadth(diagnostics, deadline, cancel_event),
+            ),
             (
                 "同花顺市场总览",
                 lambda: self._call_ths_market_summary_breadth(diagnostics, deadline, cancel_event),
+            ),
+            (
+                "同花顺涨跌分布",
+                lambda: self._fetch_ths_indexflash_breadth(diagnostics, deadline, cancel_event),
             ),
             ("Sina 批量实时个股", self._fetch_sina_breadth),
             ("Tencent 批量实时个股", lambda: self._fetch_tencent_breadth(diagnostics)),
@@ -1490,26 +1521,113 @@ class RealtimeMarketProvider:
                 continue
             if breadth.source == "cls-quote-breadth" and breadth.total > 0:
                 return breadth
+            if breadth.total >= MIN_FULL_MARKET_BREADTH_TOTAL:
+                return breadth
             if local_symbol_count is None:
                 local_symbol_count = max(self._latest_local_symbol_count(), self._coverage_symbol_count())
             if self._breadth_is_complete(breadth, local_symbol_count, diagnostics):
                 return breadth
         return None
 
-    def _call_cls_breadth(self, diagnostics: list[str]) -> MarketBreadth | None:
+    def _call_cls_breadth(
+        self,
+        diagnostics: list[str],
+        deadline: float | None,
+        cancel_event: Event | None,
+    ) -> MarketBreadth | None:
         try:
-            return self._fetch_cls_breadth(diagnostics)
+            return self._fetch_cls_breadth(diagnostics, deadline=deadline, cancel_event=cancel_event)
         except TypeError:
             return self._fetch_cls_breadth()
 
-    def _fetch_cls_breadth(self, diagnostics: list[str] | None = None) -> MarketBreadth | None:
+    def _fetch_cls_breadth(
+        self,
+        diagnostics: list[str] | None = None,
+        *,
+        deadline: float | None = None,
+        cancel_event: Event | None = None,
+    ) -> MarketBreadth | None:
         diagnostics = diagnostics if diagnostics is not None else []
-        payload = self._fetch_cls_home_payload()
+        if self._source_chain_cancelled(cancel_event, deadline, diagnostics, "market-breadth"):
+            return None
+        payload = self._fetch_cls_home_payload(
+            timeout=self._breadth_request_timeout(),
+            deadline=deadline,
+        )
         data = payload.get("data", {}) if isinstance(payload, dict) else {}
         breadth = _breadth_from_cls_home_data(data)
         if breadth is None:
             diagnostics.append("CLS home breadth source has no valid up_down_dis field.")
         return breadth
+
+    def _fetch_ths_indexflash_breadth(
+        self,
+        diagnostics: list[str],
+        deadline: float | None,
+        cancel_event: Event | None,
+    ) -> MarketBreadth | None:
+        if self._source_chain_cancelled(cancel_event, deadline, diagnostics, "market-breadth"):
+            return None
+        remaining = (
+            deadline - monotonic_time.monotonic()
+            if deadline is not None
+            else self._breadth_request_timeout()
+        )
+        request_timeout = min(self._breadth_request_timeout(), remaining)
+        # Leave a short window for the signed XHR after Chameleon creates its
+        # per-request cookie.  Do not spawn a browser or retain cookies.
+        cookie_timeout = min(self._breadth_request_timeout(), max(0.0, remaining - 0.2))
+        if cookie_timeout < 0.2 or request_timeout <= 0:
+            diagnostics.append("同花顺涨跌分布剩余预算不足，已跳过。")
+            return None
+        try:
+            getter = self.ths_cookie_getter or read_ths_browser_cookie
+            cookie = getter(cookie_timeout)
+        except Exception as exc:
+            diagnostics.append(f"同花顺涨跌分布校验失败：{exc}")
+            return None
+        if not cookie:
+            diagnostics.append("同花顺涨跌分布校验未在预算内完成。")
+            return None
+
+        headers = {**THS_MARKET_SCORE_HEADERS, "Cookie": cookie}
+        urls = sorted(THS_MARKET_INDEXFLASH_URLS, key=lambda url: not url.startswith("https://"))
+        for url in urls:
+            if self._source_chain_cancelled(cancel_event, deadline, diagnostics, "market-breadth"):
+                return None
+            remaining = (
+                deadline - monotonic_time.monotonic()
+                if deadline is not None
+                else self._breadth_request_timeout()
+            )
+            if remaining <= 0:
+                return None
+            try:
+                response = self.requester(
+                    url,
+                    timeout=min(self._breadth_request_timeout(), remaining),
+                    headers=headers,
+                )
+                response.raise_for_status()
+                payload = response.json() or {}
+            except Exception as exc:
+                diagnostics.append(f"同花顺涨跌分布请求失败：{exc}")
+                continue
+            result = payload.get("result") if isinstance(payload, dict) else None
+            distribution = result.get("zdfb_data") if isinstance(result, dict) else None
+            up = _parse_int(distribution.get("znum")) if isinstance(distribution, dict) else None
+            down = _parse_int(distribution.get("dnum")) if isinstance(distribution, dict) else None
+            if up is None or down is None:
+                diagnostics.append("同花顺涨跌分布响应缺少 znum/dnum。")
+                continue
+            return MarketBreadth(
+                up=up,
+                down=down,
+                flat=0,
+                total=up + down,
+                source="ths-indexflash-breadth",
+            )
+        return None
 
     def _breadth_is_complete(
         self,
@@ -2169,8 +2287,8 @@ class RealtimeMarketProvider:
                     total=up + down + flat,
                     source="ths-market-summary",
                 )
-        except Exception:
-            pass
+        except Exception as exc:
+            diagnostics.append(f"同花顺市场总览读取失败：{exc}")
 
         if self._source_chain_cancelled(cancel_event, deadline, diagnostics, "market-breadth"):
             return None
@@ -2230,6 +2348,7 @@ class RealtimeMarketProvider:
         }.get(index_source, "实时接口")
         breadth_label = {
             "cls-quote-breadth": "财联社涨跌分布",
+            "ths-indexflash-breadth": "同花顺涨跌分布",
             "ths-market-summary": "同花顺市场总览",
             "sina-a-share-live": "新浪实时个股",
             "tencent-a-share-live": "腾讯实时个股",

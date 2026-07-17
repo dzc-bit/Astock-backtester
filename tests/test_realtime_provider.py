@@ -5,12 +5,16 @@ from datetime import datetime, timedelta, timezone
 from threading import Event, Lock
 from time import monotonic, sleep
 
-import pytest
-
 import astock_backtester.data.realtime as realtime_module
+import pytest
 from astock_backtester.data.realtime import RealtimeMarketProvider
 from astock_backtester.data.realtime_parsers import BEIJING_TZ
-from astock_backtester.models import MarketBreadth, MarketIndexQuote, RealtimeMarketSnapshot, SectorMover
+from astock_backtester.models import (
+    MarketBreadth,
+    MarketIndexQuote,
+    RealtimeMarketSnapshot,
+    SectorMover,
+)
 
 
 class _Response:
@@ -56,6 +60,53 @@ def test_realtime_provider_single_flights_cls_home_payload():
         assert second.result(timeout=2) == payload
 
     assert calls == 1
+
+
+def test_realtime_provider_records_market_summary_failure_in_diagnostics():
+    provider = RealtimeMarketProvider(warehouse=_Warehouse())
+
+    def unavailable(*_args, **_kwargs):
+        raise RuntimeError("upstream unavailable")
+
+    provider._request_public_html = unavailable
+    provider._call_ths_industry_html_rows = lambda *_args, **_kwargs: []
+    diagnostics: list[str] = []
+
+    assert provider._fetch_ths_market_summary_breadth(diagnostics) is None
+    assert any("同花顺市场总览" in item and "upstream unavailable" in item for item in diagnostics)
+
+
+def test_realtime_provider_uses_bounded_ths_indexflash_breadth_before_bulk_fallbacks():
+    requested_headers = {}
+    cookie_timeouts = []
+
+    def requester(url, **kwargs):
+        assert "indexflash" in url
+        requested_headers.update(kwargs["headers"])
+        return _Response({"result": {"zdfb_data": {"znum": 3351, "dnum": 2098}}})
+
+    provider = RealtimeMarketProvider(
+        warehouse=_Warehouse(),
+        requester=requester,
+        breadth_time_budget=2.0,
+        breadth_source_timeout=0.8,
+        ths_cookie_getter=lambda timeout: cookie_timeouts.append(timeout) or "v=fresh-request",
+    )
+    provider._fetch_cls_breadth = lambda *_args, **_kwargs: None
+    provider._fetch_sina_breadth = lambda: pytest.fail("bulk Sina fallback should not run")
+    provider._fetch_tencent_breadth = lambda _diagnostics: pytest.fail("bulk Tencent fallback should not run")
+    provider._fetch_akshare_breadth_with_timeout = lambda _diagnostics: pytest.fail("AKShare fallback should not run")
+    provider._fetch_heavy_breadth = lambda _diagnostics: pytest.fail("heavy crawler should not run")
+    provider._latest_local_symbol_count = lambda: pytest.fail("full-market symbol scan should not run")
+    provider._coverage_symbol_count = lambda: pytest.fail("warehouse coverage scan should not run")
+
+    breadth = provider._fetch_live_breadth([], deadline=monotonic() + 2.0, cancel_event=Event())
+
+    assert breadth is not None
+    assert breadth.source == "ths-indexflash-breadth"
+    assert (breadth.up, breadth.down, breadth.flat, breadth.total) == (3351, 2098, 0, 5449)
+    assert requested_headers["Cookie"] == "v=fresh-request"
+    assert cookie_timeouts and cookie_timeouts[0] <= 0.8
 
 
 def test_realtime_provider_single_flight_waiter_rejects_expired_cache_after_owner_failure(monkeypatch):

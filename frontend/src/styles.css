@@ -520,6 +520,12 @@ body {
   color: var(--rise);
 }
 
+.cls-finance-open-button {
+  border-color: #cfe0f5;
+  background: #edf5ff;
+  color: #1d4ed8;
+}
+
 .cls-finance-body {
   display: grid;
   grid-template-columns: minmax(0, 1.2fr) minmax(230px, 0.8fr);
@@ -536,7 +542,7 @@ body {
 
 .cls-finance-main {
   display: grid;
-  grid-template-rows: auto minmax(106px, 1fr) auto;
+  grid-template-rows: auto auto minmax(106px, 1fr) auto;
   gap: 8px;
   border: 1px solid #dbe4ee;
   border-radius: 8px;
@@ -571,23 +577,49 @@ body {
   line-height: 1;
 }
 
+.cls-finance-chart-context {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 800;
+}
+
 .cls-finance-tline {
   width: 100%;
   height: 120px;
   overflow: visible;
 }
 
-.cls-finance-tline line {
+.cls-finance-tline .cls-finance-gridline {
   stroke: #dbe4ee;
+  stroke-width: 1;
+}
+
+.cls-finance-tline .cls-finance-baseline {
+  stroke: #94a3b8;
+  stroke-dasharray: 3 2;
   stroke-width: 1;
 }
 
 .cls-finance-tline path {
   fill: none;
-  stroke: #dc2626;
   stroke-linecap: round;
   stroke-linejoin: round;
-  stroke-width: 2.6;
+  stroke-width: 1.6;
+}
+
+.cls-finance-tline path.is-up {
+  stroke: #c53030;
+}
+
+.cls-finance-tline path.is-down {
+  stroke: #15803d;
+}
+
+.cls-finance-tline path.is-flat {
+  stroke: #475569;
 }
 
 .cls-finance-ticks {

@@ -1,8 +1,14 @@
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import type { ClsFinanceResponse } from "../types";
 import { ClsFinancePanel } from "./ClsFinancePanel";
+
+const invokeMock = vi.hoisted(() => vi.fn());
+
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: invokeMock
+}));
 
 function buildFinance(): ClsFinanceResponse {
   return {
@@ -65,6 +71,13 @@ function buildFinance(): ClsFinanceResponse {
   };
 }
 
+afterEach(() => {
+  vi.restoreAllMocks();
+  invokeMock.mockReset();
+  Reflect.deleteProperty(window, "__TAURI_INTERNALS__");
+  Reflect.deleteProperty(globalThis, "isTauri");
+});
+
 it("renders CLS finance market board with news-summary style briefing cards", () => {
   render(<ClsFinancePanel finance={buildFinance()} />);
 
@@ -91,6 +104,40 @@ it("renders CLS finance market board with news-summary style briefing cards", ()
   expect(screen.queryByText("光纤光缆")).not.toBeInTheDocument();
   expect(screen.queryByText("行情评价")).not.toBeInTheDocument();
   expect(screen.queryByText("明日观察")).not.toBeInTheDocument();
+});
+
+it("按交易时间和昨收展示分时，并可以打开原始看盘页", async () => {
+  const user = userEvent.setup();
+  const open = vi.spyOn(window, "open").mockImplementation(() => null);
+
+  render(<ClsFinancePanel finance={buildFinance()} />);
+
+  expect(screen.getByLabelText("上证指数昨收基准")).toBeInTheDocument();
+  expect(screen.getByText("09:30")).toBeInTheDocument();
+  expect(screen.getByText("11:30")).toBeInTheDocument();
+  expect(screen.getByText("13:00")).toBeInTheDocument();
+  expect(screen.getByText("15:00")).toBeInTheDocument();
+
+  await user.click(screen.getByRole("button", { name: "打开财联社看盘页" }));
+
+  expect(open).toHaveBeenCalledWith("https://www.cls.cn/finance", "_blank", "noopener,noreferrer");
+});
+
+it("在桌面端通过系统命令打开财联社看盘页", async () => {
+  const user = userEvent.setup();
+  Object.defineProperty(window, "__TAURI_INTERNALS__", {
+    configurable: true,
+    value: {}
+  });
+  invokeMock.mockResolvedValueOnce(undefined);
+
+  render(<ClsFinancePanel finance={buildFinance()} />);
+
+  await user.click(screen.getByRole("button", { name: "打开财联社看盘页" }));
+
+  expect(invokeMock).toHaveBeenCalledWith("open_external_url", {
+    url: "https://www.cls.cn/finance"
+  });
 });
 
 it("renders explicit fallback chips when CLS anchors and limit-up samples are empty", () => {
@@ -147,10 +194,17 @@ it("opens the limit-up pool in a scrollable dialog on demand", async () => {
   expect(screen.queryByRole("dialog", { name: "财联社涨停明细" })).not.toBeInTheDocument();
 });
 
-it("shows an explicit loading state for the CLS finance board", () => {
+it("shows an explicit loading state for the CLS finance board", async () => {
+  const user = userEvent.setup();
+  const open = vi.spyOn(window, "open").mockImplementation(() => null);
+
   render(<ClsFinancePanel finance={null} isLoading />);
 
   expect(screen.getByText("正在加载财联社看盘")).toBeInTheDocument();
+  const openButton = screen.getByRole("button", { name: "打开财联社看盘页" });
+  expect(openButton).toBeEnabled();
+  await user.click(openButton);
+  expect(open).toHaveBeenCalledWith("https://www.cls.cn/finance", "_blank", "noopener,noreferrer");
 });
 
 it("shows retained-source status and diagnostics when CLS uses recent data", () => {

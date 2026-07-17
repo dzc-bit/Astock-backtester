@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -258,7 +259,12 @@ class ClsFinanceProvider:
 
     def _read_tline(self, diagnostics: list[str]) -> list[ClsFinanceTlinePoint]:
         try:
-            payload = cls_request_json(self.requester, CLS_TLINE_URL, timeout=self.timeout)
+            payload = cls_request_json(
+                self.requester,
+                CLS_TLINE_URL,
+                params={"secu_code": "sh000001"},
+                timeout=self.timeout,
+            )
         except Exception as exc:
             diagnostics.append(f"财联社分时线读取失败：{exc}")
             return []
@@ -285,7 +291,7 @@ class ClsFinanceProvider:
             )
         if rows and not points:
             diagnostics.append("CLS tline response contained no parseable rows.")
-        return points
+        return sorted(points, key=lambda point: (point.date if point.date is not None else 0, point.minute))
 
     def _read_anchors(self, cdate: str, diagnostics: list[str]) -> list[ClsFinanceAnchor]:
         try:
@@ -486,8 +492,10 @@ class ClsFinanceProvider:
                 if not browser_cookie_read:
                     browser_cookie_read = True
                     try:
-                        getter = self.browser_cookie_getter or _read_ths_browser_cookie
-                        browser_cookie = getter()
+                        if self.browser_cookie_getter is not None:
+                            browser_cookie = self.browser_cookie_getter()
+                        else:
+                            browser_cookie = read_ths_browser_cookie(min(self.timeout, 1.2))
                     except Exception as exc:
                         errors.append(f"同花顺浏览器校验读取失败：{exc}")
                 if browser_cookie:
@@ -601,12 +609,14 @@ def _normalize_ths_market_degree(value: object) -> float | None:
     return None
 
 
-def _read_ths_browser_cookie() -> str | None:
+def read_ths_browser_cookie(timeout_s: float = 1.2) -> str | None:
     node = _resolve_node_executable()
     if node is None:
         return None
-    worker = _resolve_ths_cookie_worker()
+    worker = _resolve_ths_cookie_worker() if getattr(sys, "frozen", False) else None
     startup_kwargs = _subprocess_startup_kwargs()
+    timeout_s = min(max(float(timeout_s), 0.2), 5.0)
+    environment = {**os.environ, "THS_COOKIE_TIMEOUT_MS": str(round(timeout_s * 1000))}
     try:
         if worker is not None:
             completed = subprocess.run(
@@ -615,7 +625,8 @@ def _read_ths_browser_cookie() -> str | None:
                 check=False,
                 capture_output=True,
                 text=True,
-                timeout=8,
+                timeout=timeout_s + 1.2,
+                env=environment,
                 **startup_kwargs,
             )
         else:
@@ -626,7 +637,8 @@ def _read_ths_browser_cookie() -> str | None:
                 check=False,
                 capture_output=True,
                 text=True,
-                timeout=8,
+                timeout=timeout_s + 1.2,
+                env=environment,
                 **startup_kwargs,
             )
     except Exception:
@@ -635,6 +647,11 @@ def _read_ths_browser_cookie() -> str | None:
     if completed.returncode != 0 or "v=" not in cookie:
         return None
     return cookie
+
+
+def _read_ths_browser_cookie() -> str | None:
+    """Compatibility wrapper for callers that have not adopted a budget yet."""
+    return read_ths_browser_cookie()
 
 
 def _subprocess_startup_kwargs() -> dict[str, object]:
@@ -696,6 +713,7 @@ def _ths_browser_cookie_script() -> str:
 const {{ JSDOM, VirtualConsole }} = require("jsdom");
 
 (async () => {{
+  const timeoutMs = Math.max(200, Number(process.env.THS_COOKIE_TIMEOUT_MS || "1200"));
   const virtualConsole = new VirtualConsole();
   virtualConsole.on("error", () => {{}});
   virtualConsole.on("warn", () => {{}});
@@ -710,9 +728,20 @@ const {{ JSDOM, VirtualConsole }} = require("jsdom");
       userAgent: "Mozilla/5.0"
     }}
   );
-  await new Promise((resolve) => setTimeout(resolve, 3000));
-  const cookie = dom.window.document.cookie || "";
-  dom.window.close();
-  process.stdout.write(cookie);
+  const deadline = Date.now() + timeoutMs;
+  let cookie = "";
+  try {{
+    while (Date.now() < deadline) {{
+      cookie = dom.window.document.cookie || "";
+      if (/(?:^|;\\s*)v=/.test(cookie)) {{
+        process.stdout.write(cookie);
+        return;
+      }}
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }}
+  }} finally {{
+    dom.window.close();
+  }}
+  process.exit(1);
 }})().catch(() => process.exit(1));
 """

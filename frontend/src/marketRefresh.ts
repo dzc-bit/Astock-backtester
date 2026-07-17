@@ -3,6 +3,8 @@ import type { MarketRefreshMeta, MarketSessionPhase } from "./types";
 const TRADING_INTERVAL_MS = 60_000;
 const CLOSED_INTERVAL_MS = 5 * 60_000;
 const FAILURE_RETRY_MS = 2 * 60_000;
+const PENDING_YESTERDAY_TRACKING_RETRY_MS = 3_000;
+const PENDING_YESTERDAY_TRACKING_RE = /eastmoney-yesterday-limit-up tracking (?:refresh is still running|refresh scheduled in background)\./i;
 
 export function detectMarketSessionPhase(now = new Date()): MarketSessionPhase {
   const parts = new Intl.DateTimeFormat("en-US", {
@@ -37,6 +39,17 @@ export function refreshIntervalForPhase(phase: MarketSessionPhase, hasError = fa
     return FAILURE_RETRY_MS;
   }
   return phase === "trading" ? TRADING_INTERVAL_MS : CLOSED_INTERVAL_MS;
+}
+
+export function refreshIntervalForMarketResult(
+  phase: MarketSessionPhase,
+  diagnostics: string[] | undefined,
+  hasError = false
+): number {
+  const defaultInterval = refreshIntervalForPhase(phase, hasError);
+  return diagnostics?.some((item) => PENDING_YESTERDAY_TRACKING_RE.test(item))
+    ? Math.min(defaultInterval, PENDING_YESTERDAY_TRACKING_RETRY_MS)
+    : defaultInterval;
 }
 
 export function marketPhaseLabel(phase: MarketSessionPhase): string {

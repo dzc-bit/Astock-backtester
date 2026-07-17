@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import pandas as pd
-
+import pytest
 from astock_backtester.data.warehouse import Warehouse
+from pyarrow.lib import ArrowInvalid
 
 
 def _bars() -> pd.DataFrame:
@@ -57,6 +58,20 @@ def test_warehouse_reads_only_year_partitions_overlapping_requested_dates(tmp_pa
     assert set(result["symbol"]) == {"000001", "600519"}
     assert all("year=2016" in path for path in read_paths)
     assert read_paths
+
+
+def test_warehouse_safe_read_parquet_only_treats_missing_files_as_empty(tmp_path, monkeypatch):
+    warehouse = Warehouse(tmp_path)
+
+    assert warehouse._safe_read_parquet(tmp_path / "missing.parquet").empty
+
+    def broken_read_parquet(*_args, **_kwargs):
+        raise OSError("corrupt parquet")
+
+    monkeypatch.setattr(pd, "read_parquet", broken_read_parquet)
+
+    with pytest.raises(OSError, match="corrupt parquet"):
+        warehouse._safe_read_parquet(tmp_path / "corrupt.parquet")
 
 
 def test_warehouse_reads_daily_symbols_without_dropping_symbols_missing_recent_dates(tmp_path):
@@ -340,41 +355,40 @@ def test_warehouse_latest_daily_bars_ignore_capital_flow_only_rows(tmp_path):
     assert latest[["open", "high", "low", "close"]].notna().all().all()
 
 
-def test_warehouse_skips_corrupt_recent_partition_for_latest_and_coverage(tmp_path):
+def test_warehouse_surfaces_corrupt_recent_partition_for_latest_and_coverage(tmp_path):
     warehouse = Warehouse(tmp_path)
     warehouse.write_daily_bars(_bars())
     corrupt_path = tmp_path / "warehouse" / "daily_bars" / "year=2026" / "daily_bars.parquet"
     corrupt_path.parent.mkdir(parents=True, exist_ok=True)
     corrupt_path.write_bytes(b"not a parquet file")
 
-    latest = warehouse.read_latest_daily_bars(days=1)
-    coverage = {item.dataset: item for item in warehouse.coverage()}
+    with pytest.raises(ArrowInvalid, match="Parquet magic bytes"):
+        warehouse.read_latest_daily_bars(days=1)
+    with pytest.raises(ArrowInvalid, match="Parquet magic bytes"):
+        warehouse.read_daily_symbols(require_ohlc=True)
+    with pytest.raises(ArrowInvalid, match="Parquet magic bytes"):
+        warehouse.coverage()
 
-    assert set(latest["symbol"]) == {"000001", "600519"}
-    assert coverage["daily_bars"].end_date.isoformat() == "2016-01-04"
 
-
-def test_warehouse_overwrites_corrupt_partition_when_new_rows_arrive(tmp_path):
+def test_warehouse_does_not_overwrite_corrupt_partition_when_new_rows_arrive(tmp_path):
     warehouse = Warehouse(tmp_path)
     corrupt_path = tmp_path / "warehouse" / "daily_bars" / "year=2026" / "daily_bars.parquet"
     corrupt_path.parent.mkdir(parents=True, exist_ok=True)
     corrupt_path.write_bytes(b"not a parquet file")
 
-    warehouse.write_daily_bars(
-        pd.DataFrame(
-            {
-                "symbol": ["000001"],
-                "trade_date": ["2026-05-26"],
-                "open": [10.0],
-                "high": [10.5],
-                "low": [9.8],
-                "close": [10.2],
-                "volume": [1000],
-            }
+    with pytest.raises(ArrowInvalid, match="Parquet magic bytes"):
+        warehouse.write_daily_bars(
+            pd.DataFrame(
+                {
+                    "symbol": ["000001"],
+                    "trade_date": ["2026-05-26"],
+                    "open": [10.0],
+                    "high": [10.5],
+                    "low": [9.8],
+                    "close": [10.2],
+                    "volume": [1000],
+                }
+            )
         )
-    )
 
-    loaded = warehouse.read_daily_bars(symbols=["000001"], start_date="2026-05-26", end_date="2026-05-26")
-
-    assert loaded["trade_date"].dt.strftime("%Y-%m-%d").tolist() == ["2026-05-26"]
-    assert loaded.loc[0, "close"] == 10.2
+    assert corrupt_path.read_bytes() == b"not a parquet file"

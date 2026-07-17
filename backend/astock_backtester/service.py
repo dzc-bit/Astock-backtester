@@ -18,11 +18,19 @@ import pandas as pd
 import pyarrow.parquet as pq
 import requests
 
+from astock_backtester.backtest_runner import run_configured_backtest
+from astock_backtester.condition_parser import validate_condition_text, validate_exit_condition_text
 from astock_backtester.data.briefing import MarketBriefingProvider
 from astock_backtester.data.cache import LocalCache
 from astock_backtester.data.capital_flow_crawler import CapitalFlowCrawler
 from astock_backtester.data.cls_finance import ClsFinanceProvider
 from astock_backtester.data.importer import read_daily_bars
+from astock_backtester.data.market_commentary import (
+    MarketCommentaryProvider,
+    build_local_brief_commentary,
+)
+from astock_backtester.data.news import MarketNewsProvider
+from astock_backtester.data.news_summary import MarketNewsSummaryProvider
 from astock_backtester.data.operations import (
     build_daily_bars_coverage,
     build_service_health,
@@ -37,15 +45,10 @@ from astock_backtester.data.providers import (
     HttpAStockProvider,
     normalize_symbol,
 )
-from astock_backtester.data.market_commentary import MarketCommentaryProvider, build_local_brief_commentary
-from astock_backtester.data.news import MarketNewsProvider
-from astock_backtester.data.news_summary import MarketNewsSummaryProvider
 from astock_backtester.data.realtime import RealtimeMarketProvider, unavailable_market_snapshot
 from astock_backtester.data.risk import RiskAlertProvider
 from astock_backtester.data.sync import SyncJobManager
 from astock_backtester.data.warehouse import Warehouse
-from astock_backtester.backtest_runner import run_configured_backtest
-from astock_backtester.condition_parser import validate_condition_text, validate_exit_condition_text
 from astock_backtester.models import (
     BacktestSettings,
     ClsFinanceResponse,
@@ -55,7 +58,6 @@ from astock_backtester.models import (
     StrategyConfig,
 )
 from astock_backtester.recommended_strategies import recommended_strategies
-
 
 HEALTH_COVERAGE_WAIT_SECONDS = 0.1
 HEALTH_COVERAGE_REFRESH_TTL_SECONDS = 60.0
@@ -213,11 +215,12 @@ class DataServiceState:
             coverage = self.warehouse.coverage()
             if any(item.symbols > 0 for item in coverage):
                 return coverage
-        except Exception:
-            pass
+        except Exception as exc:
+            self.log("warning", f"warehouse coverage read failed; falling back to cache: {exc}")
         try:
             return self.cache.coverage()
-        except Exception:
+        except Exception as exc:
+            self.log("warning", f"cache coverage read failed; returning an empty snapshot: {exc}")
             return self._empty_coverage()
 
     def _empty_coverage(self) -> list[DatasetCoverage]:
@@ -228,21 +231,26 @@ class DataServiceState:
         ]
 
     def sync_symbols(self, start_date: str | None, end_date: str | None) -> list[str]:
-        try:
-            symbols = self.warehouse.read_daily_symbols(require_ohlc=True)
-            if symbols:
-                return symbols
-        except AttributeError:
+        read_daily_symbols = getattr(self.warehouse, "read_daily_symbols", None)
+        if callable(read_daily_symbols):
+            try:
+                symbols = read_daily_symbols(require_ohlc=True)
+                if symbols:
+                    return symbols
+            except Exception as exc:
+                self.log(
+                    "warning",
+                    f"warehouse symbol read failed; falling back to provider: {exc}",
+                )
+        else:
             try:
                 frame = self.warehouse.read_daily_bars(require_ohlc=True)
                 if not frame.empty and "symbol" in frame:
                     symbols = sorted(str(symbol) for symbol in frame["symbol"].dropna().astype(str).unique())
                     if symbols:
                         return symbols
-            except Exception:
-                pass
-        except Exception:
-            pass
+            except Exception as exc:
+                self.log("warning", f"warehouse daily-bars fallback symbol read failed: {exc}")
         return self.provider.list_symbols()
 
     def validate_stock_symbols(self, symbols: list[str]) -> StockSymbolValidationResult:
@@ -252,13 +260,15 @@ class DataServiceState:
         known_symbols: list[str] = []
         try:
             known_symbols = self.warehouse.read_daily_symbols(require_ohlc=True)
-        except Exception:
+        except Exception as exc:
+            self.log("warning", f"warehouse symbol validation read failed: {exc}")
             known_symbols = []
         if not known_symbols:
             source = "provider-list"
             try:
                 known_symbols = self.provider.list_symbols()
-            except Exception:
+            except Exception as exc:
+                self.log("warning", f"provider symbol validation read failed: {exc}")
                 known_symbols = []
 
         known = {normalize_symbol(symbol) for symbol in known_symbols}
@@ -518,7 +528,7 @@ class DataServiceHandler(BaseHTTPRequestHandler):
             self._send_json(alerts.model_dump(mode="json"))
             return
         if self.path == "/strategy/recommended":
-            self._send_json(recommended_strategies(self.server.state.warehouse.coverage()).model_dump(mode="json"))
+            self._send_json(recommended_strategies(self.server.state.coverage_snapshot()).model_dump(mode="json"))
             return
         if self.path.startswith("/sync/jobs/"):
             job_id = self.path.rsplit("/", 1)[-1]
@@ -725,13 +735,16 @@ class DataServiceHandler(BaseHTTPRequestHandler):
         all_symbols: set[str] = set()
         try:
             all_symbols.update(str(symbol) for symbol in self.server.state.warehouse.read_daily_symbols(require_ohlc=True))
-        except Exception:
-            pass
+        except Exception as exc:
+            self.server.state.log(
+                "warning",
+                f"capital-flow symbol read failed from warehouse: {exc}",
+            )
         if not all_symbols:
             try:
                 all_symbols.update(str(symbol) for symbol in self.server.state.provider.list_symbols())
-            except Exception:
-                pass
+            except Exception as exc:
+                self.server.state.log("warning", f"capital-flow provider symbol read failed: {exc}")
 
         if start_date and end_date and all_symbols:
             try:
@@ -753,8 +766,8 @@ class DataServiceHandler(BaseHTTPRequestHandler):
                                 missing_symbols = set(has_any_flow[~has_any_flow].index)
                                 if missing_symbols:
                                     return sorted(all_symbols & missing_symbols)
-            except Exception:
-                pass
+            except Exception as exc:
+                self.server.state.log("warning", f"capital-flow coverage inspection failed: {exc}")
 
         return sorted(all_symbols)
 

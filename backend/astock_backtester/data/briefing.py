@@ -23,6 +23,11 @@ from astock_backtester.models import (
 THS_FUPAN_URL = "https://stock.10jqka.com.cn/fupan/"
 THS_ZAOPAN_URL = "https://stock.10jqka.com.cn/zaopan/"
 THS_REFERER = "https://stock.10jqka.com.cn/"
+THS_PAGE_TIMEOUT = 3.0
+THS_PREWARM_TIMEOUT = 1.0
+THS_ARTICLE_DETAIL_TIMEOUT = 1.5
+THS_ARTICLE_DETAIL_LIMIT = 1
+MARKET_FALLBACK_TIMEOUT = 2.0
 EASTMONEY_A_SPOT_URL = "https://82.push2.eastmoney.com/api/qt/clist/get"
 SINA_QUOTE_URL = "https://hq.sinajs.cn/list={symbols}"
 THS_USER_AGENT = (
@@ -561,13 +566,17 @@ class MarketBriefingProvider:
         return BeautifulSoup(text, "html.parser")
 
     def _request_ths(self, url: str) -> requests.Response:
-        return self.requester(url, timeout=self.timeout, headers=_ths_headers())
+        return self.requester(url, timeout=min(self.timeout, THS_PAGE_TIMEOUT), headers=_ths_headers())
 
     def _fetch_article_section(self, link: MarketBriefingLink, referer: str) -> tuple[MarketBriefingSection | None, str | None]:
         if not _is_ths_article_url(link.url):
             return None, None
         try:
-            response = self.requester(link.url, timeout=self.timeout, headers=_ths_headers(referer=referer))
+            response = self.requester(
+                link.url,
+                timeout=min(self.timeout, THS_ARTICLE_DETAIL_TIMEOUT),
+                headers=_ths_headers(referer=referer),
+            )
             text = self._response_text(response)
             soup = BeautifulSoup(text, "html.parser")
             body = _article_body(soup)
@@ -587,23 +596,25 @@ class MarketBriefingProvider:
         self,
         sections: list[MarketBriefingSection],
         referer: str,
-        limit: int = 4,
+        limit: int = THS_ARTICLE_DETAIL_LIMIT,
     ) -> tuple[list[MarketBriefingSection], list[str]]:
         expanded = list(sections)
         diagnostics: list[str] = []
         seen_urls: set[str] = set()
+        attempts = 0
         for section in sections:
             for link in section.links:
                 if not link.url or link.url in seen_urls:
                     continue
                 seen_urls.add(link.url)
+                if attempts >= limit:
+                    return expanded, diagnostics
+                attempts += 1
                 detail, diagnostic = self._fetch_article_section(link, referer)
                 if detail is not None:
                     expanded.append(detail)
                 if diagnostic is not None:
                     diagnostics.append(diagnostic)
-                if len(expanded) >= len(sections) + limit:
-                    return expanded, diagnostics
         return expanded, diagnostics
 
     def _response_text(self, response: requests.Response) -> str:
@@ -613,7 +624,11 @@ class MarketBriefingProvider:
 
     def _prewarm_ths_session(self) -> None:
         try:
-            response = self.requester(THS_REFERER, timeout=self.timeout, headers=_ths_headers())
+            response = self.requester(
+                THS_REFERER,
+                timeout=min(self.timeout, THS_PREWARM_TIMEOUT),
+                headers=_ths_headers(),
+            )
             response.raise_for_status()
         except Exception:
             return
@@ -853,7 +868,7 @@ class MarketBriefingProvider:
         try:
             response = self.requester(
                 SINA_QUOTE_URL.format(symbols=symbols),
-                timeout=min(self.timeout, 5.0),
+                timeout=min(self.timeout, MARKET_FALLBACK_TIMEOUT),
                 headers=_sina_headers(),
             )
             response.raise_for_status()
@@ -889,7 +904,7 @@ class MarketBriefingProvider:
         try:
             response = self.requester(
                 EASTMONEY_A_SPOT_URL,
-                timeout=min(self.timeout, 5.0),
+                timeout=min(self.timeout, MARKET_FALLBACK_TIMEOUT),
                 headers=_eastmoney_headers(),
                 params={
                     "pn": "1",

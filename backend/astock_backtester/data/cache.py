@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import sqlite3
 from pathlib import Path
 
@@ -7,6 +8,8 @@ import pandas as pd
 
 from astock_backtester.data.importer import normalize_daily_bars
 from astock_backtester.models import DatasetCoverage
+
+logger = logging.getLogger(__name__)
 
 
 class LocalCache:
@@ -64,13 +67,23 @@ class LocalCache:
         if self.daily_bars_path.exists():
             try:
                 return pd.read_parquet(self.daily_bars_path).sort_values(["symbol", "trade_date"]).reset_index(drop=True)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning(
+                    "cached daily-bars parquet read failed for %s: %s",
+                    self.daily_bars_path,
+                    exc,
+                    exc_info=True,
+                )
         if self.daily_bars_pickle_path.exists():
             try:
                 return pd.read_pickle(self.daily_bars_pickle_path).sort_values(["symbol", "trade_date"]).reset_index(drop=True)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning(
+                    "cached daily-bars pickle read failed for %s: %s",
+                    self.daily_bars_pickle_path,
+                    exc,
+                    exc_info=True,
+                )
         return pd.DataFrame()
 
     def coverage(self) -> list[DatasetCoverage]:

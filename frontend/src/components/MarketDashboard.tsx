@@ -52,6 +52,7 @@ function sourceLabel(source: string | null | undefined): string | null {
       "cls-quote-index": "财联社指数",
       "ashare-sina": "Ashare/Sina",
       "cls-quote-breadth": "财联社涨跌分布",
+      "ths-indexflash-breadth": "同花顺涨跌分布",
       "ths-market-summary": "同花顺市场总览",
       "sina-a-share-live": "新浪实时个股",
       "tencent-a-share-live": "腾讯实时个股",
@@ -133,6 +134,12 @@ function refreshStatusLabel(meta: MarketRefreshMeta | undefined, isLoading: bool
   return "";
 }
 
+function isYesterdaySectorTracking(snapshot: RealtimeMarketSnapshot | null): boolean {
+  return (snapshot?.diagnostics ?? []).some((item) =>
+    /eastmoney-yesterday-limit-up tracking (?:refresh is still running|refresh scheduled in background)\./i.test(item)
+  );
+}
+
 export function MarketDashboard({ snapshot, isLoading = false, refreshMeta }: Props) {
   const breadth = snapshot?.breadth;
   const statusLabel = snapshot?.status === "live" ? "实时" : snapshot?.status === "stale" ? "本地兜底" : "待连接";
@@ -140,6 +147,7 @@ export function MarketDashboard({ snapshot, isLoading = false, refreshMeta }: Pr
   const phase = refreshMeta?.phase ?? snapshot?.market_phase;
   const sourceSummary = successfulSourceSummary(snapshot);
   const failedAttempt = firstFailedAttempt(snapshot);
+  const yesterdaySectorTracking = isYesterdaySectorTracking(snapshot);
 
   return (
     <section className="surface market-dashboard" aria-label="今日实时行情">
@@ -218,7 +226,9 @@ export function MarketDashboard({ snapshot, isLoading = false, refreshMeta }: Pr
                   <strong className={movementClass(sector.change_pct)}>{formatPercent(sector.change_pct)}</strong>
                 </span>
               ))}
-              {snapshot && (snapshot.yesterday_strong_sectors ?? []).length === 0 ? <span>等待昨日板块数据</span> : null}
+              {snapshot && (snapshot.yesterday_strong_sectors ?? []).length === 0 ? (
+                <span>{yesterdaySectorTracking ? "正在加载昨日板块数据" : "暂无昨日强势板块"}</span>
+              ) : null}
               {!snapshot ? <span>等待行情快照</span> : null}
             </div>
           </div>
