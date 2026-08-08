@@ -2405,6 +2405,94 @@ def test_realtime_provider_returns_cls_breadth_before_slow_local_count_scan(tmp_
     assert diagnostics == []
 
 
+def test_realtime_provider_cls_breadth_uses_a_realistic_home_timeout(tmp_path):
+    observed_timeouts = []
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "code": 200,
+                "data": {
+                    "up_down_dis": {
+                        "rise_num": 3200,
+                        "fall_num": 1800,
+                        "flat_num": 100,
+                    }
+                },
+            }
+
+    def requester(_url, **kwargs):
+        observed_timeouts.append(kwargs["timeout"])
+        return FakeResponse()
+
+    provider = RealtimeMarketProvider(Warehouse(tmp_path), requester=requester)
+
+    breadth = provider._fetch_cls_breadth([])
+
+    assert breadth is not None
+    assert observed_timeouts[0] >= 2.0
+
+
+def test_realtime_provider_breadth_waits_for_the_shared_cls_home_request(tmp_path):
+    request_started = threading.Event()
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "code": 200,
+                "data": {
+                    "index_quote": [
+                        {
+                            "secu_code": "sh000001",
+                            "secu_name": "上证指数",
+                            "last_px": 3100,
+                            "change": 0.01,
+                        }
+                    ],
+                    "up_down_dis": {
+                        "rise_num": 3200,
+                        "fall_num": 1800,
+                        "flat_num": 100,
+                    },
+                },
+            }
+
+    def requester(_url, **_kwargs):
+        request_started.set()
+        time.sleep(0.18)
+        return FakeResponse()
+
+    provider = RealtimeMarketProvider(
+        Warehouse(tmp_path),
+        requester=requester,
+        timeout=0.5,
+        breadth_time_budget=0.5,
+        breadth_source_timeout=0.05,
+    )
+    owner_result = []
+    owner = threading.Thread(
+        target=lambda: owner_result.append(provider._fetch_cls_home_payload(timeout=0.3))
+    )
+    owner.start()
+    assert request_started.wait(timeout=0.1)
+
+    breadth = provider._fetch_cls_breadth(
+        [],
+        deadline=time.monotonic() + 0.4,
+    )
+    owner.join(timeout=1)
+
+    assert owner_result
+    assert breadth is not None
+    assert breadth.total == 5100
+
+
 def test_realtime_provider_rejects_breadth_below_local_pool_ratio(tmp_path):
     warehouse = Warehouse(tmp_path)
     provider = RealtimeMarketProvider(warehouse)

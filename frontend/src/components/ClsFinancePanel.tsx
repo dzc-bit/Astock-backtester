@@ -157,66 +157,46 @@ function buildBriefingCards(finance: ClsFinanceResponse) {
 type TlineChart = {
   path: string;
   latestChange: number | null;
-  range: number;
+  range: number | null;
+  baseline: number | null;
+  baselineLabel: string;
 };
 
-function minuteOfDay(value: number): number | null {
-  const hour = Math.floor(value / 100);
-  const minute = value % 100;
-  if (hour < 0 || hour > 23 || minute < 0 || minute >= 60) {
-    return null;
-  }
-  return hour * 60 + minute;
-}
-
-function tradingPosition(point: ClsFinanceTlinePoint): { x: number; session: "morning" | "afternoon" } | null {
-  const minute = minuteOfDay(point.minute);
-  if (minute == null) {
-    return null;
-  }
-  const morningOpen = 9 * 60 + 30;
-  const morningClose = 11 * 60 + 30;
-  const afternoonOpen = 13 * 60;
-  const afternoonClose = 15 * 60;
-  if (minute >= morningOpen && minute <= morningClose) {
-    return { x: 7 + ((minute - morningOpen) / (morningClose - morningOpen)) * 40, session: "morning" };
-  }
-  if (minute >= afternoonOpen && minute <= afternoonClose) {
-    return { x: 53 + ((minute - afternoonOpen) / (afternoonClose - afternoonOpen)) * 40, session: "afternoon" };
+function pointChange(point: ClsFinanceTlinePoint, baseline: number | null): number | null {
+  if (baseline != null && baseline > 0) {
+    return point.last_px / baseline - 1;
   }
   return null;
 }
 
-function pointChange(point: ClsFinanceTlinePoint, preclose: number | null | undefined): number | null {
-  if (preclose != null && preclose > 0) {
-    return point.last_px / preclose - 1;
-  }
-  return point.change ?? null;
-}
-
 function buildTlineChart(finance: ClsFinanceResponse): TlineChart {
-  const chartPoints = finance.tline
-    .map((point) => {
-      const position = tradingPosition(point);
-      const change = pointChange(point, finance.preclose_px);
-      return position && change != null ? { ...position, change } : null;
-    })
-    .filter((point): point is { x: number; session: "morning" | "afternoon"; change: number } => point !== null);
-  const range = Math.max(0.003, ...chartPoints.map((point) => Math.abs(point.change)));
-  let previousSession: "morning" | "afternoon" | null = null;
+  const points = finance.tline.filter((point) => Number.isFinite(point.last_px) && point.last_px > 0);
+  const hasPreclose = finance.preclose_px != null && finance.preclose_px > 0;
+  const baseline = hasPreclose ? finance.preclose_px! : points[0]?.last_px ?? null;
+  if (baseline == null) {
+    return { path: "", latestChange: null, range: null, baseline: null, baselineLabel: "昨收" };
+  }
+  const maxPriceDiff = Math.max(0, ...points.map((point) => Math.abs(point.last_px - baseline)));
+  const paddedPriceDiff = maxPriceDiff + Math.max(0.01, maxPriceDiff * 0.1);
+  const denominator = Math.max(1, points.length - 1);
+  const chartPoints = points.map((point, index) => ({
+    x: 7 + (index / denominator) * 86,
+    last: point.last_px,
+  }));
   const path = chartPoints
-    .map((point) => {
-      const y = Math.max(10, Math.min(90, 50 - (point.change / range) * 38));
-      const command = previousSession === point.session ? "L" : "M";
-      previousSession = point.session;
+    .map((point, index) => {
+      const y = Math.max(10, Math.min(90, 50 - ((point.last - baseline) / paddedPriceDiff) * 38));
+      const command = index === 0 ? "M" : "L";
       return `${command} ${point.x.toFixed(2)} ${y.toFixed(2)}`;
     })
     .join(" ");
-  const latestPoint = finance.tline.at(-1);
+  const latestPoint = points.at(-1);
   return {
     path,
-    latestChange: latestPoint ? pointChange(latestPoint, finance.preclose_px) : null,
-    range,
+    latestChange: latestPoint ? pointChange(latestPoint, baseline) : null,
+    range: paddedPriceDiff / baseline,
+    baseline,
+    baselineLabel: hasPreclose ? "昨收" : "09:30 基准",
   };
 }
 
@@ -392,14 +372,20 @@ export function ClsFinancePanel({ finance, isLoading = false }: Props) {
               </span>
             </div>
             <div className="cls-finance-chart-context">
-              <span>昨收 {finance.preclose_px != null ? finance.preclose_px.toFixed(2) : "--"}</span>
-              <span>范围 +/-{tlineChart ? `${(tlineChart.range * 100).toFixed(2)}%` : "--"}</span>
+              <span>
+                {tlineChart?.baseline != null
+                  ? `${tlineChart.baselineLabel} ${tlineChart.baseline.toFixed(2)}`
+                  : "暂无价格基准"}
+              </span>
+              <span>
+                范围 +/-{tlineChart?.range != null ? `${(tlineChart.range * 100).toFixed(2)}%` : "--"}
+              </span>
             </div>
             <svg
               className="cls-finance-tline"
               viewBox="0 0 100 100"
               role="img"
-              aria-label="财联社上证指数分时线，以昨收为零轴"
+              aria-label="财联社上证指数分时线，以昨收或首个分时点为零轴"
               preserveAspectRatio="none"
             >
               <line className="cls-finance-gridline" x1="7" x2="93" y1="12" y2="12" />
@@ -420,8 +406,7 @@ export function ClsFinancePanel({ finance, isLoading = false }: Props) {
             </svg>
             <div className="cls-finance-ticks">
               <span>09:30</span>
-              <span>11:30</span>
-              <span>13:00</span>
+              <span>11:30 / 13:00</span>
               <span>15:00</span>
             </div>
           </div>

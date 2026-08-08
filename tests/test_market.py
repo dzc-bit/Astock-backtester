@@ -136,7 +136,7 @@ def _finance_payloads():
     }
 
 
-def test_cls_finance_tline_explicitly_requests_the_shanghai_index():
+def test_cls_finance_tline_matches_the_cls_finance_page_request_params():
     requested_params = {}
 
     def requester(_url, **kwargs):
@@ -148,7 +148,7 @@ def test_cls_finance_tline_explicitly_requests_the_shanghai_index():
     points = ClsFinanceProvider(requester=requester)._read_tline([])
 
     assert points
-    assert requested_params["secu_code"] == "sh000001"
+    assert "secu_code" not in requested_params
 
 
 def test_cls_finance_tline_sorts_points_by_date_and_minute():

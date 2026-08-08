@@ -200,8 +200,8 @@ class RealtimeMarketProvider:
     alternate_requester: Callable[..., Any] | None = None
     allow_alternate_transport: bool | None = None
     ths_cookie_getter: Callable[[float], str | None] | None = None
-    breadth_time_budget: float = 2.0
-    breadth_source_timeout: float = 0.8
+    breadth_time_budget: float = 3.0
+    breadth_source_timeout: float = 2.5
     sector_time_budget: float = 3.0
     sector_source_timeout: float = 0.8
     local_snapshot_time_budget: float = 2.0
@@ -839,12 +839,14 @@ class RealtimeMarketProvider:
                 owner = False
 
         if not owner:
-            wait_timeout = min(request_timeout + 0.1, max(0.05, min(float(self.timeout), 3.0) + 0.25))
+            max_wait_timeout = max(0.05, min(float(self.timeout), 3.0) + 0.25)
             if deadline is not None:
                 remaining = deadline - monotonic_time.monotonic()
                 if remaining <= 0:
                     raise TimeoutError("CLS home single-flight request budget exhausted")
-                wait_timeout = min(wait_timeout, remaining)
+                wait_timeout = min(max_wait_timeout, remaining)
+            else:
+                wait_timeout = min(request_timeout + 0.1, max_wait_timeout)
             if not flight.event.wait(timeout=wait_timeout):
                 raise TimeoutError("CLS home single-flight request timed out")
             with self._cls_home_lock:
@@ -1715,7 +1717,7 @@ class RealtimeMarketProvider:
     def _breadth_request_timeout(self) -> float:
         timeout = self.breadth_source_timeout
         if self.breadth_time_budget is not None:
-            timeout = min(timeout, max(0.2, self.breadth_time_budget / 2))
+            timeout = min(timeout, max(0.2, self.breadth_time_budget))
         return min(self.timeout, timeout)
 
     def _latest_local_symbols(self) -> list[str]:

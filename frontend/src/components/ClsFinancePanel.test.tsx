@@ -116,13 +116,37 @@ it("按交易时间和昨收展示分时，并可以打开原始看盘页", asyn
 
   expect(screen.getByLabelText("上证指数昨收基准")).toBeInTheDocument();
   expect(screen.getByText("09:30")).toBeInTheDocument();
-  expect(screen.getByText("11:30")).toBeInTheDocument();
-  expect(screen.getByText("13:00")).toBeInTheDocument();
+  expect(screen.getByText("11:30 / 13:00")).toBeInTheDocument();
   expect(screen.getByText("15:00")).toBeInTheDocument();
 
   await user.click(screen.getByRole("button", { name: "打开财联社看盘页" }));
 
   expect(open).toHaveBeenCalledWith("https://www.cls.cn/finance", "_blank", "noopener,noreferrer");
+});
+
+it("缺少昨收时仍按分时价格走势绘制并均匀排列交易点", () => {
+  const finance = {
+    ...buildFinance(),
+    preclose_px: null,
+    tline: [
+      { date: 20260609, minute: 930, last_px: 100, change: 0.05 },
+      { date: 20260609, minute: 931, last_px: 101, change: -0.05 },
+      { date: 20260609, minute: 1300, last_px: 102, change: 0.05 }
+    ]
+  };
+
+  const { container } = render(<ClsFinancePanel finance={finance} />);
+  const path = container.querySelector(".cls-finance-tline path");
+  const coordinates = path
+    ?.getAttribute("d")
+    ?.match(/[-+]?\d*\.?\d+/g)
+    ?.map(Number);
+
+  expect(coordinates).toBeDefined();
+  expect(coordinates?.[2]).toBeGreaterThan(40);
+  expect(coordinates?.[1]).toBeGreaterThan(coordinates?.[3] ?? Number.POSITIVE_INFINITY);
+  expect(coordinates?.[3]).toBeGreaterThan(coordinates?.[5] ?? Number.POSITIVE_INFINITY);
+  expect(screen.getByText("09:30 基准 100.00")).toBeInTheDocument();
 });
 
 it("在桌面端通过系统命令打开财联社看盘页", async () => {

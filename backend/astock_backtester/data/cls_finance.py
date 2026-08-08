@@ -271,7 +271,6 @@ class ClsFinanceProvider:
             payload = cls_request_json(
                 self.requester,
                 CLS_TLINE_URL,
-                params={"secu_code": "sh000001"},
                 timeout=self.timeout,
             )
         except Exception as exc:

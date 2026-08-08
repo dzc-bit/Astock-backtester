@@ -29,7 +29,7 @@ git branch --show-current
 https://github.com/dzc-bit/Astock-backtester.git
 ```
 
-保护已有未提交修改。不要覆盖无关文件，不要清理、删除、迁移 `D:\New project 6\运行产物`。版本号统一跟随桌面端当前版本，当前为 `1.3.4`，除非用户明确要求改版本。
+保护已有未提交修改。不要覆盖无关文件，不要清理、删除、迁移 `D:\New project 6\运行产物`。版本号统一跟随桌面端当前版本，当前为 `1.3.6`，除非用户明确要求改版本。
 
 ## 2. 绝对不要碰错边界
 
@@ -245,34 +245,110 @@ assert events[-1]["type"] == "result"
 
 不要落地长期探针。临时 `.py`、`.ps1`、`.js`、`.json`、`.log` 跑完删除。
 
-## 12. 桌面更新和签名
+## 12. 桌面安装包构建、签名和覆盖安装
 
-本节已经包含 agent 接手所需发布规则；其他发布文档只作人工维护参考。
+本节是 2026-07-17 构建 `1.3.6` 安装包时实际使用的流程。所有工具、缓存、构建产物和安装包均在 `D:\New project 6` 所在的 D 盘；不要重新下载工具，也不要再使用或恢复 `C:\BuildTool`、`C:\BuildTools` 下的构建环境。
 
-签名密钥优先路径：
+### 固定工具与目录
+
+以下内容已经存在于项目内，构建前只检查，不执行 `npm install`、Rust 安装器、NSIS 安装器或任何额外下载：
+
+```text
+D:\New project 6\.tools\node-v20.18.1-win-x64\node.exe
+D:\New project 6\.tools\node-v20.18.1-win-x64\npm.cmd
+D:\New project 6\.tools\python-build\Scripts\python.exe
+D:\New project 6\.tools\rustup-home\toolchains\stable-x86_64-pc-windows-msvc\bin\cargo.exe
+D:\New project 6\.tools\msvc-build-tools\VC\Auxiliary\Build\vcvars64.bat
+D:\New project 6\src-tauri\target\.tauri\NSIS
+```
+
+`src-tauri\tauri.conf.json` 已设置 `bundle.useLocalToolsDir: true`，所以 Tauri 的 NSIS 缓存必须保留在 `src-tauri\target\.tauri\NSIS`，而不是用户目录或 C 盘。`.tools\llvm-mingw`、GNU/GNULLVM 工具链不是本流程的一部分，不能作为 MSVC 构建的替代品；是否清理它们必须另行确认，不能在构建命令中顺带删除。
+
+签名私钥仅从以下运行产物路径读入当前 PowerShell 进程，绝不输出、写入日志或提交：
 
 ```text
 D:\New project 6\运行产物\签名密钥\a-stock-backtester-v017.key
 ```
 
-规则：
+### 构建前检查
 
-- 只在当前进程环境读取私钥。
-- 不打印、不提交、不写文档、不写日志、不写最终回复。
-- 构建签名安装包后确认 `.sig` 是本次生成。
-- `latest.json` 必须由本次真实 `.sig` 生成。
-- 不手改、不伪造、不复用旧 `latest.json` 或旧 `.sig`。
-- 覆盖安装后比较安装目录 sidecar 和工作区 sidecar SHA256。
-- 桌面端 release 主程序必须使用 Windows GUI subsystem（`windows_subsystem = "windows"`），启动 `astock-data-service.exe` 时必须加 `CREATE_NO_WINDOW`；同花顺评分用 Node/jsdom 生成 cookie 时也必须隐藏 `node.exe` 控制台窗口。用户双击桌面端不应看到黑色命令行窗口。
-- 覆盖安装只使用本轮构建产物；源码版本、Tauri 版本和安装包文件名不一致时，先修正版本并重新构建，不复用旧包。
-- GitHub Release 的 updater 安装包资产名必须用 ASCII，例如 `Astock-backtester_1.3.0_x64-setup.exe`；用 `scripts\write-latest-json.ps1 -AssetName 本地中文安装包名 -ReleaseAssetName ASCII资产名` 生成 `latest.json`，并确认 `latest.json.platforms.windows-x86_64.url` 指向真实上传的 ASCII 资产名。
-- `release-assets\latest.json` 是本地发布暂存文件，生成后用于上传 GitHub Release，不提交到仓库；发布完成或验证结束后本地可删除。
+版本必须在 `package.json`、`pyproject.toml`、`src-tauri\Cargo.toml` 与 `src-tauri\tauri.conf.json` 保持一致；本次为 `1.3.6`。在项目根目录执行：
 
-硬坑：
+```powershell
+$root = 'D:\New project 6'
+Set-Location -LiteralPath $root
 
-- `npm run tauri -- build --ci` 外层曾返回非零但实际安装包和签名已生成；不要只看外层 wrapper，必须看真实产物和后续验证。
-- 本机可用 cargo 不一定在 `.tools\cargo-home\bin`，实际常用路径是 `.tools\rustup-home\toolchains\stable-x86_64-pc-windows-msvc\bin\cargo.exe`。
-- 覆盖安装不等于 sidecar 已替换，必须停旧进程后比对 hash，再探测端点。
+$nodeDir = Join-Path $root '.tools\node-v20.18.1-win-x64'
+$cargoBin = Join-Path $root '.tools\rustup-home\toolchains\stable-x86_64-pc-windows-msvc\bin'
+$msvcEnv = Join-Path $root '.tools\msvc-build-tools\VC\Auxiliary\Build\vcvars64.bat'
+$signingKey = Join-Path $root '运行产物\签名密钥\a-stock-backtester-v017.key'
+$required = @(
+  (Join-Path $nodeDir 'node.exe'),
+  (Join-Path $nodeDir 'npm.cmd'),
+  (Join-Path $root '.tools\python-build\Scripts\python.exe'),
+  (Join-Path $cargoBin 'cargo.exe'),
+  $msvcEnv,
+  (Join-Path $root 'src-tauri\target\.tauri\NSIS\makensis.exe'),
+  $signingKey
+)
+$missing = $required | Where-Object { -not (Test-Path -LiteralPath $_) }
+if ($missing) { throw "缺少项目内构建依赖：$($missing -join '; ')" }
+```
+
+不要把 `node.exe`、`npm.cmd`、Python、MSVC、Rust 或 NSIS 的路径改到 C 盘。缺少依赖时先停止并说明缺哪一项；只有用户明确授权后，才可将缺少的工具下载到项目内的 `.tools`。
+
+### 本次实际构建命令
+
+`tauri.conf.json` 的 `beforeBuildCommand` 会依次执行前端 `vite build` 与 `scripts\build-data-service.ps1`。后者用项目内 Python 打包 `astock-data-service.exe`，并把 `node.exe`、`ths-cookie-worker.cjs`、`xhr-sync-worker.js` 一起放入 `src-tauri\bin`。因此本次只运行一次 Tauri release 构建，不再另跑重复的前端或 sidecar 打包命令。
+
+```powershell
+$env:RUSTUP_HOME = Join-Path $root '.tools\rustup-home'
+$env:CARGO_HOME = Join-Path $root '.tools\cargo-home'
+$env:TAURI_SIGNING_PRIVATE_KEY = [System.IO.File]::ReadAllText($signingKey).Trim()
+$env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = ''
+
+try {
+  $build = "call `"$msvcEnv`" && set `"PATH=$cargoBin;$nodeDir;%PATH%`" && set `"RUSTUP_HOME=$env:RUSTUP_HOME`" && set `"CARGO_HOME=$env:CARGO_HOME`" && `"$nodeDir\npm.cmd`" run tauri -- build --ci"
+  cmd.exe /S /C $build
+  if ($LASTEXITCODE -ne 0) { throw "Tauri 构建失败，退出码：$LASTEXITCODE" }
+} finally {
+  Remove-Item Env:\TAURI_SIGNING_PRIVATE_KEY -ErrorAction SilentlyContinue
+  Remove-Item Env:\TAURI_SIGNING_PRIVATE_KEY_PASSWORD -ErrorAction SilentlyContinue
+}
+```
+
+本次产生的签名安装包为：
+
+```text
+D:\New project 6\src-tauri\target\release\bundle\nsis\A股策略回测工作台_1.3.6_x64-setup.exe
+D:\New project 6\src-tauri\target\release\bundle\nsis\A股策略回测工作台_1.3.6_x64-setup.exe.sig
+```
+
+产物名、版本和 `.sig` 必须同一轮生成。非零退出码就是失败，不能因为目录里留下了旧 `.exe` 就把它当成本次可用安装包；签名缺失时也不得复用旧 `.sig` 或生成 `latest.json`。
+
+### 覆盖安装和最低验证
+
+覆盖安装前先退出桌面端及旧 sidecar，随后只使用刚生成的安装包静默安装：
+
+```powershell
+Get-Process -ErrorAction SilentlyContinue |
+  Where-Object { $_.ProcessName -like '*astock*' -or $_.Path -like '*A股策略回测工作台*' } |
+  Stop-Process -Force
+
+$installer = Join-Path $root 'src-tauri\target\release\bundle\nsis\A股策略回测工作台_1.3.6_x64-setup.exe'
+$install = Start-Process -FilePath $installer -ArgumentList '/S' -Wait -PassThru
+if ($install.ExitCode -ne 0) { throw "覆盖安装失败，退出码：$($install.ExitCode)" }
+```
+
+本次静默覆盖安装退出码为 `0`。安装后必须启动安装版并确认没有访问开发地址 `127.0.0.1:1420`，再比较工作区与安装目录 `bin\astock-data-service.exe` 的 SHA-256，并至少探测 `/ping`、`/health`、`/market/finance`、`/realtime/market-snapshot`、`/market/commentary`、`/market/fupan`、`/market/zaopan` 与 `/run/backtest/stream`。`/run/backtest/stream` 是 NDJSON，需逐行解析并断言最后一条事件的 `type` 为 `result`。
+
+桌面端 release 主程序必须使用 Windows GUI subsystem（`windows_subsystem = "windows"`）；启动 `astock-data-service.exe` 与同花顺 cookie worker 的 `node.exe` 都必须隐藏控制台窗口。安装成功不代表 sidecar 已替换，也不代表服务自动启动成功，这两项需要分别验证。
+
+### GitHub 与清理边界
+
+本次只构建并覆盖安装，未创建 GitHub Release。后续需要发布时，GitHub updater 资产名必须使用 ASCII，例如 `Astock-backtester_1.3.6_x64-setup.exe`；只能由本次真实 `.sig` 使用 `scripts\write-latest-json.ps1` 生成 `latest.json`，且不提交安装包、`.sig`、`latest.json` 或私钥。
+
+构建后可点名清理 `.pyinstaller`、明确的临时探针、日志和下载残留；不要使用 `git clean -fdX`，也不要删除 `.tools`、`node_modules`、`src-tauri\bin`、`src-tauri\target`、`src-tauri\target\.tauri\NSIS` 或整个 `运行产物`。
 
 ## 13. 验证命令
 
@@ -304,7 +380,7 @@ python -m pytest tests/test_capital_flow_crawler.py tests/test_data_operations.p
 行情/复盘变更：
 
 ```powershell
-python -m pytest tests/test_market_briefing.py tests/test_market_commentary.py tests/test_data_service_http.py -q
+python -m pytest tests/test_market.py tests/test_data_service_http.py -q
 ```
 
 ## 14. 最终交付前检查
