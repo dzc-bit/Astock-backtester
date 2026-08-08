@@ -4,6 +4,14 @@ Windows 桌面版 A 股策略回测工具。项目使用 React + TypeScript 构�
 
 当前版本：`1.3.6`
 
+## 1.3.6 当前发布内容
+
+- 修复桌面端冷启动时 Python sidecar 尚未完成启动就被 Rust 判定超时的问题。
+- release 模式始终加载打包后的前端入口，不再访问开发地址 `127.0.0.1:1420`。
+- 增强财联社行情、红绿家数和行情评价的超时预算与并发合并；上游失败时保留明确诊断。
+- 财联社分时图缺少昨收时以首个有效分时点作为基准，避免图表空白。
+- 安装包与 updater 资产使用 ASCII 文件名，安装包、sidecar 和签名在发布前分别校验。
+
 ## 面向用户
 
 - 数据中心：维护 A 股日线、资金流、市值和覆盖信息，支持导入、全市场同步、指定股票补齐和资金流补齐。
@@ -89,5 +97,7 @@ npm run tauri -- dev
 ```powershell
 npm run tauri -- build --ci
 ```
+
+Windows 发布使用项目内固定的 Node、Python、Rust、MSVC 和 NSIS 工具，完整的签名、覆盖安装、sidecar 哈希和 HTTP 探针流程见 [`docs/release.md`](docs/release.md)。
 
 发布前请确认生成的安装包、签名文件、临时更新清单、日志和运行数据没有提交到 Git 仓库。

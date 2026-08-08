@@ -57,21 +57,20 @@ D:\New project 6\运行产物\签名密钥\a-stock-backtester-v017.key
 - `src-tauri/Cargo.toml`
 - `src-tauri/tauri.conf.json`
 
-Git tag 使用 `v版本号`，例如：
+当前发布版本为 `1.3.6`。Git tag 使用 `v版本号`，例如：
 
 ```text
-v1.3.0
+v1.3.6
 ```
 
 ## Release Order
 
-1. Bump `package.json`, `pyproject.toml`, `src-tauri/Cargo.toml`, and `src-tauri/tauri.conf.json` to the same version.
-2. Build the sidecar with `scripts/build-data-service.ps1`.
-3. Build the signed NSIS installer.
-4. Confirm the installer contains the latest `src-tauri\bin\astock-data-service.exe`; for a same-version local reinstall, also verify the installed `bin\astock-data-service.exe` was actually overwritten by comparing hashes.
-5. Generate a fresh `latest.json` with `scripts/write-latest-json.ps1` from the real `.sig`.
-6. Create the GitHub Release and upload the installer plus the freshly generated `latest.json`.
-7. Verify `https://github.com/dzc-bit/Astock-backtester/releases/latest/download/latest.json` returns the new version.
+1. Confirm `package.json`, `pyproject.toml`, `src-tauri/Cargo.toml`, and `src-tauri/tauri.conf.json` all report `1.3.6`.
+2. Use the project-local tools under `.tools` and build the signed NSIS installer once; `beforeBuildCommand` builds the frontend and sidecar automatically.
+3. Confirm the installer contains the latest `src-tauri\bin\astock-data-service.exe`; for this same-version reinstall, compare the installed sidecar SHA-256 after stopping old processes.
+4. Generate a fresh `latest.json` from the `.sig` created next to this installer.
+5. Upload the installer as `Astock-backtester_1.3.6_x64-setup.exe` and upload `latest.json` to the existing `v1.3.6` release with asset replacement enabled.
+6. Verify the release assets, SHA-256 digest, signature and `latest.json` URL from GitHub.
 
 `latest.json` must be generated from the real `.sig` file produced next to the installer. Do not hand-edit a future version into `release-assets/latest.json` before the installer and signature exist, because the app updater verifies that signature. The `release-assets` directory is ignored by Git; treat files there as local staging artifacts and upload the verified `latest.json` to the GitHub Release instead of keeping stale updater manifests in the repository.
 
@@ -92,17 +91,24 @@ Expected output:
 
 ## 构建签名安装包
 
-在 Windows 发布机器上执行：
+在 `D:\New project 6` 发布机器上执行。不要重新下载工具或把构建路径切换到 C 盘：
 
 ```powershell
-$projectKey = "D:\New project 6\运行产物\签名密钥\a-stock-backtester-v017.key"
+$root = "D:\New project 6"
+$nodeDir = Join-Path $root ".tools\node-v20.18.1-win-x64"
+$cargoBin = Join-Path $root ".tools\rustup-home\toolchains\stable-x86_64-pc-windows-msvc\bin"
+$msvcEnv = Join-Path $root ".tools\msvc-build-tools\VC\Auxiliary\Build\vcvars64.bat"
+$projectKey = Join-Path $root "运行产物\签名密钥\a-stock-backtester-v017.key"
 if (-not (Test-Path $projectKey)) { throw "Tauri signing key not found at project runtime key path" }
-$env:TAURI_SIGNING_PRIVATE_KEY = Get-Content -Raw $projectKey
+$env:RUSTUP_HOME = Join-Path $root ".tools\rustup-home"
+$env:CARGO_HOME = Join-Path $root ".tools\cargo-home"
+$env:TAURI_SIGNING_PRIVATE_KEY = [System.IO.File]::ReadAllText($projectKey).Trim()
 $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = ""
-npm run build:data-service
-npm run build
-npm run tauri -- build --ci
+$build = "call `"$msvcEnv`" && set `"PATH=$cargoBin;$nodeDir;%PATH%`" && set `"RUSTUP_HOME=$env:RUSTUP_HOME`" && set `"CARGO_HOME=$env:CARGO_HOME`" && `"$nodeDir\npm.cmd`" run tauri -- build --ci"
+cmd.exe /S /C $build
+if ($LASTEXITCODE -ne 0) { throw "Tauri build failed: $LASTEXITCODE" }
 Remove-Item Env:\TAURI_SIGNING_PRIVATE_KEY
+Remove-Item Env:\TAURI_SIGNING_PRIVATE_KEY_PASSWORD
 ```
 
 预期生成：
@@ -140,17 +146,19 @@ Get-FileHash "D:\New project 6\src-tauri\bin\astock-data-service.exe"
 
 ## latest.json
 
-用发布版本、安装包 URL 和签名内容生成 `latest.json`：
+用本轮真实 1.3.6 安装包和签名生成 `latest.json`：
 
 ```powershell
-$assetName = "A股策略回测工作台_1.3.0_x64-setup.exe"
-$releaseAssetName = "Astock-backtester_1.3.0_x64-setup.exe"
+$assetName = "A股策略回测工作台_1.3.6_x64-setup.exe"
+$releaseAssetName = "Astock-backtester_1.3.6_x64-setup.exe"
 powershell -ExecutionPolicy Bypass -File scripts/write-latest-json.ps1 `
-  -Version "1.3.0" `
+  -Version "1.3.6" `
   -AssetName $assetName `
   -ReleaseAssetName $releaseAssetName `
-  -Notes "发布实时行情完整性校验、行情评价严格降级、复盘候选分离、A 股交易日历覆盖和安装后 sidecar 验证增强。"
+  -Notes "修复桌面端 sidecar 冷启动断连，增强财联社实时行情超时与分时图降级，并更新安装后 sidecar 校验。"
 ```
+
+同版本覆盖安装不会触发已安装客户端的自动更新；需要验证本地安装覆盖时，先退出旧桌面端和 sidecar，再使用本轮生成的安装包静默安装。
 
 不要提前加入 macOS 或 Linux 平台字段。静态 JSON 会被 updater 整体解析，只有真实可用的平台资产才应该写入。
 

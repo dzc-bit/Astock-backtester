@@ -247,7 +247,7 @@ assert events[-1]["type"] == "result"
 
 ## 12. 桌面安装包构建、签名和覆盖安装
 
-本节是 2026-07-17 构建 `1.3.6` 安装包时实际使用的流程。所有工具、缓存、构建产物和安装包均在 `D:\New project 6` 所在的 D 盘；不要重新下载工具，也不要再使用或恢复 `C:\BuildTool`、`C:\BuildTools` 下的构建环境。
+本节是 1.3.6 当前重发时实际使用的流程。所有工具、缓存、构建产物和安装包均在 `D:\New project 6` 所在的 D 盘；不要重新下载工具，也不要再使用或恢复 `C:\BuildTool`、`C:\BuildTools` 下的构建环境。
 
 ### 固定工具与目录
 
@@ -317,12 +317,14 @@ try {
 }
 ```
 
-本次产生的签名安装包为：
+本次产生的签名安装包为（中文文件名仅作本地构建产物，上传时改用 ASCII 资产名）：
 
 ```text
 D:\New project 6\src-tauri\target\release\bundle\nsis\A股策略回测工作台_1.3.6_x64-setup.exe
 D:\New project 6\src-tauri\target\release\bundle\nsis\A股策略回测工作台_1.3.6_x64-setup.exe.sig
 ```
+
+对应的 GitHub Release 资产名为 `Astock-backtester_1.3.6_x64-setup.exe`，`latest.json` 必须指向该 ASCII 名称。更新同一 `v1.3.6` Release 时使用 `gh release upload v1.3.6 ... --clobber` 替换旧资产；已安装的 1.3.6 客户端不会因为同版本号自动更新。
 
 产物名、版本和 `.sig` 必须同一轮生成。非零退出码就是失败，不能因为目录里留下了旧 `.exe` 就把它当成本次可用安装包；签名缺失时也不得复用旧 `.sig` 或生成 `latest.json`。
 
