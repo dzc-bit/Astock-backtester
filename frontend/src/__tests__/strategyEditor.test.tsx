@@ -476,26 +476,62 @@ describe("A 股回测工作台界面", () => {
     expect(apiMocks.loadRecommendedStrategies).toHaveBeenCalledTimes(3);
   });
 
-  it("uses the three-second market retry when yesterday tracking is still running", async () => {
+  it("在昨日追踪运行时保持正常轮询，并在后台刷新期间保留完整快照", async () => {
     vi.useRealTimers();
     vi.useFakeTimers();
     vi.clearAllMocks();
-    const pendingSnapshot = {
+    const initialSnapshot = {
       status: "live",
       source: "test",
       updated_at: "2026-05-27T10:30:00Z",
       market_phase: "trading",
-      indexes: [],
-      breadth: null,
-      strong_sectors: [],
+      indexes: [
+        {
+          symbol: "sh000001",
+          name: "上证指数",
+          last: 3120.5,
+          previous_close: 3100,
+          change: 20.5,
+          change_pct: 0.0066129,
+          source: "test",
+          updated_at: "2026-05-27T10:30:00Z"
+        }
+      ],
+      breadth: { up: 3200, down: 1700, flat: 200, total: 5100, source: "test" },
+      strong_sectors: [{ name: "半导体", change_pct: 0.036, leading_symbol: "688001", source: "test" }],
       yesterday_strong_sectors: [],
       message: "昨日涨停板块仍在加载",
       diagnostics: ["eastmoney-yesterday-limit-up tracking refresh scheduled in background."]
     };
-    apiMocks.loadRealtimeMarketSnapshot.mockResolvedValue(pendingSnapshot);
+    const partialSnapshot = {
+      ...initialSnapshot,
+      status: "stale",
+      source: "stream-partial",
+      breadth: null,
+      strong_sectors: [],
+      message: "实时指数已返回，继续加载红绿家数和板块"
+    };
+    const completedSnapshot = {
+      ...initialSnapshot,
+      updated_at: "2026-05-27T10:31:00Z",
+      breadth: { up: 3210, down: 1690, flat: 200, total: 5100, source: "test" },
+      message: "实时行情已更新",
+      diagnostics: []
+    };
+    let requestCount = 0;
+    let completeSecondRefresh: (snapshot: typeof completedSnapshot) => void = () => undefined;
+    const secondRefresh = new Promise<typeof completedSnapshot>((resolve) => {
+      completeSecondRefresh = resolve;
+    });
+    apiMocks.loadRealtimeMarketSnapshot.mockResolvedValue(initialSnapshot);
     apiMocks.loadRealtimeMarketSnapshotStream.mockImplementation(async (_baseUrl, handlers = {}) => {
-      handlers.onSnapshot?.(pendingSnapshot);
-      return pendingSnapshot;
+      requestCount += 1;
+      if (requestCount === 1) {
+        handlers.onSnapshot?.(initialSnapshot);
+        return initialSnapshot;
+      }
+      handlers.onSnapshot?.(partialSnapshot);
+      return secondRefresh;
     });
 
     render(<App />);
@@ -503,15 +539,26 @@ describe("A 股回测工作台界面", () => {
     await flushAsyncEffects();
     expect(apiMocks.loadRealtimeMarketSnapshotStream).toHaveBeenCalledTimes(1);
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(2_999);
+      await vi.advanceTimersByTimeAsync(3_000);
     });
     expect(apiMocks.loadRealtimeMarketSnapshotStream).toHaveBeenCalledTimes(1);
 
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(1);
+    act(() => {
+      vi.advanceTimersByTime(57_000);
     });
     await flushAsyncEffects();
     expect(apiMocks.loadRealtimeMarketSnapshotStream).toHaveBeenCalledTimes(2);
+    const market = screen.getByRole("region", { name: "今日实时行情" });
+    expect(within(market).getByText("红 3200")).toBeInTheDocument();
+    expect(within(market).getByText("半导体")).toBeInTheDocument();
+    expect(within(market).queryByText("刷新中")).not.toBeInTheDocument();
+
+    await act(async () => {
+      completeSecondRefresh(completedSnapshot);
+      await Promise.resolve();
+    });
+    await flushAsyncEffects();
+    expect(within(market).getByText("红 3210")).toBeInTheDocument();
   });
 
   it("retries failed independent first-screen modules after three seconds without duplicate requests", async () => {

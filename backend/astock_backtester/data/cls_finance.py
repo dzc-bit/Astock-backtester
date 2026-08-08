@@ -17,6 +17,7 @@ import requests
 from bs4 import BeautifulSoup
 
 from astock_backtester.data.cls import CLS_QUOTE_BASE_URL, CLS_SITE_BASE_URL, cls_request_json
+from astock_backtester.data.http_transport import resilient_get, should_allow_alternate_transport
 from astock_backtester.data.providers import normalize_symbol
 from astock_backtester.data.realtime_parsers import (
     THS_HEADERS,
@@ -71,6 +72,12 @@ THS_MARKET_DEGREE_RE = re.compile(
 )
 
 
+_ths_cookie_cache_lock = Lock()
+_ths_cookie_cache_value: str | None = None
+_ths_cookie_cache_until: float = 0.0
+_THS_COOKIE_CACHE_TTL: float = 90.0
+
+
 def _cls_payload_data(payload: Any, diagnostics: list[str], source: str) -> Any | None:
     if not isinstance(payload, dict):
         diagnostics.append(f"{source}读取失败：响应不是对象。")
@@ -93,6 +100,8 @@ class ClsFinanceProvider:
     requester: Callable[..., requests.Response] = requests.get
     timeout: float = 5.0
     browser_cookie_getter: Callable[[], str | None] | None = None
+    alternate_requester: Callable[..., Any] | None = None
+    allow_alternate_transport: bool | None = None
     cache_ttl: float = 3.0
     recent_success_ttl: float = 15 * 60.0
     _refresh_lock: Lock = field(default_factory=Lock, init=False, repr=False)
@@ -487,6 +496,7 @@ class ClsFinanceProvider:
         browser_cookie: str | None = None
         browser_cookie_read = False
         for url in THS_MARKET_DEGREE_URLS:
+            request_diagnostics: list[str] = []
             headers = dict(THS_MARKET_SCORE_HEADERS)
             if url in THS_MARKET_INDEXFLASH_URLS:
                 if not browser_cookie_read:
@@ -495,19 +505,36 @@ class ClsFinanceProvider:
                         if self.browser_cookie_getter is not None:
                             browser_cookie = self.browser_cookie_getter()
                         else:
-                            browser_cookie = read_ths_browser_cookie(min(self.timeout, 1.2))
+                            browser_cookie = read_ths_browser_cookie(min(self.timeout, 3.0))
                     except Exception as exc:
                         errors.append(f"同花顺浏览器校验读取失败：{exc}")
                 if browser_cookie:
                     headers["Cookie"] = browser_cookie
             try:
-                response = self.requester(
-                    url,
-                    timeout=min(self.timeout, 3.0),
-                    headers=headers,
-                )
-                response.raise_for_status()
+                if url in THS_MARKET_INDEXFLASH_URLS:
+                    response = resilient_get(
+                        self.requester,
+                        url,
+                        timeout=min(self.timeout, 3.0),
+                        source="ths-market-degree",
+                        diagnostics=request_diagnostics,
+                        retries=0,
+                        alternate_requester=self.alternate_requester,
+                        allow_alternate=should_allow_alternate_transport(
+                            self.requester,
+                            self.allow_alternate_transport,
+                        ),
+                        headers=headers,
+                    )
+                else:
+                    response = self.requester(
+                        url,
+                        timeout=min(self.timeout, 3.0),
+                        headers=headers,
+                    )
+                    response.raise_for_status()
             except Exception as exc:
+                errors.extend(request_diagnostics)
                 errors.append(f"{url}: {exc}")
                 continue
             response.encoding = response.encoding or "gbk"
@@ -517,8 +544,10 @@ class ClsFinanceProvider:
             if degree is None:
                 degree = _parse_ths_market_degree_visible_text(visible_text)
             if degree is None:
+                errors.extend(request_diagnostics)
                 errors.append(f"{url}: 页面未包含可解析的大盘评分")
                 continue
+            diagnostics.extend(request_diagnostics)
             diagnostics.append(f"同花顺大盘评分读取成功：{degree:.1f}")
             return degree
         diagnostics.append(f"同花顺大盘评分读取失败：{'; '.join(errors[:4])}")
@@ -610,10 +639,16 @@ def _normalize_ths_market_degree(value: object) -> float | None:
 
 
 def read_ths_browser_cookie(timeout_s: float = 1.2) -> str | None:
+    global _ths_cookie_cache_value, _ths_cookie_cache_until
+    now = monotonic()
+    with _ths_cookie_cache_lock:
+        if _ths_cookie_cache_value is not None and now < _ths_cookie_cache_until:
+            return _ths_cookie_cache_value
+
     node = _resolve_node_executable()
     if node is None:
         return None
-    worker = _resolve_ths_cookie_worker() if getattr(sys, "frozen", False) else None
+    worker = _resolve_ths_cookie_worker()
     startup_kwargs = _subprocess_startup_kwargs()
     timeout_s = min(max(float(timeout_s), 0.2), 5.0)
     environment = {**os.environ, "THS_COOKIE_TIMEOUT_MS": str(round(timeout_s * 1000))}
@@ -646,6 +681,9 @@ def read_ths_browser_cookie(timeout_s: float = 1.2) -> str | None:
     cookie = completed.stdout.strip()
     if completed.returncode != 0 or "v=" not in cookie:
         return None
+    with _ths_cookie_cache_lock:
+        _ths_cookie_cache_value = cookie
+        _ths_cookie_cache_until = monotonic() + _THS_COOKIE_CACHE_TTL
     return cookie
 
 

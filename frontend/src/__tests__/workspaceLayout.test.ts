@@ -43,6 +43,14 @@ describe("workspace desktop layout", () => {
     );
   });
 
+  it("keeps CLS actions compact with the detail button left and the external link right", () => {
+    expect(styles).toMatch(
+      /\.section-title\s*>\s*\.cls-finance-actions\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s*auto;[^}]*grid-template-areas:[^}]*"detail open"[^}]*"source source"/s
+    );
+    expect(styles).toMatch(/\.cls-finance-detail-button\s*\{[^}]*grid-area:\s*detail;[^}]*min-height:\s*30px;/s);
+    expect(styles).toMatch(/\.cls-finance-open-button\s*\{[^}]*grid-area:\s*open;/s);
+  });
+
   it("keeps realtime market index quotes in a compact row instead of stacking full width", () => {
     expect(styles).toMatch(/\.market-news-layout,\s*\.market-insight-layout\s*\{[^}]*grid-template-columns:\s*minmax\(620px,\s*1\.45fr\)\s*minmax\(360px,\s*0\.9fr\);/s);
     expect(styles).toMatch(/\.index-quote\s*\{\s*grid-column:\s*auto;\s*\}/s);

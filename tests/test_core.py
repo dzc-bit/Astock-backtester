@@ -1,5 +1,12 @@
-import pandas as pd
+from __future__ import annotations
 
+from datetime import date
+
+import pandas as pd
+import pytest
+from pydantic import ValidationError
+
+from astock_backtester import indicators
 from astock_backtester.condition_parser import (
     condition_examples,
     exit_condition_examples,
@@ -7,16 +14,146 @@ from astock_backtester.condition_parser import (
     validate_exit_condition_text,
 )
 from astock_backtester.conditions import evaluate_condition, evaluate_group, registered_conditions
-from astock_backtester import indicators
+from astock_backtester.data.trading_calendar import a_share_trade_dates
 from astock_backtester.indicators import (
+    add_capital_flow_sum,
     add_macd,
     add_market_heat,
     add_moving_average,
+    add_prior_high_low,
     add_returns,
     add_volume_ratio,
 )
-from astock_backtester.models import ConditionGroup, ConditionNode, ConditionOperator
+from astock_backtester.models import (
+    BacktestSettings,
+    ClsFinanceAnchor,
+    ClsFinanceEmotion,
+    ClsFinancePoolItem,
+    ClsFinanceResponse,
+    ClsFinanceTlinePoint,
+    ConditionGroup,
+    ConditionNode,
+    ConditionOperator,
+    DatasetCoverage,
+    MarketBreadth,
+    StrategyConfig,
+    SyncJobStatus,
+)
 from astock_backtester.sample_data import sample_daily_bars
+
+# Merged from: test_indicators.py, test_conditions.py, test_models.py, test_trading_calendar.py
+
+
+# ---------------------------------------------------------------------------
+# Indicators
+# ---------------------------------------------------------------------------
+
+
+def test_sample_daily_bars_contract():
+    df = sample_daily_bars()
+    required_columns = {
+        "symbol",
+        "trade_date",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "turnover_rate",
+        "float_market_cap",
+        "main_net_inflow",
+        "is_st",
+        "is_suspended",
+        "listing_days",
+    }
+
+    assert set(df["symbol"]) == {"AAA", "BBB"}
+    assert pd.api.types.is_datetime64_any_dtype(df["trade_date"])
+    assert required_columns.issubset(df.columns)
+    assert df.equals(df.sort_values(["symbol", "trade_date"]).reset_index(drop=True))
+
+
+def test_add_moving_average_uses_symbol_boundaries():
+    df = sample_daily_bars()
+    result = add_moving_average(df, windows=[3])
+    aaa = result[result["symbol"] == "AAA"].reset_index(drop=True)
+    bbb = result[result["symbol"] == "BBB"].reset_index(drop=True)
+
+    assert pd.isna(aaa.loc[1, "ma_3"])
+    assert pd.isna(bbb.loc[0, "ma_3"])
+    assert pd.isna(bbb.loc[1, "ma_3"])
+    assert aaa.loc[2, "ma_3"] == 11.0
+    assert bbb.loc[2, "ma_3"] == 21.0
+
+
+def test_add_returns_calculates_past_gain_without_future_rows():
+    df = sample_daily_bars()
+    result = add_returns(df, windows=[2])
+    aaa = result[result["symbol"] == "AAA"].reset_index(drop=True)
+    bbb = result[result["symbol"] == "BBB"].reset_index(drop=True)
+
+    assert round(aaa.loc[2, "return_2d"], 6) == round((12 / 10) - 1, 6)
+    assert pd.isna(bbb.loc[0, "return_2d"])
+    assert pd.isna(bbb.loc[1, "return_2d"])
+    assert round(bbb.loc[2, "return_2d"], 6) == round((22 / 20) - 1, 6)
+
+
+def test_add_macd_outputs_expected_columns():
+    result = add_macd(sample_daily_bars())
+
+    assert {"macd_dif", "macd_dea", "macd_hist"}.issubset(result.columns)
+    assert result["macd_hist"].notna().any()
+
+
+def test_add_market_heat_computes_rising_ratio_by_date():
+    result = add_market_heat(sample_daily_bars())
+    heat = result[["trade_date", "market_rising_ratio"]].drop_duplicates()
+    row = heat[heat["trade_date"] == pd.Timestamp("2024-01-03")].iloc[0]
+
+    assert row["market_rising_ratio"] == 1.0
+
+
+def test_add_volume_ratio_uses_prior_window_only():
+    result = add_volume_ratio(sample_daily_bars(), windows=[2])
+    aaa = result[result["symbol"] == "AAA"].reset_index(drop=True)
+
+    assert pd.isna(aaa.loc[0, "volume_ratio_2d"])
+    assert round(aaa.loc[2, "volume_ratio_2d"], 6) == round(2200 / ((1000 + 1500) / 2), 6)
+
+
+def test_add_prior_high_low_uses_only_previous_rows():
+    result = add_prior_high_low(sample_daily_bars(), windows=[2])
+    aaa = result[result["symbol"] == "AAA"].reset_index(drop=True)
+
+    assert pd.isna(aaa.loc[1, "prior_high_2d"])
+    assert aaa.loc[2, "prior_high_2d"] == 11.2
+    assert aaa.loc[2, "prior_low_2d"] == 9.8
+
+
+def test_add_capital_flow_sum_uses_rolling_symbol_window():
+    result = add_capital_flow_sum(sample_daily_bars(), windows=[3])
+    aaa = result[result["symbol"] == "AAA"].reset_index(drop=True)
+
+    assert pd.isna(aaa.loc[1, "main_net_inflow_sum_3d"])
+    assert aaa.loc[2, "main_net_inflow_sum_3d"] == 9_000_000
+
+
+def test_add_capital_flow_positive_count_uses_rolling_symbol_window():
+    assert hasattr(indicators, "add_capital_flow_positive_count")
+
+    result = indicators.add_capital_flow_positive_count(sample_daily_bars(), windows=[3])
+    aaa = result[result["symbol"] == "AAA"].reset_index(drop=True)
+    bbb = result[result["symbol"] == "BBB"].reset_index(drop=True)
+
+    assert pd.isna(aaa.loc[1, "main_net_inflow_positive_count_3d"])
+    assert aaa.loc[2, "main_net_inflow_positive_count_3d"] == 3
+    assert aaa.loc[3, "main_net_inflow_positive_count_3d"] == 2
+    assert bbb.loc[4, "main_net_inflow_positive_count_3d"] == 2
+
+
+# ---------------------------------------------------------------------------
+# Conditions
+# ---------------------------------------------------------------------------
 
 
 def enriched_frame() -> pd.DataFrame:
@@ -414,3 +551,201 @@ def test_user_written_condition_reports_supported_templates_for_unrecognized_tex
     assert "收盘价站上N日均线" in result.errors[0].message
     assert "量比N日介于A到B" in result.errors[0].message
     assert "近N日主力净流入大于X万/亿" in result.errors[0].message
+
+
+# ---------------------------------------------------------------------------
+# Models
+# ---------------------------------------------------------------------------
+
+
+def make_backtest_settings(**overrides):
+    settings = {
+        "start_date": date(2024, 1, 2),
+        "end_date": date(2024, 1, 10),
+        "initial_cash": 100_000,
+    }
+    settings.update(overrides)
+    return BacktestSettings(**settings)
+
+
+def test_strategy_config_rejects_empty_entry_groups():
+    with pytest.raises(ValidationError):
+        StrategyConfig(
+            name="bad",
+            market_filters=[],
+            entry_groups=[],
+            exit_rules=[],
+            score_threshold=None,
+        )
+
+
+def test_backtest_settings_defaults_to_conservative_execution():
+    settings = BacktestSettings(
+        start_date=date(2024, 1, 2),
+        end_date=date(2024, 1, 10),
+        initial_cash=100_000,
+    )
+
+    assert settings.conservative_execution is True
+    assert settings.buy_price == "next_open"
+    assert settings.limit_up_blocks_buy is True
+    assert settings.limit_down_blocks_sell is True
+    assert settings.stock_pool == "all"
+    assert settings.custom_symbols == []
+    assert settings.position_sizing_mode == "equal_slots"
+    assert settings.position_size_pct == 0.2
+
+
+def test_backtest_settings_rejects_negative_fee_rate():
+    with pytest.raises(ValidationError):
+        make_backtest_settings(fee_rate=-0.0001)
+
+
+def test_backtest_settings_rejects_negative_stamp_tax_rate():
+    with pytest.raises(ValidationError):
+        make_backtest_settings(stamp_tax_rate=-0.0001)
+
+
+def test_backtest_settings_rejects_negative_slippage_rate():
+    with pytest.raises(ValidationError):
+        make_backtest_settings(slippage_rate=-0.0001)
+
+
+def test_backtest_settings_rejects_negative_min_listing_days():
+    with pytest.raises(ValidationError):
+        make_backtest_settings(min_listing_days=-1)
+
+
+def test_condition_node_rejects_negative_data_lag_days():
+    with pytest.raises(ValidationError):
+        ConditionNode(
+            id="cap-small",
+            condition_id="market_cap_between",
+            data_lag_days=-1,
+        )
+
+
+def test_condition_group_rejects_empty_conditions():
+    with pytest.raises(ValidationError):
+        ConditionGroup(id="entry", operator=ConditionOperator.AND, conditions=[])
+
+
+def test_cls_finance_response_serializes_market_board_data():
+    response = ClsFinanceResponse(
+        updated_at="2026-06-09T09:31:00+08:00",
+        source="cls-finance",
+        source_url="https://www.cls.cn/finance",
+        preclose_px=3959.337,
+        tline=[ClsFinanceTlinePoint(date=20260609, minute=930, last_px=3977.539, change=0.0047)],
+        anchors=[
+            ClsFinanceAnchor(
+                code="cls80025",
+                name="PCB",
+                article_id=2394344,
+                c_time="2026-06-09 09:31:30",
+                direction="up",
+                url="https://www.cls.cn/plate?code=cls80025",
+            )
+        ],
+        emotion=ClsFinanceEmotion(
+            market_degree=56.0,
+            market_degree_source="ths-market-summary",
+            market_degree_label="同花顺大盘评级",
+            breadth=MarketBreadth(up=3322, down=2049, flat=156, total=5527, source="cls-finance-emotion"),
+            up_limit=130,
+            open_limit=25,
+            performance="1.74%",
+        ),
+        up_pool=[
+            ClsFinancePoolItem(
+                symbol="601869",
+                name="长飞光纤",
+                change_pct=0.1,
+                last=484.33,
+                time="2026-06-09 13:34:47",
+                reason="光纤",
+                limit_up_days=1,
+            )
+        ],
+    )
+
+    payload = response.model_dump(mode="json")
+
+    assert payload["source"] == "cls-finance"
+    assert payload["anchors"][0]["name"] == "PCB"
+    assert payload["emotion"]["market_degree"] == 56.0
+    assert payload["emotion"]["market_degree_source"] == "ths-market-summary"
+    assert payload["emotion"]["market_degree_label"] == "同花顺大盘评级"
+    assert payload["up_pool"][0]["symbol"] == "601869"
+
+
+def test_sync_job_status_tracks_batch_progress_and_cancellation():
+    status = SyncJobStatus(
+        job_id="job-flow",
+        mode="capital_flow_backfill",
+        status="cancelled",
+        total_symbols=5,
+        completed_symbols=2,
+        failed_symbols=1,
+        processed_symbols=3,
+        imported_rows=12,
+        returned_rows=18,
+        filled_missing_rows=7,
+        skipped_symbols=1,
+        start_date=date(2026, 6, 1),
+        end_date=date(2026, 6, 5),
+        last_error="000003: remote disconnected",
+        recent_failures=[{"symbol": "000003", "reason": "remote disconnected"}],
+    )
+
+    assert status.status == "cancelled"
+    assert status.processed_symbols == 3
+    assert status.returned_rows == 18
+    assert status.filled_missing_rows == 7
+    assert status.skipped_symbols == 1
+    assert status.last_error == "000003: remote disconnected"
+
+
+def test_backtest_settings_accepts_controlled_stock_pool_and_custom_symbols():
+    settings = make_backtest_settings(stock_pool="custom", custom_symbols=["600519", "000001"])
+
+    assert settings.stock_pool == "custom"
+    assert settings.custom_symbols == ["600519", "000001"]
+
+
+def test_backtest_settings_accepts_position_sizing_fields():
+    settings = make_backtest_settings(position_sizing_mode="equal_slots", position_size_pct=0.25)
+
+    assert settings.position_sizing_mode == "equal_slots"
+    assert settings.position_size_pct == 0.25
+
+
+def test_backtest_settings_rejects_invalid_position_size_pct():
+    with pytest.raises(ValidationError):
+        make_backtest_settings(position_size_pct=0)
+
+    with pytest.raises(ValidationError):
+        make_backtest_settings(position_size_pct=1.2)
+
+
+def test_custom_stock_pool_requires_symbols():
+    with pytest.raises(ValidationError):
+        make_backtest_settings(stock_pool="custom", custom_symbols=[])
+
+
+# ---------------------------------------------------------------------------
+# Trading Calendar
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "holiday",
+    [
+        "2027-02-08",
+        "2027-10-04",
+        "2028-01-26",
+        "2028-10-02",
+    ],
+)
+def test_a_share_trade_dates_excludes_2027_and_2028_holidays(holiday):
+    assert pd.Timestamp(holiday) not in a_share_trade_dates(holiday, holiday)

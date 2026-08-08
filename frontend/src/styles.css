@@ -468,16 +468,25 @@ body {
 }
 
 .cls-finance-source {
+  grid-area: source;
+  min-width: 0;
+  max-width: 100%;
   border-color: #cfe0f5;
   background: #edf5ff;
   color: #1d4ed8;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-.cls-finance-actions {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: 8px;
+.section-title > .cls-finance-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas:
+    "detail open"
+    "source source";
+  align-items: center;
+  gap: 6px 8px;
+  min-width: 0;
 }
 
 .cls-finance-diagnostics {
@@ -515,12 +524,17 @@ body {
 }
 
 .cls-finance-detail-button {
+  grid-area: detail;
+  justify-self: start;
+  min-height: 30px;
   border-color: #f3b0a5;
   background: #fff7f3;
   color: var(--rise);
+  padding: 5px 8px;
 }
 
 .cls-finance-open-button {
+  grid-area: open;
   border-color: #cfe0f5;
   background: #edf5ff;
   color: #1d4ed8;

@@ -177,6 +177,7 @@ class MarketNewsProvider:
             ("eastmoney-rolling", "eastmoney-news-rolling", self._fetch_eastmoney_rolling),
             ("eastmoney-fast-news", "eastmoney-fast-news", self._fetch_eastmoney_fast_news),
             ("cls-telegraph", "cls-telegraph", self._fetch_cls_telegraph),
+            ("sina-rolling", "sina-rolling-news", self._fetch_sina_rolling),
         ]
         executor = ThreadPoolExecutor(max_workers=len(source_specs))
         futures = {
@@ -412,6 +413,51 @@ class MarketNewsProvider:
                     url=url,
                     tags=_tags(title, summary),
                     sentiment=_sentiment(title, summary),  # type: ignore[arg-type]
+                )
+            )
+        return items
+
+    def _fetch_sina_rolling(
+        self, limit: int, diagnostics: list[str], deadline: float | None
+    ) -> list[MarketNewsItem]:
+        response = self._request(
+            "https://feed.mix.sina.com.cn/api/roll/get",
+            source="sina-rolling-news",
+            diagnostics=diagnostics,
+            deadline=deadline,
+            params={
+                "pageid": "153",
+                "lid": "2516",
+                "k": "",
+                "num": str(limit),
+                "page": "1",
+            },
+            headers={"Referer": "https://finance.sina.com.cn/"},
+        )
+        payload = response.json() or {}
+        rows = (payload.get("result") or {}).get("data") or []
+        if not isinstance(rows, list):
+            diagnostics.append("sina-rolling returned no data list.")
+            return []
+        items: list[MarketNewsItem] = []
+        for row in rows[:limit]:
+            if not isinstance(row, dict):
+                continue
+            title = _clean_html_text(str(row.get("title") or ""))
+            if not title:
+                continue
+            intro = _clean_html_text(str(row.get("intro") or "")) or None
+            media = str(row.get("media_name") or "新浪财经").strip() or "新浪财经"
+            url = str(row.get("url") or "").strip() or None
+            items.append(
+                MarketNewsItem(
+                    title=title[:160],
+                    summary=intro if intro and intro != title else None,
+                    source=media,
+                    published_at=_parse_unix_time(row.get("ctime")),
+                    url=url,
+                    tags=_tags(title, intro),
+                    sentiment=_sentiment(title, intro),  # type: ignore[arg-type]
                 )
             )
         return items

@@ -12,11 +12,11 @@ it("uses lower refresh pressure outside trading and after failures", () => {
   expect(refreshIntervalForPhase("non_trading", true)).toBe(120_000);
 });
 
-it("在昨日追踪后台刷新时会快速重试，而不等下一轮市场轮询", () => {
+it("昨日追踪后台刷新不会提高整个行情模块的轮询频率", () => {
   expect(
     refreshIntervalForMarketResult("trading", [
       "eastmoney-yesterday-limit-up tracking refresh scheduled in background."
     ])
-  ).toBe(3_000);
+  ).toBe(60_000);
   expect(refreshIntervalForMarketResult("trading", [])).toBe(60_000);
 });

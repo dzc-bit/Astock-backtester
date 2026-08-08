@@ -502,23 +502,30 @@ export function App() {
     let cancelled = false;
     let timer: number | undefined;
     let activeRequest: AbortController | undefined;
+    let hasCompleteSnapshot = marketSnapshot !== null && marketSnapshot.status !== "unavailable";
     const refreshMarket = async () => {
       const requestController = new AbortController();
       activeRequest = requestController;
       const phase = detectMarketSessionPhase();
       let nextRefreshMs = refreshIntervalForPhase(phase);
-      setIsLoadingMarket(true);
-      setMarketRefreshMeta((current) => ({
-        ...current,
-        phase,
-        status: "refreshing",
-        message: current.last_success_at ? "刷新中，保留上一份成功快照" : "刷新中",
-        next_refresh_ms: refreshIntervalForPhase(phase)
-      }));
+      const isInitialLoad = !hasCompleteSnapshot;
+      if (isInitialLoad) {
+        setIsLoadingMarket(true);
+        setMarketRefreshMeta((current) => ({
+          ...current,
+          phase,
+          status: "refreshing",
+          message: "刷新中",
+          next_refresh_ms: refreshIntervalForPhase(phase)
+        }));
+      }
       try {
         const applySnapshot = (snapshot: RealtimeMarketSnapshot, isPartial = false) => {
-          if (cancelled) {
+          if (cancelled || (isPartial && hasCompleteSnapshot)) {
             return;
+          }
+          if (!isPartial && snapshot.status !== "unavailable") {
+            hasCompleteSnapshot = true;
           }
           setMarketSnapshot((current) => (snapshot.status === "unavailable" && current ? current : snapshot));
           const nextPhase = snapshot.market_phase ?? phase;
@@ -564,6 +571,9 @@ export function App() {
         try {
           const snapshot = await loadRealtimeMarketSnapshot(dataService.base_url);
           if (!cancelled) {
+            if (snapshot.status !== "unavailable") {
+              hasCompleteSnapshot = true;
+            }
             setMarketSnapshot((current) => (snapshot.status === "unavailable" && current ? current : snapshot));
             const nextPhase = snapshot.market_phase ?? phase;
             const nextInterval = refreshIntervalForMarketResult(
@@ -614,7 +624,9 @@ export function App() {
           activeRequest = undefined;
         }
         if (!cancelled) {
-          setIsLoadingMarket(false);
+          if (isInitialLoad) {
+            setIsLoadingMarket(false);
+          }
           timer = window.setTimeout(refreshMarket, nextRefreshMs);
         }
       }

@@ -99,7 +99,9 @@ it("renders CLS finance market board with news-summary style briefing cards", ()
   expect(screen.getByText("1 个样本 / 涨停池")).toBeInTheDocument();
   expect(screen.queryByText(/个来源/)).not.toBeInTheDocument();
   expect(screen.queryByText(/positive/)).not.toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "查看涨停明细" })).toBeInTheDocument();
+  const detailButton = screen.getByRole("button", { name: "查看涨停明细" });
+  expect(detailButton).toBeInTheDocument();
+  expect(detailButton).toHaveTextContent(/^涨停明细$/);
   expect(screen.queryByText("长飞光纤")).not.toBeInTheDocument();
   expect(screen.queryByText("光纤光缆")).not.toBeInTheDocument();
   expect(screen.queryByText("行情评价")).not.toBeInTheDocument();
@@ -207,7 +209,7 @@ it("shows an explicit loading state for the CLS finance board", async () => {
   expect(open).toHaveBeenCalledWith("https://www.cls.cn/finance", "_blank", "noopener,noreferrer");
 });
 
-it("shows retained-source status and diagnostics when CLS uses recent data", () => {
+it("shows retained-source status without an error panel when recent data is usable", () => {
   render(
     <ClsFinancePanel
       finance={{
@@ -218,25 +220,10 @@ it("shows retained-source status and diagnostics when CLS uses recent data", () 
     />
   );
 
-  expect(screen.getByText("最近成功数据")).toBeInTheDocument();
-  expect(screen.getByText("recent_success_cache_used")).toBeInTheDocument();
-  expect(screen.getByText("CLS emotion endpoint failed")).toBeInTheDocument();
-});
-
-it("keeps every long CLS diagnostic reachable, including a trailing recent-success marker", () => {
-  const diagnostics = [
-    "CLS index endpoint failed after a long upstream error response that must remain inspectable in the panel.",
-    "CLS emotion endpoint failed after a long upstream error response that must remain inspectable in the panel.",
-    "CLS anchors endpoint failed after a long upstream error response that must remain inspectable in the panel.",
-    "CLS limit-up endpoint failed after a long upstream error response that must remain inspectable in the panel.",
-    "recent_success_cache_used"
-  ];
-
-  render(<ClsFinancePanel finance={{ ...buildFinance(), source: "cls-finance+recent-success-cache", diagnostics }} />);
-
-  const diagnosticRegion = screen.getByRole("status", { name: "财联社数据诊断" });
-  diagnostics.forEach((diagnostic) => expect(within(diagnosticRegion).getByText(diagnostic)).toBeInTheDocument());
-  expect(diagnosticRegion).toHaveAttribute("tabindex", "0");
+  expect(screen.getByText(/^最近成功数据 \/ 更新/)).toBeInTheDocument();
+  expect(screen.queryByRole("status", { name: "财联社数据诊断" })).not.toBeInTheDocument();
+  expect(screen.queryByText("recent_success_cache_used")).not.toBeInTheDocument();
+  expect(screen.queryByText("CLS emotion endpoint failed")).not.toBeInTheDocument();
 });
 
 it("marks an entirely unavailable CLS response as unavailable while keeping diagnostics", () => {

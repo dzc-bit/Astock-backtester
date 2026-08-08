@@ -323,6 +323,25 @@ export function ClsFinancePanel({ finance, isLoading = false }: Props) {
           <h2>财联社看盘</h2>
         </div>
         <div className="cls-finance-actions">
+          <span className="status-pill compact cls-finance-source">
+            <RadioTower size={15} aria-hidden="true" />
+            {finance
+              ? `${financeUnavailable ? "CLS 数据暂不可用" : usingRecentSuccess ? "最近成功数据" : "CLS 实时数据"} / 更新 ${formatTime(finance.updated_at)}`
+              : isLoading
+                ? "加载中"
+                : "待连接"}
+          </span>
+          {finance && !financeUnavailable ? (
+            <button
+              className="secondary-button compact cls-finance-detail-button"
+              type="button"
+              aria-label="查看涨停明细"
+              onClick={() => setIsPoolOpen(true)}
+            >
+              <Eye size={15} aria-hidden="true" />
+              涨停明细
+            </button>
+          ) : null}
           <button
             className="icon-button cls-finance-open-button"
             type="button"
@@ -332,31 +351,17 @@ export function ClsFinancePanel({ finance, isLoading = false }: Props) {
           >
             <ExternalLink size={16} aria-hidden="true" />
           </button>
-          {finance && !financeUnavailable ? (
-            <button className="secondary-button compact cls-finance-detail-button" type="button" onClick={() => setIsPoolOpen(true)}>
-              <Eye size={15} aria-hidden="true" />
-              查看涨停明细
-            </button>
-          ) : null}
-          <span className="status-pill compact cls-finance-source">
-            <RadioTower size={15} aria-hidden="true" />
-            {finance
-              ? `${financeUnavailable ? "CLS 数据暂不可用" : usingRecentSuccess ? "最近成功数据" : "CLS 实时数据"} / 更新 ${formatTime(finance.updated_at)}`
-              : isLoading
-                ? "加载中"
-                : "待连接"}
-          </span>
         </div>
       </div>
 
-      {finance && financeDiagnostics.length > 0 ? (
+      {finance && financeUnavailable && financeDiagnostics.length > 0 ? (
         <div
-          className={`cls-finance-diagnostics ${usingRecentSuccess ? "is-stale" : ""}`}
+          className="cls-finance-diagnostics"
           role="status"
           aria-label="财联社数据诊断"
           tabIndex={0}
         >
-          <strong>{usingRecentSuccess ? "最近成功数据" : "财联社数据诊断"}</strong>
+          <strong>财联社数据诊断</strong>
           <span>来源 {finance.source}</span>
           {financeDiagnostics.map((item, index) => (
             <span key={`${item}-${index}`}>{item}</span>
