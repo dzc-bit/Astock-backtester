@@ -4,7 +4,6 @@ from pathlib import Path
 
 import pandas as pd
 
-
 REQUIRED_DAILY_COLUMNS = ["symbol", "trade_date", "open", "high", "low", "close", "volume"]
 
 

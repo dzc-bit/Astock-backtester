@@ -25,7 +25,12 @@ const apiMocks = vi.hoisted(() => ({
   validateStockSymbols: vi.fn()
 }));
 
-vi.mock("../api", () => apiMocks);
+// Spread the real api module so newly added exports (e.g. BackendError) stay
+// available to the component under test; mocked functions always win.
+vi.mock("../api", async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  ...apiMocks
+}));
 
 const demoResult = {
   metrics: {

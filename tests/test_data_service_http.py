@@ -4,9 +4,10 @@ import json
 import os
 import threading
 import time
+from datetime import UTC
 from types import SimpleNamespace
 from urllib.error import HTTPError
-from urllib.request import Request, urlopen
+from urllib.request import ProxyHandler, Request, build_opener
 
 import pandas as pd
 from astock_backtester.data.news import _parse_time
@@ -27,12 +28,16 @@ from astock_backtester.service import (
     create_server,
 )
 
+# Loopback traffic must never be routed through developer/system proxies
+# (http_proxy env vars or the Windows registry proxy would hijack these requests).
+_OPENER = build_opener(ProxyHandler({}))
+
 
 def _request_json(method: str, url: str, payload: dict | None = None) -> dict:
     data = None if payload is None else json.dumps(payload).encode("utf-8")
     request = Request(url, data=data, method=method, headers={"Content-Type": "application/json"})
     try:
-        with urlopen(request, timeout=5) as response:
+        with _OPENER.open(request, timeout=5) as response:
             return json.loads(response.read().decode("utf-8"))
     except HTTPError as exc:
         return json.loads(exc.read().decode("utf-8"))
@@ -41,23 +46,23 @@ def _request_json(method: str, url: str, payload: dict | None = None) -> dict:
 def _request_ndjson(url: str, payload: dict) -> list[dict]:
     data = json.dumps(payload).encode("utf-8")
     request = Request(url, data=data, method="POST", headers={"Content-Type": "application/json"})
-    with urlopen(request, timeout=5) as response:
+    with _OPENER.open(request, timeout=5) as response:
         return [json.loads(line) for line in response.read().decode("utf-8").splitlines() if line.strip()]
 
 
 def _request_get_ndjson(url: str) -> list[dict]:
     request = Request(url, method="GET", headers={"Accept": "application/x-ndjson"})
-    with urlopen(request, timeout=5) as response:
+    with _OPENER.open(request, timeout=5) as response:
         return [json.loads(line) for line in response.read().decode("utf-8").splitlines() if line.strip()]
 
 
 def _fake_realtime_snapshot() -> RealtimeMarketSnapshot:
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     return RealtimeMarketSnapshot(
         status="live",
         source="fake-live",
-        updated_at=datetime(2026, 5, 27, 10, 30, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 5, 27, 10, 30, tzinfo=UTC),
         indexes=[
             MarketIndexQuote(
                 symbol="sh000001",
@@ -67,7 +72,7 @@ def _fake_realtime_snapshot() -> RealtimeMarketSnapshot:
                 change=20.0,
                 change_pct=0.0064935,
                 source="fake-live",
-                updated_at=datetime(2026, 5, 27, 10, 30, tzinfo=timezone.utc),
+                updated_at=datetime(2026, 5, 27, 10, 30, tzinfo=UTC),
             )
         ],
         breadth=MarketBreadth(up=3200, down=1800, flat=120, total=5120, source="fake-live"),
@@ -349,7 +354,7 @@ def test_service_coverage_endpoint_filters_requested_symbols_and_dates(tmp_path)
 
 def test_service_starts_full_market_sync_job(tmp_path):
     class FakeManager:
-        def run_full_market(self, symbols, start_date, end_date):
+        def start_full_market(self, symbols, start_date, end_date):
             from datetime import date
 
             from astock_backtester.models import SyncJobStatus
@@ -392,7 +397,7 @@ def test_service_uses_provider_symbols_for_full_market_sync_when_not_supplied(tm
             return ["000001", "600519"]
 
     class FakeManager:
-        def run_full_market(self, symbols, start_date, end_date):
+        def start_full_market(self, symbols, start_date, end_date):
             from datetime import date
 
             from astock_backtester.models import SyncJobStatus
@@ -440,7 +445,7 @@ def test_service_uses_local_warehouse_symbols_for_full_market_sync_before_provid
             raise AssertionError("provider list_symbols should not run when local symbols exist")
 
     class FakeManager:
-        def run_full_market(self, symbols, start_date, end_date):
+        def start_full_market(self, symbols, start_date, end_date):
             from datetime import date
 
             from astock_backtester.models import SyncJobStatus
@@ -590,6 +595,9 @@ def test_realtime_stream_reports_upstream_connection_reset_instead_of_treating_i
         def market_snapshot_events(self):
             raise ConnectionResetError("upstream realtime reset")
 
+        def retained_successful_snapshot(self):
+            return None
+
     logs: list[tuple[str, str]] = []
     writes: list[dict] = []
     handler = object.__new__(DataServiceHandler)
@@ -619,7 +627,7 @@ def test_service_uses_all_local_warehouse_symbols_for_recent_full_market_sync(tm
             raise AssertionError("provider list_symbols should not run when local symbols exist")
 
     class FakeManager:
-        def run_full_market(self, symbols, start_date, end_date):
+        def start_full_market(self, symbols, start_date, end_date):
             from datetime import date
 
             from astock_backtester.models import SyncJobStatus
@@ -719,7 +727,7 @@ def test_service_fetch_daily_bars_uses_configured_provider(tmp_path):
     server.state.provider = provider
 
     class FakeCapitalFlowCrawler:
-        def fetch_many_fund_flows(self, symbols, start_date, end_date, timeout=15):
+        def fetch_many_fund_flows(self, symbols, start_date, end_date, timeout=15, skip_eastmoney=False):
             return {
                 "rows": [
                     {
@@ -782,7 +790,7 @@ def test_service_fetch_daily_bars_merges_capital_flow_from_configured_crawler(tm
         def __init__(self):
             self.calls = []
 
-        def fetch_many_fund_flows(self, symbols, start_date, end_date, timeout=15):
+        def fetch_many_fund_flows(self, symbols, start_date, end_date, timeout=15, skip_eastmoney=False):
             self.calls.append((symbols, start_date, end_date, timeout))
             return {
                 "rows": [{"symbol": "000001", "trade_date": "2026-05-26", "main_net_inflow": 8800000.0}],
@@ -816,7 +824,7 @@ def test_service_fetch_daily_bars_merges_capital_flow_from_configured_crawler(tm
 
 def test_service_fetch_capital_flow_backfills_existing_rows_and_reports_failures(tmp_path):
     class FakeCapitalFlowCrawler:
-        def fetch_many_fund_flows(self, symbols, start_date, end_date, timeout=15):
+        def fetch_many_fund_flows(self, symbols, start_date, end_date, timeout=15, skip_eastmoney=False):
             assert symbols == ["000001", "000002"]
             assert start_date == "2026-05-26"
             assert end_date == "2026-05-29"
@@ -1193,7 +1201,7 @@ def test_service_streams_serialized_trade_blocked_event(tmp_path, basic_settings
 def test_service_realtime_market_snapshot_uses_configured_provider(tmp_path):
     class FakeRealtimeProvider:
         def market_snapshot(self):
-            from datetime import datetime, timezone
+            from datetime import datetime
 
             from astock_backtester.models import (
                 MarketBreadth,
@@ -1205,7 +1213,7 @@ def test_service_realtime_market_snapshot_uses_configured_provider(tmp_path):
             return RealtimeMarketSnapshot(
                 status="live",
                 source="fake-live",
-                updated_at=datetime(2026, 5, 27, 10, 30, tzinfo=timezone.utc),
+                updated_at=datetime(2026, 5, 27, 10, 30, tzinfo=UTC),
                 indexes=[
                     MarketIndexQuote(
                         symbol="sh000001",
@@ -1215,7 +1223,7 @@ def test_service_realtime_market_snapshot_uses_configured_provider(tmp_path):
                         change=20.0,
                         change_pct=0.0064935,
                         source="fake-live",
-                        updated_at=datetime(2026, 5, 27, 10, 30, tzinfo=timezone.utc),
+                        updated_at=datetime(2026, 5, 27, 10, 30, tzinfo=UTC),
                     )
                 ],
                 breadth=MarketBreadth(up=3200, down=1800, flat=120, total=5120, source="fake-live"),
@@ -1285,6 +1293,9 @@ def test_service_realtime_market_snapshot_returns_json_when_provider_raises(tmp_
         def market_snapshot(self):
             raise RuntimeError("upstream timeout")
 
+        def retained_successful_snapshot(self):
+            return None
+
     server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
     server.state.realtime_provider = BrokenRealtimeProvider()
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -1307,10 +1318,13 @@ def test_service_realtime_market_snapshot_returns_json_when_provider_raises(tmp_
 def test_service_realtime_market_snapshot_uses_provider_last_success_after_raise(tmp_path):
     class RetainingBrokenRealtimeProvider:
         def __init__(self):
-            self._last_successful_snapshot = _fake_realtime_snapshot()
+            self._retained = _fake_realtime_snapshot()
 
         def market_snapshot(self):
             raise RuntimeError("upstream timeout")
+
+        def retained_successful_snapshot(self):
+            return self._retained
 
     server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
     server.state.realtime_provider = RetainingBrokenRealtimeProvider()
@@ -1347,9 +1361,12 @@ def test_realtime_market_provider_reuses_last_successful_snapshot_on_failure(tmp
         if "hq.sinajs.cn/list=sh000001" in url:
             if len([item for item in calls if "hq.sinajs.cn/list=sh000001" in item]) == 1:
                 text = (
-                    'var hq_str_sh000001="上证指数,3100.00,3080.00,3100.00,3120.00,3070.00,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2026-06-05,14:50:00,00";\n'
-                    'var hq_str_sz399001="深证成指,9800.00,9700.00,9800.00,9900.00,9650.00,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2026-06-05,14:50:00,00";\n'
-                    'var hq_str_sz399006="创业板指,2100.00,2080.00,2100.00,2120.00,2070.00,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2026-06-05,14:50:00,00";'
+                    'var hq_str_sh000001="上证指数,3100.00,3080.00,3100.00,3120.00,3070.00,'
+                    '0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2026-06-05,14:50:00,00";\n'
+                    'var hq_str_sz399001="深证成指,9800.00,9700.00,9800.00,9900.00,9650.00,'
+                    '0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2026-06-05,14:50:00,00";\n'
+                    'var hq_str_sz399006="创业板指,2100.00,2080.00,2100.00,2120.00,2070.00,'
+                    '0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2026-06-05,14:50:00,00";'
                 )
                 return FakeResponse(text)
             raise RuntimeError("sina index timeout")
@@ -3075,7 +3092,7 @@ def test_service_realtime_market_snapshot_tracks_yesterday_strong_sectors_from_l
     import pandas as pd
 
     rows = []
-    for symbol, sector_prefix, prev_close, yesterday_close, latest_close in [
+    for symbol, _sector_prefix, prev_close, yesterday_close, latest_close in [
         ("300001", "创业板", 10.0, 12.0, 12.2),
         ("300002", "创业板", 20.0, 24.0, 24.1),
         ("600001", "沪市主板", 10.0, 10.4, 10.8),
@@ -3235,9 +3252,30 @@ def test_service_realtime_market_snapshot_prefers_ths_industry_quotes_over_hot_r
                     "errocode": 0,
                     "errormsg": "",
                     "data": [
-                        {"code": "300001", "name": "A", "reason": "算力租赁+AI政务", "zhangfu": 9.9, "huanshou": 12.0, "chengjiaoe": 100000},
-                        {"code": "300002", "name": "B", "reason": "算力租赁+液冷服务器", "zhangfu": 8.2, "huanshou": 9.0, "chengjiaoe": 90000},
-                        {"code": "300003", "name": "C", "reason": "液冷服务器+AI政务", "zhangfu": 6.8, "huanshou": 7.0, "chengjiaoe": 70000},
+                        {
+                            "code": "300001",
+                            "name": "A",
+                            "reason": "算力租赁+AI政务",
+                            "zhangfu": 9.9,
+                            "huanshou": 12.0,
+                            "chengjiaoe": 100000,
+                        },
+                        {
+                            "code": "300002",
+                            "name": "B",
+                            "reason": "算力租赁+液冷服务器",
+                            "zhangfu": 8.2,
+                            "huanshou": 9.0,
+                            "chengjiaoe": 90000,
+                        },
+                        {
+                            "code": "300003",
+                            "name": "C",
+                            "reason": "液冷服务器+AI政务",
+                            "zhangfu": 6.8,
+                            "huanshou": 7.0,
+                            "chengjiaoe": 70000,
+                        },
                     ],
                 }
             )
@@ -3308,9 +3346,30 @@ def test_service_realtime_market_snapshot_does_not_use_raw_hot_reason_pct_when_q
                     "errocode": 0,
                     "errormsg": "",
                     "data": [
-                        {"code": "300001", "name": "A", "reason": "算力租赁+AI政务", "zhangfu": 9.9, "huanshou": 12.0, "chengjiaoe": 100000},
-                        {"code": "300002", "name": "B", "reason": "算力租赁+液冷服务器", "zhangfu": 8.2, "huanshou": 9.0, "chengjiaoe": 90000},
-                        {"code": "300003", "name": "C", "reason": "液冷服务器+AI政务", "zhangfu": 6.8, "huanshou": 7.0, "chengjiaoe": 70000},
+                        {
+                            "code": "300001",
+                            "name": "A",
+                            "reason": "算力租赁+AI政务",
+                            "zhangfu": 9.9,
+                            "huanshou": 12.0,
+                            "chengjiaoe": 100000,
+                        },
+                        {
+                            "code": "300002",
+                            "name": "B",
+                            "reason": "算力租赁+液冷服务器",
+                            "zhangfu": 8.2,
+                            "huanshou": 9.0,
+                            "chengjiaoe": 90000,
+                        },
+                        {
+                            "code": "300003",
+                            "name": "C",
+                            "reason": "液冷服务器+AI政务",
+                            "zhangfu": 6.8,
+                            "huanshou": 7.0,
+                            "chengjiaoe": 70000,
+                        },
                     ],
                 }
             )
@@ -3507,20 +3566,20 @@ def test_service_realtime_market_snapshot_prefers_sina_sector_over_hot_reason_la
 def test_service_market_news_uses_configured_provider(tmp_path):
     class FakeNewsProvider:
         def latest_news(self, limit=12):
-            from datetime import datetime, timezone
+            from datetime import datetime
 
             from astock_backtester.models import MarketNewsItem, MarketNewsResponse
 
             assert limit == 12
             return MarketNewsResponse(
-                updated_at=datetime(2026, 5, 27, 10, 30, tzinfo=timezone.utc),
+                updated_at=datetime(2026, 5, 27, 10, 30, tzinfo=UTC),
                 source="fake-news",
                 items=[
                     MarketNewsItem(
                         title="政策利好推动科技板块走强",
                         summary="半导体、AI 应用方向盘中活跃。",
                         source="东方财富",
-                        published_at=datetime(2026, 5, 27, 10, 20, tzinfo=timezone.utc),
+                        published_at=datetime(2026, 5, 27, 10, 20, tzinfo=UTC),
                         url="https://example.test/news",
                         tags=["科技", "政策"],
                         sentiment="positive",
@@ -3547,12 +3606,12 @@ def test_service_market_news_uses_configured_provider(tmp_path):
 def test_service_market_commentary_uses_configured_provider(tmp_path):
     class FakeCommentaryProvider:
         def current_commentary(self):
-            from datetime import date, datetime, timezone
+            from datetime import date, datetime
 
             from astock_backtester.models import MarketCommentaryPoint, MarketCommentaryResponse
 
             return MarketCommentaryResponse(
-                updated_at=datetime(2026, 6, 5, 14, 30, tzinfo=timezone.utc),
+                updated_at=datetime(2026, 6, 5, 14, 30, tzinfo=UTC),
                 trade_date=date(2026, 6, 5),
                 source="fake-commentary",
                 stance="positive",
@@ -3920,12 +3979,12 @@ def test_service_market_commentary_does_not_hide_programming_errors(tmp_path):
 def test_service_market_news_summary_uses_configured_provider(tmp_path):
     class FakeNewsSummaryProvider:
         def latest_summary(self):
-            from datetime import datetime, timezone
+            from datetime import datetime
 
             from astock_backtester.models import MarketNewsSummaryResponse, MarketNewsTheme
 
             return MarketNewsSummaryResponse(
-                updated_at=datetime(2026, 6, 5, 14, 30, tzinfo=timezone.utc),
+                updated_at=datetime(2026, 6, 5, 14, 30, tzinfo=UTC),
                 source="fake-summary",
                 item_count=3,
                 themes=[
@@ -3960,13 +4019,13 @@ def test_service_market_news_summary_uses_configured_provider(tmp_path):
 def test_service_market_fupan_uses_configured_provider(tmp_path):
     class FakeBriefingProvider:
         def latest_fupan(self):
-            from datetime import datetime, timezone
+            from datetime import datetime
 
             from astock_backtester.models import MarketBriefingResponse, MarketBriefingSection
 
             return MarketBriefingResponse(
                 kind="fupan",
-                updated_at=datetime(2026, 6, 1, 15, 30, tzinfo=timezone.utc),
+                updated_at=datetime(2026, 6, 1, 15, 30, tzinfo=UTC),
                 source="fake-fupan",
                 source_url="https://stock.10jqka.com.cn/fupan/",
                 summary="复盘摘要",
@@ -3992,13 +4051,13 @@ def test_service_market_fupan_uses_configured_provider(tmp_path):
 def test_service_market_zaopan_uses_configured_provider(tmp_path):
     class FakeBriefingProvider:
         def latest_zaopan(self):
-            from datetime import datetime, timezone
+            from datetime import datetime
 
             from astock_backtester.models import MarketBriefingResponse, MarketBriefingSection
 
             return MarketBriefingResponse(
                 kind="zaopan",
-                updated_at=datetime(2026, 6, 1, 8, 30, tzinfo=timezone.utc),
+                updated_at=datetime(2026, 6, 1, 8, 30, tzinfo=UTC),
                 source="fake-zaopan",
                 source_url="https://stock.10jqka.com.cn/zaopan/",
                 summary="早盘摘要",
@@ -4031,12 +4090,12 @@ def test_market_news_parses_display_time_as_beijing_time():
 def test_service_risk_alerts_uses_configured_provider(tmp_path):
     class FakeRiskProvider:
         def current_alerts(self):
-            from datetime import datetime, timezone
+            from datetime import datetime
 
             from astock_backtester.models import RiskAlertItem, RiskAlertsResponse
 
             return RiskAlertsResponse(
-                updated_at=datetime(2026, 5, 27, 10, 30, tzinfo=timezone.utc),
+                updated_at=datetime(2026, 5, 27, 10, 30, tzinfo=UTC),
                 source="fake-risk",
                 items=[
                     RiskAlertItem(
@@ -4046,7 +4105,7 @@ def test_service_risk_alerts_uses_configured_provider(tmp_path):
                         reason="股票名称包含 *ST，存在退市风险警示。",
                         severity="high",
                         source="adata",
-                        detected_at=datetime(2026, 5, 27, 10, 30, tzinfo=timezone.utc),
+                        detected_at=datetime(2026, 5, 27, 10, 30, tzinfo=UTC),
                     )
                 ],
             )
@@ -4070,12 +4129,12 @@ def test_service_risk_alerts_uses_configured_provider(tmp_path):
 def test_service_risk_alerts_reports_diagnostics_when_no_risky_symbols(tmp_path):
     class EmptyRiskProvider:
         def current_alerts(self):
-            from datetime import datetime, timezone
+            from datetime import datetime
 
             from astock_backtester.models import RiskAlertsResponse
 
             return RiskAlertsResponse(
-                updated_at=datetime(2026, 5, 27, 10, 30, tzinfo=timezone.utc),
+                updated_at=datetime(2026, 5, 27, 10, 30, tzinfo=UTC),
                 source="local",
                 items=[],
                 diagnostics=["东方财富风险源不可用，已使用本地 ST 字段兜底。"],
@@ -4201,7 +4260,7 @@ def test_service_returns_recommended_strategies(tmp_path):
             }
         )
     )
-    refresh_finished = server.state._start_coverage_refresh(force=True)
+    refresh_finished = server.state.start_coverage_refresh(force=True)
     assert refresh_finished is not None
     assert refresh_finished.wait(timeout=5)
     thread = threading.Thread(target=server.serve_forever, daemon=True)

@@ -19,3 +19,9 @@ __pycache__/
 .reference/
 backend/astock_backtester.egg-info/
 运行产物/
+
+# Test coverage artifacts
+.coverage
+coverage.xml
+htmlcov/
+frontend/coverage/

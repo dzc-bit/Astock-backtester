@@ -1,22 +1,24 @@
 from __future__ import annotations
 
-from collections import defaultdict
-from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import date, datetime, timedelta
 import json
 import re
 import time
-from threading import Lock, local as thread_local
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import date, datetime, timedelta
+from threading import Lock
+from threading import local as thread_local
 from typing import Any
 
-import requests
 import pandas as pd
+import requests
 
+from astock_backtester.data.http_transport import USER_AGENT as UA
+from astock_backtester.data.http_transport import create_scraping_session
+from astock_backtester.data.parsing import is_blank_numeric, parse_float
+from astock_backtester.data.symbols import a_share_market_symbol, market_code, normalize_symbol
 from astock_backtester.data.trading_calendar import a_share_trade_dates
 
-
-UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 EASTMONEY_FUND_FLOW_URL = "https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get"
 EASTMONEY_FUND_FLOW_KLINE_URL = "https://push2.eastmoney.com/api/qt/stock/fflow/kline/get"
 SINA_FUND_FLOW_URL = "http://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/MoneyFlow.ssl_qsfx_lscjfb"
@@ -115,27 +117,6 @@ class CapitalFlowFetchError(RuntimeError):
         super().__init__(f"{code}: {message}")
 
 
-def _normalize_code(symbol: str) -> str:
-    code = str(symbol).strip().upper()
-    if code.startswith(("SH", "SZ", "BJ")):
-        code = code[2:]
-    if "." in code:
-        code = code.split(".", 1)[0]
-    return code
-
-
-def _market_code(code: str) -> int:
-    return 1 if code.startswith(("6", "9")) else 0
-
-
-def _sina_symbol(code: str) -> str:
-    if code.startswith("6"):
-        return f"sh{code}"
-    if code.startswith(("4", "8", "9")):
-        return f"bj{code}"
-    return f"sz{code}"
-
-
 def _parse_date(value: Any) -> str | None:
     text = str(value or "").strip()
     for fmt, width in (("%Y-%m-%d", 10), ("%Y/%m/%d", 10), ("%Y%m%d", 8)):
@@ -145,25 +126,6 @@ def _parse_date(value: Any) -> str | None:
         except ValueError:
             continue
     return None
-
-
-def _to_float(value: Any) -> float | None:
-    if value in (None, "", "-", "--"):
-        return None
-    text = str(value).strip().replace("+", "").replace("%", "")
-    if text in ("", "-", "--"):
-        return None
-    try:
-        return float(text)
-    except ValueError:
-        return None
-
-
-def _is_blank_numeric(value: Any) -> bool:
-    if value in (None, "", "-", "--"):
-        return True
-    text = str(value).strip().replace("+", "").replace("%", "")
-    return text in ("", "-", "--")
 
 
 def _estimate_limit(start_date: str, end_date: str) -> int:
@@ -179,8 +141,7 @@ _thread_local = thread_local()
 def _get_thread_session() -> requests.Session:
     session = getattr(_thread_local, "session", None)
     if session is None:
-        session = requests.Session()
-        session.trust_env = False
+        session = create_scraping_session()
         _thread_local.session = session
     return session
 
@@ -290,10 +251,10 @@ class CapitalFlowCrawler:
         timeout: int = 15,
         skip_eastmoney: bool = False,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        code = _normalize_code(symbol)
+        code = normalize_symbol(symbol)
         request_limit = limit if limit is not None else _estimate_limit(start_date, end_date)
         params = {
-            "secid": f"{_market_code(code)}.{code}",
+            "secid": f"{market_code(code)}.{code}",
             "fields1": FIELDS1,
             "fields2": FIELDS2,
             "klt": "101",
@@ -327,7 +288,10 @@ class CapitalFlowCrawler:
                         "provider": "eastmoney",
                         "source": "capital_flow_crawler",
                         "rows": len(rows),
-                        "message": "Eastmoney capital-flow response did not fully cover the requested date range; trying Baidu history fallback.",
+                        "message": (
+                            "Eastmoney capital-flow response did not fully cover the requested date range; "
+                            "trying Baidu history fallback."
+                        ),
                     }
                 )
                 fallback_rows, fallback_diagnostics, provider = self._fetch_fallback_rows(code, start_date, end_date, timeout)
@@ -423,7 +387,7 @@ class CapitalFlowCrawler:
             "num": str(SINA_PAGE_SIZE),
             "sort": "opendate",
             "asc": "0",
-            "daima": _sina_symbol(code),
+            "daima": a_share_market_symbol(code),
         }
         retry_diagnostics: list[dict[str, Any]] = []
         payload = self._fetch_sina_payload_with_retry(code, params, timeout, retry_diagnostics)
@@ -650,7 +614,7 @@ class CapitalFlowCrawler:
         diagnostics: list[dict[str, Any]] = []
 
         def fetch_one(symbol: str, should_skip_eastmoney: bool) -> dict[str, Any]:
-            code = _normalize_code(symbol)
+            code = normalize_symbol(symbol)
             try:
                 next_rows, next_diagnostics = self._fetch_fund_flow_with_diagnostics(
                     code,
@@ -706,7 +670,7 @@ class CapitalFlowCrawler:
                     "skip_eastmoney": False,
                 }
 
-        codes = [_normalize_code(symbol) for symbol in symbols]
+        codes = [normalize_symbol(symbol) for symbol in symbols]
         if not codes:
             return {"rows": rows, "failures": failures, "diagnostics": diagnostics}
 
@@ -745,7 +709,7 @@ class CapitalFlowCrawler:
         retryable_failures = failed_symbols - symbols_with_cached_rows
         if retryable_failures and FAILED_SYMBOL_RETRY_ROUNDS > 0:
             for retry_round in range(FAILED_SYMBOL_RETRY_ROUNDS):
-                remaining_failed = [s for s in codes if _normalize_code(s) in retryable_failures]
+                remaining_failed = [s for s in codes if normalize_symbol(s) in retryable_failures]
                 if not remaining_failed:
                     break
                 time.sleep(FAILED_SYMBOL_RETRY_BACKOFF_SECONDS * (retry_round + 1))
@@ -765,7 +729,7 @@ class CapitalFlowCrawler:
                         retry_results.append(future.result())
 
                 # Remove old failures for retried symbols and add new results
-                retried_codes = {_normalize_code(s) for s in remaining_failed}
+                retried_codes = {normalize_symbol(s) for s in remaining_failed}
                 failures = [f for f in failures if str(f.get("symbol")) not in retried_codes]
                 diagnostics = [
                     d for d in diagnostics
@@ -916,8 +880,8 @@ def _parse_baidu_content(
             "medium_net_inflow": _parse_money_amount(item.get("mediumNetIn")),
             "large_net_inflow": _parse_money_amount(item.get("largeNetIn")),
             "super_large_net_inflow": _parse_money_amount(item.get("superNetIn")),
-            "main_net_inflow_pct": _to_float(item.get("ratio")),
-            "close": _to_float(item.get("closepx")),
+            "main_net_inflow_pct": parse_float(item.get("ratio")),
+            "close": parse_float(item.get("closepx")),
         }
         rows.append(row)
     return rows, diagnostics
@@ -961,13 +925,13 @@ def _parse_sina_payload(
         row = {
             "symbol": code,
             "trade_date": trade_date,
-            "main_net_inflow": _to_float(item.get("netamount")),
-            "small_net_inflow": _to_float(item.get("r3_net")),
-            "medium_net_inflow": _to_float(item.get("r2_net")),
-            "large_net_inflow": _to_float(item.get("r1_net")),
-            "super_large_net_inflow": _to_float(item.get("r0_net")),
+            "main_net_inflow": parse_float(item.get("netamount")),
+            "small_net_inflow": parse_float(item.get("r3_net")),
+            "medium_net_inflow": parse_float(item.get("r2_net")),
+            "large_net_inflow": parse_float(item.get("r1_net")),
+            "super_large_net_inflow": parse_float(item.get("r0_net")),
             "main_net_inflow_pct": _ratio_to_pct(item.get("ratioamount")),
-            "close": _to_float(item.get("trade")),
+            "close": parse_float(item.get("trade")),
             "change_pct": _ratio_to_pct(item.get("changeratio")),
         }
         rows.append(row)
@@ -975,7 +939,7 @@ def _parse_sina_payload(
 
 
 def _ratio_to_pct(value: Any) -> float | None:
-    parsed = _to_float(value)
+    parsed = parse_float(value)
     if parsed is None:
         return None
     return parsed * 100.0
@@ -1123,8 +1087,8 @@ def _parse_kline(code: str, line: Any) -> tuple[dict[str, Any] | None, list[dict
         "trade_date": trade_date,
     }
     for column, value in zip(columns[1:], parts[1:], strict=False):
-        parsed = _to_float(value)
-        if parsed is None and not _is_blank_numeric(value):
+        parsed = parse_float(value)
+        if parsed is None and not is_blank_numeric(value):
             diagnostics.append(
                 {
                     "symbol": code,
@@ -1135,5 +1099,5 @@ def _parse_kline(code: str, line: Any) -> tuple[dict[str, Any] | None, list[dict
                     "message": f"Capital-flow numeric field {column} could not be parsed",
                 }
             )
-        values[column] = _to_float(value)
+        values[column] = parse_float(value)
     return values, diagnostics

@@ -82,19 +82,6 @@ function hasMeaningfulTableValue(value: string | null | undefined): boolean {
   return normalized.length > 0 && normalized !== "--" && normalized !== "-";
 }
 
-function isTonghuashunArticleUrl(url: string | null | undefined): url is string {
-  const normalizedUrl = url?.trim();
-  if (!normalizedUrl) {
-    return false;
-  }
-  try {
-    const parsed = new URL(normalizedUrl);
-    return parsed.protocol === "https:" && parsed.hostname === "stock.10jqka.com.cn" && parsed.pathname.endsWith(".shtml");
-  } catch {
-    return false;
-  }
-}
-
 function isTonghuashunSourceUrl(url: string | null | undefined): url is string {
   const normalizedUrl = url?.trim();
   if (!normalizedUrl) {

@@ -4,7 +4,7 @@ import re
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from html import unescape
 from threading import Lock
 from time import monotonic
@@ -12,8 +12,8 @@ from time import monotonic
 import requests
 from bs4 import BeautifulSoup
 
-from astock_backtester.data.http_transport import resilient_get, should_allow_alternate_transport
 from astock_backtester.data.cls import cls_telegraph_signed_params
+from astock_backtester.data.http_transport import MINIMAL_USER_AGENT, resilient_get, should_allow_alternate_transport
 from astock_backtester.models import MarketNewsItem, MarketNewsResponse
 
 POSITIVE_WORDS = ("利好", "拉升", "走强", "活跃", "增长", "抢筹", "突破")
@@ -51,7 +51,7 @@ def _parse_unix_time(value: object) -> datetime | None:
     if timestamp > 10_000_000_000:
         timestamp /= 1000
     try:
-        return datetime.fromtimestamp(timestamp, tz=timezone.utc).astimezone(BEIJING_TZ)
+        return datetime.fromtimestamp(timestamp, tz=UTC).astimezone(BEIJING_TZ)
     except (OverflowError, OSError, ValueError):
         return None
 
@@ -164,7 +164,7 @@ class MarketNewsProvider:
         return copied
 
     def _fetch_latest_news(self, limit: int) -> MarketNewsResponse:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         items: list[MarketNewsItem] = []
         sources: list[str] = []
         diagnostics: list[str] = []
@@ -374,7 +374,7 @@ class MarketNewsProvider:
             diagnostics=diagnostics,
             deadline=deadline,
             params=params,
-            headers={"Referer": "https://www.cls.cn/", "User-Agent": "Mozilla/5.0"},
+            headers={"Referer": "https://www.cls.cn/", "User-Agent": MINIMAL_USER_AGENT},
         )
         payload = response.json() or {}
         if not isinstance(payload, dict):
@@ -471,5 +471,5 @@ class MarketNewsProvider:
                 continue
             seen.add(key)
             deduped.append(item)
-        deduped.sort(key=lambda item: item.published_at or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
+        deduped.sort(key=lambda item: item.published_at or datetime.min.replace(tzinfo=UTC), reverse=True)
         return deduped[:limit]

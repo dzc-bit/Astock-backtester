@@ -1,7 +1,10 @@
 import pandas as pd
-
 from astock_backtester.cli import handle_command
-from astock_backtester.data.astock_adapter import AStockDataAdapter, AStockDataUnavailable, HttpAStockFetcher
+from astock_backtester.data.astock_adapter import (
+    AStockDataAdapter,
+    AStockDataUnavailable,
+    HttpAStockFetcher,
+)
 
 
 def test_adapter_reports_unconfigured_fetcher():

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
+from astock_backtester.data.briefing import _is_noisy_content_line
+from astock_backtester.data.realtime import is_valid_full_market_breadth
 from astock_backtester.models import (
     MarketBriefingResponse,
     MarketCommentaryPoint,
@@ -11,8 +14,6 @@ from astock_backtester.models import (
     MarketNewsResponse,
     RealtimeMarketSnapshot,
 )
-from astock_backtester.data.briefing import _is_noisy_content_line
-from astock_backtester.data.realtime import is_valid_full_market_breadth
 
 
 def _format_pct(value: float | None) -> str:
@@ -23,7 +24,7 @@ def _format_pct(value: float | None) -> str:
 
 
 def _today_from_snapshot(snapshot: RealtimeMarketSnapshot | None) -> datetime:
-    return snapshot.updated_at if snapshot is not None else datetime.now(timezone.utc)
+    return snapshot.updated_at if snapshot is not None else datetime.now(UTC)
 
 
 def _news_theme_text(news: MarketNewsResponse | None) -> str | None:
@@ -65,7 +66,7 @@ def build_local_brief_commentary(
     snapshot: RealtimeMarketSnapshot | None = None,
     news: MarketNewsResponse | None = None,
 ) -> MarketCommentaryResponse:
-    timestamp = now or datetime.now(timezone.utc)
+    timestamp = now or datetime.now(UTC)
     trade_date = _today_from_snapshot(snapshot).date() if snapshot is not None else timestamp.date()
     news_theme = _news_theme_text(news)
     theme_text = f" 新闻线索集中在 {news_theme}，只作为待验证方向。" if news_theme else ""
@@ -131,7 +132,7 @@ class MarketCommentaryProvider:
     snapshot_timeout: float | None = 30.0
 
     def current_commentary(self) -> MarketCommentaryResponse:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         diagnostics: list[str] = []
         snapshot: RealtimeMarketSnapshot | None = None
         news: MarketNewsResponse | None = None
@@ -427,7 +428,10 @@ class MarketCommentaryProvider:
             ]
             source = "news-fallback+commentary"
         else:
-            summary = "实时盘面暂不可用，以下仅为新闻线索候选。当前新闻线索也暂不可用，今日评价降级为防守模式；等待红绿家数、指数和题材榜恢复后再确认方向。"
+            summary = (
+                "实时盘面暂不可用，以下仅为新闻线索候选。当前新闻线索也暂不可用，"
+                "今日评价降级为防守模式；等待红绿家数、指数和题材榜恢复后再确认方向。"
+            )
             drivers = []
             risks = ["实时数据缺失，当前无法确认真实盘面强弱，避免只凭本地历史数据追高。"]
             next_watch = ["实时盘面暂不可用，优先恢复实时指数、红绿家数、题材榜和新闻源，再运行策略筛选。"]

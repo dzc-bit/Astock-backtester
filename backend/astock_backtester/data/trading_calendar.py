@@ -4,7 +4,6 @@ from datetime import date
 
 import pandas as pd
 
-
 _A_SHARE_HOLIDAY_RANGES: dict[int, tuple[tuple[str, str], ...]] = {
     2024: (
         ("2024-01-01", "2024-01-01"),

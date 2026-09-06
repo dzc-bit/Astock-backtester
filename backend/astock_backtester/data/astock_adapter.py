@@ -1,18 +1,21 @@
 from __future__ import annotations
 
+import json
+import logging
+import time
 from collections.abc import Callable, Sequence
 from datetime import date, datetime
-import json
-import time
 from typing import Any
 
 import pandas as pd
 import requests
 
+from astock_backtester.data.http_transport import USER_AGENT as UA
 from astock_backtester.data.importer import normalize_daily_bars
+from astock_backtester.data.parsing import parse_float
+from astock_backtester.data.symbols import market_code, normalize_symbol
 
-
-UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+logger = logging.getLogger(__name__)
 
 
 class AStockDataUnavailable(RuntimeError):
@@ -24,23 +27,13 @@ JsonGetter = Callable[[str, dict[str, str], dict[str, str], int], dict[str, Any]
 JsonGetterVariants = Sequence[tuple[str, JsonGetter]]
 
 
-def _normalize_code(symbol: str) -> str:
-    code = symbol.strip().upper()
-    if code.startswith(("SH", "SZ", "BJ")):
-        code = code[2:]
-    if "." in code:
-        code = code.split(".", 1)[0]
-    return code
-
-
-def _market_code(code: str) -> int:
-    return 1 if code.startswith(("6", "9")) else 0
-
-
 def _to_float(value: Any, default: float = 0.0) -> float:
-    if value in (None, "", "-", "--"):
-        return default
-    return float(str(value).replace("+", "").replace("%", ""))
+    parsed = parse_float(value)
+    if parsed is None:
+        if value in (None, "", "-", "--"):
+            return default
+        raise ValueError(f"unparseable numeric value: {value!r}")
+    return parsed
 
 
 def _parse_date(value: Any) -> date | None:
@@ -100,7 +93,7 @@ class HttpAStockFetcher:
         return pd.concat(rows, ignore_index=True)
 
     def _fetch_one(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
-        code = _normalize_code(symbol)
+        code = normalize_symbol(symbol)
         bars = self._fetch_baidu_kline(code, start_date, end_date)
         if bars.empty:
             return bars
@@ -125,12 +118,14 @@ class HttpAStockFetcher:
         try:
             return self._fetch_eastmoney_fund_flow_120d(code)
         except Exception:
+            logger.warning("silent failure in _try_fetch_eastmoney_fund_flow_120d", exc_info=True)
             return []
 
     def _try_fetch_eastmoney_stock_info(self, code: str) -> dict[str, Any]:
         try:
             return self._fetch_eastmoney_stock_info(code)
         except Exception:
+            logger.warning("silent failure in _try_fetch_eastmoney_stock_info", exc_info=True)
             return {}
 
     def _fetch_baidu_kline(self, code: str, start_date: str, end_date: str) -> pd.DataFrame:
@@ -204,6 +199,7 @@ class HttpAStockFetcher:
                         8,
                     )
                 except Exception:
+                    logger.warning("silent failure in _fetch_baidu_market_data", exc_info=True)
                     break
                 result = payload.get("Result") if isinstance(payload, dict) else None
                 if isinstance(result, dict):
@@ -234,7 +230,7 @@ class HttpAStockFetcher:
         payload = self._request_json(
             "https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get",
             {
-                "secid": f"{_market_code(code)}.{code}",
+                "secid": f"{market_code(code)}.{code}",
                 "fields1": "f1,f2,f3,f7",
                 "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63,f64,f65",
                 "lmt": "120",
@@ -260,7 +256,7 @@ class HttpAStockFetcher:
                 "fltt": "2",
                 "invt": "2",
                 "fields": "f57,f58,f84,f85,f127,f116,f117,f189,f43",
-                "secid": f"{_market_code(code)}.{code}",
+                "secid": f"{market_code(code)}.{code}",
             },
             {"User-Agent": UA},
             10,
@@ -284,7 +280,7 @@ class AStockDataAdapter:
         self.fetcher = fetcher
 
     @classmethod
-    def from_http_sources(cls) -> "AStockDataAdapter":
+    def from_http_sources(cls) -> AStockDataAdapter:
         return cls(fetcher=HttpAStockFetcher().fetch_daily_bars)
 
     def fetch_daily_bars(self, symbols: Sequence[str], start_date: str, end_date: str) -> pd.DataFrame:

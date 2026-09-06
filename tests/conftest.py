@@ -1,7 +1,6 @@
 from datetime import date
 
 import pytest
-
 from astock_backtester.models import (
     BacktestSettings,
     ConditionGroup,

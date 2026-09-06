@@ -31,6 +31,11 @@ class GroupResult:
 
 
 Evaluator = Callable[[ConditionNode, pd.Series, pd.DataFrame], ConditionResult]
+MaskBuilder = Callable[[ConditionNode, pd.DataFrame], pd.Series]
+
+
+def _all_true_mask(data: pd.DataFrame) -> pd.Series:
+    return pd.Series(True, index=data.index)
 
 
 def registered_conditions() -> list[ConditionDefinition]:
@@ -309,7 +314,11 @@ def _macd_dead_cross(node: ConditionNode, row: pd.Series, frame: pd.DataFrame) -
     if pd.isna(prev_dif) or pd.isna(prev_dea):
         return ConditionResult(False, "MACD dead cross unavailable before enough history", None)
     crossed = float(prev_dif) >= float(prev_dea) and float(dif) < float(dea)
-    return ConditionResult(crossed, f"MACD dead cross {float(prev_dif):.4f}/{float(prev_dea):.4f} -> {float(dif):.4f}/{float(dea):.4f}", float(dif - dea))
+    return ConditionResult(
+        crossed,
+        f"MACD dead cross {float(prev_dif):.4f}/{float(prev_dea):.4f} -> {float(dif):.4f}/{float(dea):.4f}",
+        float(dif - dea),
+    )
 
 
 def _breakout_above_n_day_high(node: ConditionNode, row: pd.Series, frame: pd.DataFrame) -> ConditionResult:
@@ -354,6 +363,101 @@ def _breakdown_below_n_day_low(node: ConditionNode, row: pd.Series, frame: pd.Da
     return ConditionResult(value < 0, f"close {row['close']:.2f} broke prior {window}d low {prior_low:.2f}", value)
 
 
+def _mask_market_cap_between(node: ConditionNode, data: pd.DataFrame) -> pd.Series:
+    return data["float_market_cap"].between(float(node.params["min"]), float(node.params["max"]), inclusive="both")
+
+
+def _mask_capital_flow_n_day_sum_at_least(node: ConditionNode, data: pd.DataFrame) -> pd.Series:
+    window = int(node.params["window"])
+    column = f"main_net_inflow_sum_{window}d"
+    if column not in data:
+        return _all_true_mask(data)
+    return data[column] >= float(node.params["min"])
+
+
+def _mask_capital_flow_n_day_sum_at_most(node: ConditionNode, data: pd.DataFrame) -> pd.Series:
+    window = int(node.params["window"])
+    column = f"main_net_inflow_sum_{window}d"
+    if column not in data:
+        return _all_true_mask(data)
+    return data[column] <= float(node.params["max"])
+
+
+def _mask_capital_flow_today_at_least(node: ConditionNode, data: pd.DataFrame) -> pd.Series:
+    return data["main_net_inflow"] >= float(node.params["min"])
+
+
+def _mask_capital_flow_today_at_most(node: ConditionNode, data: pd.DataFrame) -> pd.Series:
+    return data["main_net_inflow"] <= float(node.params["max"])
+
+
+def _mask_capital_flow_n_day_positive_count_at_least(node: ConditionNode, data: pd.DataFrame) -> pd.Series:
+    window = int(node.params["window"])
+    column = f"main_net_inflow_positive_count_{window}d"
+    if column not in data:
+        return _all_true_mask(data)
+    return data[column] >= int(node.params["min_count"])
+
+
+def _mask_market_rising_ratio_at_least(node: ConditionNode, data: pd.DataFrame) -> pd.Series:
+    return data["market_rising_ratio"] >= float(node.params["min_ratio"])
+
+
+def _mask_close_above_ma(node: ConditionNode, data: pd.DataFrame) -> pd.Series:
+    window = int(node.params["window"])
+    return data["close"] > data[f"ma_{window}"]
+
+
+def _mask_close_below_ma(node: ConditionNode, data: pd.DataFrame) -> pd.Series:
+    window = int(node.params["window"])
+    return data["close"] < data[f"ma_{window}"]
+
+
+def _mask_turnover_between(node: ConditionNode, data: pd.DataFrame) -> pd.Series:
+    return data["turnover_rate"].between(float(node.params["min"]), float(node.params["max"]), inclusive="both")
+
+
+def _mask_past_return_at_most(node: ConditionNode, data: pd.DataFrame) -> pd.Series:
+    window = int(node.params["window"])
+    return data[f"return_{window}d"] <= float(node.params["max"])
+
+
+def _mask_past_return_between(node: ConditionNode, data: pd.DataFrame) -> pd.Series:
+    window = int(node.params["window"])
+    return data[f"return_{window}d"].between(float(node.params["min"]), float(node.params["max"]), inclusive="both")
+
+
+def _mask_volume_ratio_between(node: ConditionNode, data: pd.DataFrame) -> pd.Series:
+    window = int(node.params["window"])
+    return data[f"volume_ratio_{window}d"].between(float(node.params["min"]), float(node.params["max"]), inclusive="both")
+
+
+def _mask_macd_histogram_at_least(node: ConditionNode, data: pd.DataFrame) -> pd.Series:
+    return data["macd_hist"] >= float(node.params["min"])
+
+
+def _mask_macd_dead_cross(node: ConditionNode, data: pd.DataFrame) -> pd.Series:
+    previous_dif = data.groupby("symbol")["macd_dif"].shift(1)
+    previous_dea = data.groupby("symbol")["macd_dea"].shift(1)
+    return (previous_dif >= previous_dea) & (data["macd_dif"] < data["macd_dea"])
+
+
+def _mask_breakout_above_n_day_high(node: ConditionNode, data: pd.DataFrame) -> pd.Series:
+    window = int(node.params["window"])
+    column = f"prior_high_{window}d"
+    if column not in data:
+        return _all_true_mask(data)
+    return data["close"] > data[column]
+
+
+def _mask_breakdown_below_n_day_low(node: ConditionNode, data: pd.DataFrame) -> pd.Series:
+    window = int(node.params["window"])
+    column = f"prior_low_{window}d"
+    if column not in data:
+        return _all_true_mask(data)
+    return data["close"] < data[column]
+
+
 EVALUATORS: dict[str, Evaluator] = {
     "market_cap_between": _market_cap_between,
     "capital_flow_n_day_sum_at_least": _capital_flow_n_day_sum_at_least,
@@ -372,6 +476,27 @@ EVALUATORS: dict[str, Evaluator] = {
     "macd_dead_cross": _macd_dead_cross,
     "breakout_above_n_day_high": _breakout_above_n_day_high,
     "breakdown_below_n_day_low": _breakdown_below_n_day_low,
+}
+
+
+MASK_BUILDERS: dict[str, MaskBuilder] = {
+    "market_cap_between": _mask_market_cap_between,
+    "capital_flow_n_day_sum_at_least": _mask_capital_flow_n_day_sum_at_least,
+    "capital_flow_n_day_sum_at_most": _mask_capital_flow_n_day_sum_at_most,
+    "capital_flow_today_at_least": _mask_capital_flow_today_at_least,
+    "capital_flow_today_at_most": _mask_capital_flow_today_at_most,
+    "capital_flow_n_day_positive_count_at_least": _mask_capital_flow_n_day_positive_count_at_least,
+    "market_rising_ratio_at_least": _mask_market_rising_ratio_at_least,
+    "close_above_ma": _mask_close_above_ma,
+    "close_below_ma": _mask_close_below_ma,
+    "turnover_between": _mask_turnover_between,
+    "past_return_at_most": _mask_past_return_at_most,
+    "past_return_between": _mask_past_return_between,
+    "volume_ratio_between": _mask_volume_ratio_between,
+    "macd_histogram_at_least": _mask_macd_histogram_at_least,
+    "macd_dead_cross": _mask_macd_dead_cross,
+    "breakout_above_n_day_high": _mask_breakout_above_n_day_high,
+    "breakdown_below_n_day_low": _mask_breakdown_below_n_day_low,
 }
 
 

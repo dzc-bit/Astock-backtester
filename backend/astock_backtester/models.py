@@ -7,7 +7,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, field_validator, model_serializer, model_validator
 
 
-class ConditionOperator(str, Enum):
+class ConditionOperator(str, Enum):  # noqa: UP042 - str+Enum keeps pydantic JSON serialization stable
     AND = "and"
     OR = "or"
     SCORE = "score"

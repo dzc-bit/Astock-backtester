@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from astock_backtester.models import (
     MarketNewsItem,
@@ -54,7 +54,7 @@ class MarketNewsSummaryProvider:
     news_provider: object
 
     def latest_summary(self, limit: int = 24) -> MarketNewsSummaryResponse:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         try:
             news: MarketNewsResponse = self.news_provider.latest_news(limit=limit)
         except Exception as exc:
@@ -100,7 +100,7 @@ class MarketNewsSummaryProvider:
             item.title
             for item in sorted(
                 items,
-                key=lambda item: item.published_at or datetime.min.replace(tzinfo=timezone.utc),
+                key=lambda item: item.published_at or datetime.min.replace(tzinfo=UTC),
                 reverse=True,
             )[:5]
         ]

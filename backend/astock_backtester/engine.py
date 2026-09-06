@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import hashlib
-from typing import Callable
+from collections.abc import Callable
 
 import pandas as pd
 
-from astock_backtester.conditions import evaluate_condition, evaluate_group
+from astock_backtester.conditions import MASK_BUILDERS, evaluate_condition, evaluate_group
 from astock_backtester.models import (
     BacktestMetrics,
     BacktestResult,
@@ -17,7 +17,6 @@ from astock_backtester.models import (
     StrategyMatch,
     Trade,
 )
-
 
 REQUIRED_BASE_COLUMNS = {
     "symbol",
@@ -165,70 +164,10 @@ def _filter_mask_for_node(node, data: pd.DataFrame) -> pd.Series:
         return mask
     if int(getattr(node, "data_lag_days", 0) or 0) > 0:
         return mask
-    condition_id = node.condition_id
-    params = node.params
-    if condition_id == "market_cap_between":
-        return data["float_market_cap"].between(float(params["min"]), float(params["max"]), inclusive="both")
-    if condition_id == "capital_flow_n_day_sum_at_least":
-        window = int(params["window"])
-        column = f"main_net_inflow_sum_{window}d"
-        if column in data:
-            return data[column] >= float(params["min"])
+    builder = MASK_BUILDERS.get(node.condition_id)
+    if builder is None:
         return mask
-    if condition_id == "capital_flow_n_day_sum_at_most":
-        window = int(params["window"])
-        column = f"main_net_inflow_sum_{window}d"
-        if column in data:
-            return data[column] <= float(params["max"])
-        return mask
-    if condition_id == "capital_flow_today_at_least":
-        return data["main_net_inflow"] >= float(params["min"])
-    if condition_id == "capital_flow_today_at_most":
-        return data["main_net_inflow"] <= float(params["max"])
-    if condition_id == "capital_flow_n_day_positive_count_at_least":
-        window = int(params["window"])
-        column = f"main_net_inflow_positive_count_{window}d"
-        if column in data:
-            return data[column] >= int(params["min_count"])
-        return mask
-    if condition_id == "market_rising_ratio_at_least":
-        return data["market_rising_ratio"] >= float(params["min_ratio"])
-    if condition_id == "close_above_ma":
-        window = int(params["window"])
-        return data["close"] > data[f"ma_{window}"]
-    if condition_id == "close_below_ma":
-        window = int(params["window"])
-        return data["close"] < data[f"ma_{window}"]
-    if condition_id == "turnover_between":
-        return data["turnover_rate"].between(float(params["min"]), float(params["max"]), inclusive="both")
-    if condition_id == "past_return_at_most":
-        window = int(params["window"])
-        return data[f"return_{window}d"] <= float(params["max"])
-    if condition_id == "past_return_between":
-        window = int(params["window"])
-        return data[f"return_{window}d"].between(float(params["min"]), float(params["max"]), inclusive="both")
-    if condition_id == "volume_ratio_between":
-        window = int(params["window"])
-        return data[f"volume_ratio_{window}d"].between(float(params["min"]), float(params["max"]), inclusive="both")
-    if condition_id == "macd_histogram_at_least":
-        return data["macd_hist"] >= float(params["min"])
-    if condition_id == "macd_dead_cross":
-        previous_dif = data.groupby("symbol")["macd_dif"].shift(1)
-        previous_dea = data.groupby("symbol")["macd_dea"].shift(1)
-        return (previous_dif >= previous_dea) & (data["macd_dif"] < data["macd_dea"])
-    if condition_id == "breakout_above_n_day_high":
-        window = int(params["window"])
-        column = f"prior_high_{window}d"
-        if column in data:
-            return data["close"] > data[column]
-        return mask
-    if condition_id == "breakdown_below_n_day_low":
-        window = int(params["window"])
-        column = f"prior_low_{window}d"
-        if column in data:
-            return data["close"] < data[column]
-        return mask
-    return mask
+    return builder(node, data)
 
 
 def _candidate_prefilter_mask(strategy: StrategyConfig, data: pd.DataFrame) -> pd.Series:
@@ -280,7 +219,7 @@ def _max_numeric_prefix(row: pd.Series, prefix: str) -> float:
 
 
 def _stable_symbol_tiebreaker(row: pd.Series) -> float:
-    key = f"{row.get('trade_date', '')}-{row.get('symbol', '')}".encode("utf-8")
+    key = f"{row.get('trade_date', '')}-{row.get('symbol', '')}".encode()
     digest = hashlib.blake2b(key, digest_size=8).digest()
     return int.from_bytes(digest, "big") / float(2**64 - 1)
 

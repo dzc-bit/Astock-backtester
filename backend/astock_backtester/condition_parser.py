@@ -9,7 +9,6 @@ from astock_backtester.models import (
     ConditionValidationResult,
 )
 
-
 EXAMPLES = [
     "市场上涨家数占比大于55%",
     "收盘价站上20日均线",
@@ -283,7 +282,10 @@ PATTERNS: list[tuple[re.Pattern[str], Parser]] = [
 
 EXIT_PATTERNS: list[tuple[re.Pattern[str], Parser]] = [
     (re.compile(r"^收盘价?(?:跌破|低于|小于)(?P<window>[\d一二三四五六七八九十两〇零]+)日?均线$"), _close_below_ma),
-    (re.compile(r"^近(?P<window>[\d一二三四五六七八九十两〇零]+)日涨幅(?:小于|低于|不超过|<=?)(?P<max>\d+(?:\.\d+)?)%$"), _past_return_at_most),
+    (
+        re.compile(r"^近(?P<window>[\d一二三四五六七八九十两〇零]+)日涨幅(?:小于|低于|不超过|<=?)(?P<max>\d+(?:\.\d+)?)%$"),
+        _past_return_at_most,
+    ),
     (re.compile(r"^(?:MACD死叉|MACD下穿|MACD向下死叉)$"), _macd_dead_cross),
     (re.compile(r"^(?:资金流出|主力净流出|当日主力净流出)$"), _capital_flow_today_at_most),
     (

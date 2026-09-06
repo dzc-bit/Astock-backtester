@@ -8,6 +8,30 @@ import requests
 
 TRANSIENT_STATUS_CODES = {408, 425, 429, 500, 502, 503, 504}
 
+# User agents are defined once here so they can be upgraded in a single place.
+# MINIMAL_USER_AGENT intentionally omits platform details for endpoints that
+# serve plain quote payloads; BROWSER_USER_AGENT is a full Chrome string for
+# HTML pages that render server-side content per browser.
+MINIMAL_USER_AGENT = "Mozilla/5.0"
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+BROWSER_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+)
+
+
+def create_scraping_session() -> requests.Session:
+    """Create a ``requests.Session`` for public-market scraping.
+
+    Policy: ``trust_env=False`` so per-machine proxy/credential environment
+    variables (``http_proxy``, ``HTTPS_PROXY``, ``NO_PROXY``, ... ) never
+    hijack upstream market requests.  This matches the explicit
+    ``proxies={}`` override used by the HTTP daily-bars adapter.
+    """
+    session = requests.Session()
+    session.trust_env = False
+    return session
+
 
 def _curl_get(url: str, **kwargs: Any) -> Any:
     from curl_cffi import requests as curl_requests

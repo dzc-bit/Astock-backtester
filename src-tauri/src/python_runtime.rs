@@ -117,11 +117,11 @@ mod tests {
 
     #[test]
     fn backend_dir_and_bundled_python_stay_under_project_root() {
-        let root = std::path::Path::new(r"D:\New project 6");
+        let root = unique_temp_dir("bundled-python");
 
-        assert_eq!(backend_dir(root), root.join("backend"));
+        assert_eq!(backend_dir(&root), root.join("backend"));
         assert_eq!(
-            bundled_python_path(root),
+            bundled_python_path(&root),
             root.join(".tools").join("python-3.11.9").join("python.exe")
         );
     }

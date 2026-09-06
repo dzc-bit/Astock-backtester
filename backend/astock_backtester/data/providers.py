@@ -8,6 +8,17 @@ import pandas as pd
 
 from astock_backtester.data.astock_adapter import AStockDataAdapter
 from astock_backtester.data.importer import normalize_daily_bars
+from astock_backtester.data.symbols import normalize_symbol
+
+__all__ = [
+    "ADataProvider",
+    "AkshareProvider",
+    "CompositeProvider",
+    "DailyDataProvider",
+    "HttpAStockProvider",
+    "ProviderError",
+    "normalize_symbol",
+]
 
 
 class ProviderError(RuntimeError):
@@ -25,15 +36,6 @@ class DailyDataProvider(Protocol):
 
     def fetch_share_history(self, symbol: str) -> pd.DataFrame:
         ...
-
-
-def normalize_symbol(symbol: str) -> str:
-    code = str(symbol).strip().upper()
-    if code.startswith(("SH", "SZ", "BJ")):
-        code = code[2:]
-    if "." in code:
-        code = code.split(".", 1)[0]
-    return code.zfill(6) if code.isdigit() else code
 
 
 def _unique_symbols(symbols: list[str]) -> list[str]:

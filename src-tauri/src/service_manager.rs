@@ -367,9 +367,7 @@ fn resolve_cache_dir(cache_dir: &str) -> Result<String, String> {
         .cloned()
         .ok_or_else(|| {
             format!(
-                "workspace data dir was not found; expected {} or {}",
-                Path::new(r"D:\New project 6").join("运行产物").join("本地数据仓").display(),
-                Path::new(r"D:\New project 6").join(cache_dir).display()
+                "workspace data dir was not found; expected 运行产物\\本地数据仓 or {cache_dir} under the project root (set ASTOCK_BACKTESTER_PROJECT_ROOT to override)"
             )
         })?;
     let selected = choose_populated_cache_dir(&preferred, &candidates);
@@ -848,7 +846,7 @@ mod tests {
             port: 9123,
             cache_dir: cache.to_string_lossy().to_string(),
             process_id: Some(4567),
-            executable_path: Some("D:\\New project 6\\src-tauri\\bin\\astock-data-service.exe".to_string()),
+            executable_path: Some("C:\\service\\astock-data-service.exe".to_string()),
             executable_sha256: Some("abc123".to_string()),
         };
 
@@ -911,8 +909,8 @@ mod tests {
 
     #[test]
     fn workspace_cache_candidates_prefer_runtime_data_dir_before_cache_alias() {
-        let root = std::path::Path::new(r"D:\New project 6");
-        let candidates = workspace_cache_candidates_from_root(root, ".astock-cache");
+        let root = unique_temp_dir("cache-candidates");
+        let candidates = workspace_cache_candidates_from_root(&root, ".astock-cache");
 
         assert_eq!(
             candidates,
@@ -925,14 +923,15 @@ mod tests {
 
     #[test]
     fn runtime_data_candidates_find_workspace_data_dir_from_desktop_runtime_tree() {
-        let start = std::path::Path::new(r"D:\New project 6\运行产物\桌面软件\A股策略回测工作台");
-        let candidates = runtime_data_candidates_from(start, ".astock-cache");
+        let root = unique_temp_dir("runtime-data-candidates");
+        let start = root.join("运行产物").join("桌面软件").join("A股策略回测工作台");
+        let candidates = runtime_data_candidates_from(&start, ".astock-cache");
 
         assert_eq!(
             candidates,
             vec![
-                std::path::Path::new(r"D:\New project 6\运行产物\本地数据仓").to_path_buf(),
-                std::path::Path::new(r"D:\New project 6\.astock-cache").to_path_buf(),
+                root.join("运行产物").join("本地数据仓"),
+                root.join(".astock-cache"),
             ]
         );
     }
@@ -998,8 +997,8 @@ mod tests {
 
     #[test]
     fn release_cache_candidates_do_not_include_old_local_data_dir() {
-        let root = std::path::Path::new(r"D:\New project 6");
-        let candidates = workspace_cache_candidates_from_root(root, ".astock-cache");
+        let root = unique_temp_dir("release-cache-candidates");
+        let candidates = workspace_cache_candidates_from_root(&root, ".astock-cache");
 
         assert!(candidates.contains(&root.join("运行产物").join("本地数据仓")));
         assert!(candidates.contains(&root.join(".astock-cache")));

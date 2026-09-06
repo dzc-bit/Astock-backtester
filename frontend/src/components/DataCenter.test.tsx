@@ -16,7 +16,12 @@ const apiMocks = vi.hoisted(() => ({
   startFullMarketSync: vi.fn()
 }));
 
-vi.mock("../api", () => apiMocks);
+// Spread the real api module so newly added exports (e.g. BackendError) stay
+// available to the component under test; mocked functions always win.
+vi.mock("../api", async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  ...apiMocks
+}));
 
 const coverage = [
   { dataset: "daily_bars", symbols: 1, start_date: "2024-01-02", end_date: "2024-01-03", missing_rows: 2 },

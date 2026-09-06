@@ -1,24 +1,25 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from html import unescape
-from typing import Any, Callable, Literal
-from urllib.parse import urljoin
-from urllib.parse import urlparse
+from typing import Any
+from urllib.parse import urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup, Tag
 
-from astock_backtester.data.providers import normalize_symbol
+from astock_backtester.data.http_transport import BROWSER_USER_AGENT, create_scraping_session
+from astock_backtester.data.parsing import parse_float
+from astock_backtester.data.symbols import normalize_symbol
 from astock_backtester.models import (
     MarketBriefingLink,
     MarketBriefingResponse,
     MarketBriefingSection,
     MarketBriefingTable,
 )
-
 
 THS_FUPAN_URL = "https://stock.10jqka.com.cn/fupan/"
 THS_ZAOPAN_URL = "https://stock.10jqka.com.cn/zaopan/"
@@ -30,10 +31,7 @@ THS_ARTICLE_DETAIL_LIMIT = 1
 MARKET_FALLBACK_TIMEOUT = 2.0
 EASTMONEY_A_SPOT_URL = "https://82.push2.eastmoney.com/api/qt/clist/get"
 SINA_QUOTE_URL = "https://hq.sinajs.cn/list={symbols}"
-THS_USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
-)
+THS_USER_AGENT = BROWSER_USER_AGENT
 INDEX_SYMBOLS = [
     ("sh000001", "上证指数"),
     ("sz399001", "深证成指"),
@@ -397,15 +395,10 @@ def _article_body(soup: BeautifulSoup) -> str | None:
 
 
 def _safe_float(value: Any) -> float | None:
-    if value is None:
+    parsed = parse_float(value)
+    if parsed is None or parsed != parsed:  # NaN string placeholders count as missing
         return None
-    text = str(value).strip().replace(",", "").replace("%", "")
-    if not text or text in {"-", "--", "nan", "None"}:
-        return None
-    try:
-        return float(text)
-    except ValueError:
-        return None
+    return parsed
 
 
 def _coerce_float(value: float | None) -> float | None:
@@ -443,19 +436,6 @@ def _format_percent_points(value: float | None) -> str:
     return f"{number:.2f}%"
 
 
-def _sina_stock_symbol(symbol: str) -> str | None:
-    code = normalize_symbol(symbol)
-    if not code or not code.isdigit():
-        return None
-    if code.startswith(("6", "9")):
-        return f"sh{code}"
-    if code.startswith(("0", "2", "3")):
-        return f"sz{code}"
-    if code.startswith(("4", "8")):
-        return f"bj{code}"
-    return None
-
-
 def _decode_sina_quotes(text: str) -> dict[str, list[str]]:
     quotes: dict[str, list[str]] = {}
     for segment in text.split(";"):
@@ -466,10 +446,6 @@ def _decode_sina_quotes(text: str) -> dict[str, list[str]]:
         if raw:
             quotes[key] = raw.split(",")
     return quotes
-
-
-def _market_code(code: str) -> str:
-    return "1" if code.startswith(("6", "9")) else "0"
 
 
 def _section_from_mapping(item: dict[str, Any]) -> MarketBriefingSection | None:
@@ -537,7 +513,7 @@ def _first_ths_article_link_url(sections: list[MarketBriefingSection]) -> str | 
 @dataclass
 class MarketBriefingProvider:
     timeout: float = 8.0
-    requester: Callable[..., requests.Response] = field(default_factory=lambda: requests.Session().get)
+    requester: Callable[..., requests.Response] = field(default_factory=lambda: create_scraping_session().get)
     fallback_provider: Callable[[], list[dict[str, Any]]] | None = None
 
     def latest_fupan(self) -> MarketBriefingResponse:
@@ -641,7 +617,7 @@ class MarketBriefingProvider:
         diagnostics: list[str] = []
         headers = soup.select(".fp_item_hd")
         contents = soup.select(".fp_item_cnt")
-        for header, content in zip(headers, contents):
+        for header, content in zip(headers, contents, strict=False):
             title = _clean_display_text(_node_text(header.select_one("h1,h2,h3")) or _node_text(header, max_length=40))
             if _is_disallowed_section_title(title):
                 continue
@@ -672,10 +648,15 @@ class MarketBriefingProvider:
                 return self._local_brief_fupan(diagnostics)
         return MarketBriefingResponse(
             kind="fupan",
-            updated_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(UTC),
             source=source,
             source_url=source_url,
-            summary=summary or (expanded_sections[0].content if expanded_sections and expanded_sections[0].content else "同花顺复盘已读取，但页面暂未提供摘要。"),
+            summary=summary
+            or (
+                expanded_sections[0].content
+                if expanded_sections and expanded_sections[0].content
+                else "同花顺复盘已读取，但页面暂未提供摘要。"
+            ),
             sections=expanded_sections,
             diagnostics=diagnostics,
         )
@@ -724,7 +705,7 @@ class MarketBriefingProvider:
         expanded_sections, diagnostics = self._expand_article_links(sections[:8], THS_ZAOPAN_URL)
         return MarketBriefingResponse(
             kind="zaopan",
-            updated_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(UTC),
             source="ths-zaopan",
             source_url=_first_ths_article_link_url(expanded_sections) or THS_ZAOPAN_URL,
             summary=summary or (sections[0].content if sections and sections[0].content else fallback_summary),
@@ -738,7 +719,7 @@ class MarketBriefingProvider:
         if fallback_sections:
             return MarketBriefingResponse(
                 kind="fupan",
-                updated_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(UTC),
                 source="ths-fupan+market-fallback",
                 source_url=_first_section_link_url(fallback_sections),
                 summary=fallback_sections[0].content or "同花顺复盘页暂不可用，已使用公开行情生成回顾线索。",
@@ -753,7 +734,7 @@ class MarketBriefingProvider:
         if fallback_sections:
             return MarketBriefingResponse(
                 kind="zaopan",
-                updated_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(UTC),
                 source="ths-zaopan+market-fallback",
                 source_url=_first_section_link_url(fallback_sections),
                 summary=fallback_sections[0].content or "同花顺早盘页暂不可用，已使用公开行情生成早盘线索。",
@@ -778,7 +759,7 @@ class MarketBriefingProvider:
         )
         return MarketBriefingResponse(
             kind="fupan",
-            updated_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(UTC),
             source="ths-fupan+local-brief",
             source_url=None,
             summary=content,
@@ -802,7 +783,7 @@ class MarketBriefingProvider:
         )
         return MarketBriefingResponse(
             kind="zaopan",
-            updated_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(UTC),
             source="ths-zaopan+local-brief",
             source_url=None,
             summary=content,

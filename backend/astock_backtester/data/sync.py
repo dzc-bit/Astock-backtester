@@ -1,21 +1,24 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import date
-from typing import Callable, Any
 from threading import Lock, Thread
+from typing import Any
 from uuid import uuid4
 
 import pandas as pd
 
 from astock_backtester.data.cache import LocalCache
 from astock_backtester.data.importer import normalize_daily_bars
-from astock_backtester.data.operations import effective_a_share_date_range, fetch_capital_flow_into_cache
+from astock_backtester.data.operations import (
+    effective_a_share_date_range,
+    fetch_capital_flow_into_cache,
+)
 from astock_backtester.data.trading_calendar import a_share_trade_dates
 from astock_backtester.data.warehouse import Warehouse
 from astock_backtester.models import SyncJobStatus
-
 
 OHLC_COLUMNS = ["open", "high", "low", "close"]
 
@@ -422,12 +425,14 @@ class SyncJobManager:
                     result = fetch_capital_flow_into_cache(
                         cache=self.cache,
                         warehouse=self.warehouse,
-                        capital_flow_fetcher=lambda requested, start, end: _call_capital_flow_fetcher(
+                        # Bind the current skip flag eagerly so the closure is
+                        # not affected by later batch iterations (B023).
+                        capital_flow_fetcher=lambda requested, start, end, _skip=skip_eastmoney: _call_capital_flow_fetcher(
                             self.capital_flow_fetcher,
                             list(requested),
                             start,
                             end,
-                            skip_eastmoney=skip_eastmoney,
+                            skip_eastmoney=_skip,
                         ),
                         symbols=batch,
                         start_date=start_date,

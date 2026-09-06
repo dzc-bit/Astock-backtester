@@ -6,7 +6,7 @@ import json
 import os
 import sys
 from collections import deque
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -15,7 +15,6 @@ from typing import Any
 from uuid import uuid4
 
 import pandas as pd
-import pyarrow.parquet as pq
 import requests
 
 from astock_backtester.backtest_runner import run_configured_backtest
@@ -33,7 +32,6 @@ from astock_backtester.data.news import MarketNewsProvider
 from astock_backtester.data.news_summary import MarketNewsSummaryProvider
 from astock_backtester.data.operations import (
     build_daily_bars_coverage,
-    build_service_health,
     fetch_capital_flow_into_cache,
     fetch_daily_bars_into_cache,
     import_daily_bars_into_cache,
@@ -69,6 +67,21 @@ class ClientDisconnected(Exception):
     pass
 
 
+class LocalDataUnavailable(ValueError):
+    """Raised when the local warehouse/cache has no data for the request."""
+
+
+def _stream_error_code(exc: Exception) -> str:
+    """Stable machine-readable error codes consumed by the frontend."""
+    if isinstance(exc, LocalDataUnavailable):
+        return "no_local_data"
+    if isinstance(exc, KeyError):
+        return "payload_error"
+    if isinstance(exc, ValueError):
+        return "validation_error"
+    return "request_failed"
+
+
 class DataServiceState:
     def __init__(self, cache_dir: str | Path, port: int) -> None:
         self.cache = LocalCache(cache_dir)
@@ -94,7 +107,7 @@ class DataServiceState:
         )
         self.risk_provider = RiskAlertProvider(self.warehouse)
         self.port = port
-        self.started_at = datetime.now(timezone.utc)
+        self.started_at = datetime.now(UTC)
         self.instance_id = str(uuid4())
         self.process_id = os.getpid()
         self.executable_path = str(Path(sys.executable).resolve())
@@ -111,7 +124,7 @@ class DataServiceState:
             {
                 "level": level,
                 "message": message,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "timestamp": datetime.now(UTC).isoformat(),
             }
         )
 
@@ -123,23 +136,13 @@ class DataServiceState:
         *,
         skip_eastmoney: bool = False,
     ) -> dict[str, Any]:
-        try:
-            return self.capital_flow_crawler.fetch_many_fund_flows(
-                symbols,
-                start_date,
-                end_date,
-                timeout=15,
-                skip_eastmoney=skip_eastmoney,
-            )
-        except TypeError as exc:
-            if "skip_eastmoney" not in str(exc):
-                raise
-            return self.capital_flow_crawler.fetch_many_fund_flows(
-                symbols,
-                start_date,
-                end_date,
-                timeout=15,
-            )
+        return self.capital_flow_crawler.fetch_many_fund_flows(
+            symbols,
+            start_date,
+            end_date,
+            timeout=15,
+            skip_eastmoney=skip_eastmoney,
+        )
 
     def _hash_executable(self, path: str) -> str | None:
         try:
@@ -168,7 +171,7 @@ class DataServiceState:
             return [item.model_copy(deep=True) for item in self._coverage_snapshot]
 
     def health_payload(self) -> ServiceHealth:
-        refresh_finished = self._start_coverage_refresh()
+        refresh_finished = self.start_coverage_refresh()
         if refresh_finished is not None:
             refresh_finished.wait(HEALTH_COVERAGE_WAIT_SECONDS)
         with self._coverage_lock:
@@ -184,10 +187,10 @@ class DataServiceState:
             return False
         if self._coverage_refreshed_at is None:
             return False
-        age = (datetime.now(timezone.utc) - self._coverage_refreshed_at).total_seconds()
+        age = (datetime.now(UTC) - self._coverage_refreshed_at).total_seconds()
         return age < HEALTH_COVERAGE_REFRESH_TTL_SECONDS
 
-    def _start_coverage_refresh(self, *, force: bool = False) -> Event | None:
+    def start_coverage_refresh(self, *, force: bool = False) -> Event | None:
         with self._coverage_lock:
             if self._coverage_refreshing:
                 return None
@@ -201,7 +204,7 @@ class DataServiceState:
                 coverage = self._read_coverage_snapshot()
                 with self._coverage_lock:
                     self._coverage_snapshot = [item.model_copy(deep=True) for item in coverage]
-                    self._coverage_refreshed_at = datetime.now(timezone.utc)
+                    self._coverage_refreshed_at = datetime.now(UTC)
             finally:
                 with self._coverage_lock:
                     self._coverage_refreshing = False
@@ -231,26 +234,15 @@ class DataServiceState:
         ]
 
     def sync_symbols(self, start_date: str | None, end_date: str | None) -> list[str]:
-        read_daily_symbols = getattr(self.warehouse, "read_daily_symbols", None)
-        if callable(read_daily_symbols):
-            try:
-                symbols = read_daily_symbols(require_ohlc=True)
-                if symbols:
-                    return symbols
-            except Exception as exc:
-                self.log(
-                    "warning",
-                    f"warehouse symbol read failed; falling back to provider: {exc}",
-                )
-        else:
-            try:
-                frame = self.warehouse.read_daily_bars(require_ohlc=True)
-                if not frame.empty and "symbol" in frame:
-                    symbols = sorted(str(symbol) for symbol in frame["symbol"].dropna().astype(str).unique())
-                    if symbols:
-                        return symbols
-            except Exception as exc:
-                self.log("warning", f"warehouse daily-bars fallback symbol read failed: {exc}")
+        try:
+            symbols = self.warehouse.read_daily_symbols(require_ohlc=True)
+            if symbols:
+                return symbols
+        except Exception as exc:
+            self.log(
+                "warning",
+                f"warehouse symbol read failed; falling back to provider: {exc}",
+            )
         return self.provider.list_symbols()
 
     def validate_stock_symbols(self, symbols: list[str]) -> StockSymbolValidationResult:
@@ -284,12 +276,12 @@ class DataServiceState:
 
 
 def _retained_realtime_snapshot(provider: Any, exc: Exception):
-    retained = getattr(provider, "_last_successful_snapshot", None)
+    retained = provider.retained_successful_snapshot()
     if retained is None:
         return None
     snapshot = retained.model_copy(deep=True)
     snapshot.status = "stale"
-    snapshot.updated_at = datetime.now(timezone.utc)
+    snapshot.updated_at = datetime.now(UTC)
     snapshot.source = (
         snapshot.source
         if snapshot.source.endswith("+service-retained-last-success")
@@ -389,7 +381,9 @@ class DataServiceHandler(BaseHTTPRequestHandler):
         if frame.empty:
             frame = _require_ohlc_rows(self.server.state.cache.read_daily_bars())
         if frame.empty:
-            raise ValueError("No cached daily bars found. Import or fetch data before running a configured backtest.")
+            raise LocalDataUnavailable(
+                "No cached daily bars found. Import or fetch data before running a configured backtest."
+            )
         return frame
 
     def _run_backtest_stream(self, payload: dict[str, Any]) -> None:
@@ -423,20 +417,15 @@ class DataServiceHandler(BaseHTTPRequestHandler):
         except Exception as exc:
             self.server.state.log("error", str(exc))
             try:
-                self._write_ndjson({"type": "error", "message": str(exc), "code": "request_failed"})
+                self._write_ndjson({"type": "error", "message": str(exc), "code": _stream_error_code(exc)})
             except ClientDisconnected:
                 return
 
     def _run_realtime_snapshot_stream(self) -> None:
         try:
             self._send_ndjson_headers()
-            event_source = getattr(self.server.state.realtime_provider, "market_snapshot_events", None)
-            if callable(event_source):
-                for event in event_source():
-                    self._write_ndjson(event)
-            else:
-                snapshot = self.server.state.realtime_provider.market_snapshot()
-                self._write_ndjson({"type": "result", "snapshot": snapshot})
+            for event in self.server.state.realtime_provider.market_snapshot_events():
+                self._write_ndjson(event)
         except ClientDisconnected:
             return
         except Exception as exc:
@@ -506,7 +495,7 @@ class DataServiceHandler(BaseHTTPRequestHandler):
             except Exception as exc:
                 self.server.state.log("error", f"market finance failed: {exc}")
                 finance = ClsFinanceResponse(
-                    updated_at=datetime.now(timezone.utc),
+                    updated_at=datetime.now(UTC),
                     diagnostics=[f"财联社看盘接口失败：{exc}"],
                 )
             self._send_json(finance.model_dump(mode="json"))
@@ -567,19 +556,11 @@ class DataServiceHandler(BaseHTTPRequestHandler):
                 symbols = payload.get("symbols") or self.server.state.sync_symbols(start_date, end_date)
                 if not symbols:
                     raise ValueError("No symbols available for full-market sync.")
-                start_method = getattr(self.server.state.sync_manager, "start_full_market", None)
-                if callable(start_method):
-                    job = start_method(
-                        symbols=symbols,
-                        start_date=start_date,
-                        end_date=end_date,
-                    )
-                else:
-                    job = self.server.state.sync_manager.run_full_market(
-                        symbols=symbols,
-                        start_date=start_date,
-                        end_date=end_date,
-                    )
+                job = self.server.state.sync_manager.start_full_market(
+                    symbols=symbols,
+                    start_date=start_date,
+                    end_date=end_date,
+                )
                 self.server.state.log(
                     "info",
                     f"Full-market sync {job.status}: {job.completed_symbols}/{job.total_symbols} symbols",
@@ -601,7 +582,7 @@ class DataServiceHandler(BaseHTTPRequestHandler):
                 )
                 for entry in result.logs:
                     self.server.state.log(entry.level, entry.message)
-                self.server.state._start_coverage_refresh(force=True)
+                self.server.state.start_coverage_refresh(force=True)
                 self._send_json(result.model_dump(mode="json"))
                 return
             if self.path == "/fetch/daily-bars":
@@ -616,7 +597,7 @@ class DataServiceHandler(BaseHTTPRequestHandler):
                 )
                 for entry in result.logs:
                     self.server.state.log(entry.level, entry.message)
-                self.server.state._start_coverage_refresh(force=True)
+                self.server.state.start_coverage_refresh(force=True)
                 self._send_json(result.model_dump(mode="json"))
                 return
             if self.path == "/fetch/capital-flow":
@@ -676,16 +657,12 @@ class DataServiceHandler(BaseHTTPRequestHandler):
                 )
                 for entry in result.logs:
                     self.server.state.log(entry.level, entry.message)
-                self.server.state._start_coverage_refresh(force=True)
+                self.server.state.start_coverage_refresh(force=True)
                 self._send_json(result.model_dump(mode="json"))
                 return
             if self.path.startswith("/sync/jobs/") and self.path.endswith("/cancel"):
                 job_id = self.path.removesuffix("/cancel").rsplit("/", 1)[-1]
-                cancel_method = getattr(self.server.state.sync_manager, "cancel_job", None)
-                if not callable(cancel_method):
-                    self._send_json({"code": "not_found", "message": job_id}, HTTPStatus.NOT_FOUND)
-                    return
-                job = cancel_method(job_id)
+                job = self.server.state.sync_manager.cancel_job(job_id)
                 if job is None:
                     self._send_json({"code": "not_found", "message": job_id}, HTTPStatus.NOT_FOUND)
                     return
@@ -711,6 +688,18 @@ class DataServiceHandler(BaseHTTPRequestHandler):
                 self._send_json(result.model_dump(mode="json"))
                 return
             self._send_json({"code": "not_found", "message": self.path}, HTTPStatus.NOT_FOUND)
+        except LocalDataUnavailable as exc:
+            self.server.state.log("error", str(exc))
+            self._send_json({"code": "no_local_data", "message": str(exc)}, HTTPStatus.BAD_REQUEST)
+        except ValueError as exc:
+            self.server.state.log("error", str(exc))
+            self._send_json({"code": "validation_error", "message": str(exc)}, HTTPStatus.BAD_REQUEST)
+        except KeyError as exc:
+            self.server.state.log("error", str(exc))
+            self._send_json(
+                {"code": "payload_error", "message": f"missing request field: {exc}"},
+                HTTPStatus.BAD_REQUEST,
+            )
         except Exception as exc:
             self.server.state.log("error", str(exc))
             self._send_json({"code": "request_failed", "message": str(exc)}, HTTPStatus.BAD_REQUEST)
@@ -748,24 +737,11 @@ class DataServiceHandler(BaseHTTPRequestHandler):
 
         if start_date and end_date and all_symbols:
             try:
-                paths = sorted(self.server.state.warehouse.daily_bars_root.glob("year=*/daily_bars.parquet"))
-                if paths:
-                    latest_path = paths[-1]
-                    columns_to_read = ["symbol", "trade_date", "main_net_inflow"]
-                    available = set(pq.ParquetFile(latest_path).schema_arrow.names)
-                    columns_to_read = [c for c in columns_to_read if c in available]
-                    if "symbol" in columns_to_read and "main_net_inflow" in columns_to_read:
-                        frame = self.server.state.warehouse._safe_read_parquet(latest_path, columns=columns_to_read)
-                        if not frame.empty:
-                            frame["trade_date"] = pd.to_datetime(frame["trade_date"], errors="coerce")
-                            frame = frame.dropna(subset=["trade_date"])
-                            frame = frame[frame["trade_date"] >= pd.Timestamp(start_date)]
-                            frame = frame[frame["trade_date"] <= pd.Timestamp(end_date)]
-                            if "main_net_inflow" in frame.columns:
-                                has_any_flow = frame.groupby(frame["symbol"].astype(str))["main_net_inflow"].any()
-                                missing_symbols = set(has_any_flow[~has_any_flow].index)
-                                if missing_symbols:
-                                    return sorted(all_symbols & missing_symbols)
+                missing_symbols = self.server.state.warehouse.read_capital_flow_missing_symbols(
+                    start_date, end_date
+                )
+                if missing_symbols:
+                    return sorted(all_symbols & missing_symbols)
             except Exception as exc:
                 self.server.state.log("warning", f"capital-flow coverage inspection failed: {exc}")
 

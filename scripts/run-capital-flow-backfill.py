@@ -20,9 +20,13 @@ if str(BACKEND_ROOT) not in sys.path:
 from astock_backtester.data.cache import LocalCache
 from astock_backtester.data.capital_flow_crawler import CapitalFlowCrawler
 from astock_backtester.data.operations import fetch_capital_flow_into_cache
-from astock_backtester.data.providers import ADataProvider, AkshareProvider, CompositeProvider, HttpAStockProvider
+from astock_backtester.data.providers import (
+    ADataProvider,
+    AkshareProvider,
+    CompositeProvider,
+    HttpAStockProvider,
+)
 from astock_backtester.data.warehouse import KNOWN_CAPITAL_FLOW_SOURCE_GAP_DATES, Warehouse
-
 
 DEFAULT_BATCH_SIZE = 20
 DEFAULT_MAX_WORKERS = 4

@@ -76,19 +76,32 @@ pub fn run() {
 mod tests {
     use super::webview_data_dir_from_exe;
     use serde_json::Value;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn unique_temp_dir(name: &str) -> std::path::PathBuf {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be valid")
+            .as_nanos();
+        std::env::temp_dir().join(format!("astock-backtester-{name}-{suffix}"))
+    }
 
     #[test]
-    fn webview_data_dir_uses_runtime_artifacts_on_d_drive() {
-        let exe = std::path::Path::new(
-            r"D:\New project 6\运行产物\桌面软件\A股策略回测工作台\a-stock-backtester.exe",
-        );
+    fn webview_data_dir_uses_runtime_artifacts_next_to_workspace() {
+        let root = unique_temp_dir("webview-data");
+        let exe = root
+            .join("运行产物")
+            .join("桌面软件")
+            .join("A股策略回测工作台")
+            .join("a-stock-backtester.exe");
 
-        let data_dir = webview_data_dir_from_exe(exe).expect("D runtime install tree should resolve");
+        let data_dir = webview_data_dir_from_exe(&exe).expect("runtime install tree should resolve");
 
         assert_eq!(
             data_dir,
-            std::path::Path::new(r"D:\New project 6\运行产物\桌面端WebView数据\local.astock.backtester")
-                .to_path_buf()
+            root.join("运行产物")
+                .join("桌面端WebView数据")
+                .join("local.astock.backtester")
         );
     }
 

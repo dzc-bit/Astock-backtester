@@ -14,7 +14,7 @@ from astock_backtester.data.warehouse import (
     KNOWN_CAPITAL_FLOW_LISTING_LAG_DAYS,
     KNOWN_CAPITAL_FLOW_SOURCE_GAP_DATES,
     Warehouse,
-    _uses_symbol_capital_flow_source_start,
+    uses_symbol_capital_flow_source_start,
 )
 from astock_backtester.models import (
     DailyBarsCoverageItem,
@@ -458,7 +458,10 @@ def fetch_capital_flow_into_cache(
                 "requested_symbols": len(fetch_symbols),
                 "standalone_rows": standalone_rows,
                 "source": "capital_flow_crawler",
-                "message": "Capital-flow rows were written before daily OHLCV rows; daily-bar coverage will remain incomplete until historical prices are fetched.",
+                "message": (
+                    "Capital-flow rows were written before daily OHLCV rows; "
+                    "daily-bar coverage will remain incomplete until historical prices are fetched."
+                ),
             }
         )
     if imported_rows == 0:
@@ -627,7 +630,6 @@ def _symbols_with_complete_capital_flow(
     normalized["_td_norm"] = normalized["trade_date"].dt.normalize()
     flow_mask = normalized["main_net_inflow"].notna()
     flow_dates_by_sym = normalized[flow_mask].groupby("symbol")["_td_norm"].apply(set).to_dict()
-    all_dates_by_sym = normalized.groupby("symbol")["_td_norm"].apply(set).to_dict()
     first_daily_by_sym = normalized.groupby("symbol")["trade_date"].min().to_dict()
 
     base_expected = expected_dates - KNOWN_CAPITAL_FLOW_SOURCE_GAP_DATES
@@ -638,7 +640,6 @@ def _symbols_with_complete_capital_flow(
         flow_dates = flow_dates_by_sym.get(symbol)
         if flow_dates is None:
             continue
-        all_dates = all_dates_by_sym.get(symbol, set())
         first_daily_date = first_daily_by_sym.get(symbol)
 
         # Check special source-start adjustments (rare path)
@@ -648,7 +649,7 @@ def _symbols_with_complete_capital_flow(
             pd.notna(first_daily_date)
             and pd.notna(warehouse_start)
             and (
-                _uses_symbol_capital_flow_source_start(
+                uses_symbol_capital_flow_source_start(
                     symbol,
                     pd.Timestamp(flow_start),
                     pd.Timestamp(first_daily_date),

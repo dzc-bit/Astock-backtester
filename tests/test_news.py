@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 # Merged from: test_news_provider.py, test_news_summary.py
-
-from datetime import UTC, datetime, timezone
+from datetime import UTC, datetime
 from threading import Event, Lock, Thread
 
 import astock_backtester.data.news as news_module
@@ -10,7 +9,6 @@ import requests
 from astock_backtester.data.news import MarketNewsProvider
 from astock_backtester.data.news_summary import MarketNewsSummaryProvider
 from astock_backtester.models import MarketNewsItem, MarketNewsResponse
-
 
 # ---------------------------------------------------------------------------
 # News Provider
@@ -343,7 +341,7 @@ class FakeNewsProvider:
 
     def latest_news(self, limit: int = 24) -> MarketNewsResponse:
         return MarketNewsResponse(
-            updated_at=datetime(2026, 6, 5, 14, 30, tzinfo=timezone.utc),
+            updated_at=datetime(2026, 6, 5, 14, 30, tzinfo=UTC),
             source=self.source,
             items=self.items[:limit],
             diagnostics=self.diagnostics,
@@ -356,7 +354,7 @@ def test_news_summary_groups_today_news_without_mutating_original_news_list():
             title="AI应用产业链午后走强",
             summary="算力、半导体、软件服务同步活跃。",
             source="示例财经",
-            published_at=datetime(2026, 6, 5, 14, 20, tzinfo=timezone.utc),
+            published_at=datetime(2026, 6, 5, 14, 20, tzinfo=UTC),
             tags=["AI", "算力"],
             sentiment="positive",
         ),
@@ -364,7 +362,7 @@ def test_news_summary_groups_today_news_without_mutating_original_news_list():
             title="算力租赁概念持续拉升",
             summary="多只高辨识度个股封板。",
             source="示例快讯",
-            published_at=datetime(2026, 6, 5, 14, 10, tzinfo=timezone.utc),
+            published_at=datetime(2026, 6, 5, 14, 10, tzinfo=UTC),
             tags=["算力"],
             sentiment="positive",
         ),
@@ -372,7 +370,7 @@ def test_news_summary_groups_today_news_without_mutating_original_news_list():
             title="退市风险提示增多",
             summary="部分ST公司披露风险公告。",
             source="示例公告",
-            published_at=datetime(2026, 6, 5, 13, 50, tzinfo=timezone.utc),
+            published_at=datetime(2026, 6, 5, 13, 50, tzinfo=UTC),
             tags=["ST", "退市"],
             sentiment="negative",
         ),
@@ -395,7 +393,7 @@ def test_news_summary_prioritizes_same_day_news_over_older_items():
             title="昨日AI应用继续发酵",
             summary="昨日算力、半导体反复活跃。",
             source="昨日财经",
-            published_at=datetime(2026, 6, 4, 15, 0, tzinfo=timezone.utc),
+            published_at=datetime(2026, 6, 4, 15, 0, tzinfo=UTC),
             tags=["AI", "算力"],
             sentiment="positive",
         ),
@@ -403,7 +401,7 @@ def test_news_summary_prioritizes_same_day_news_over_older_items():
             title="昨日算力租赁概念走强",
             summary="昨日多只高辨识度个股封板。",
             source="昨日快讯",
-            published_at=datetime(2026, 6, 4, 14, 30, tzinfo=timezone.utc),
+            published_at=datetime(2026, 6, 4, 14, 30, tzinfo=UTC),
             tags=["AI", "算力"],
             sentiment="positive",
         ),
@@ -411,7 +409,7 @@ def test_news_summary_prioritizes_same_day_news_over_older_items():
             title="今日电力改革消息升温",
             summary="电力、政策方向成为今日新闻主线。",
             source="今日财经",
-            published_at=datetime(2026, 6, 5, 9, 45, tzinfo=timezone.utc),
+            published_at=datetime(2026, 6, 5, 9, 45, tzinfo=UTC),
             tags=["电力", "政策"],
             sentiment="positive",
         ),

@@ -28,7 +28,7 @@ export function UpdatePanel({ api: injectedApi }: UpdatePanelProps) {
   const [state, setState] = useState<PanelState>("idle");
   const [message, setMessage] = useState(runtime ? "可检查桌面端更新" : "浏览器预览不可安装更新");
   const [update, setUpdate] = useState<AvailableUpdate | null>(null);
-  const [receivedBytes, setReceivedBytes] = useState(0);
+  const [, setReceivedBytes] = useState(0);
   const [totalBytes, setTotalBytes] = useState<number | undefined>();
   const totalBytesRef = useRef<number | undefined>();
 

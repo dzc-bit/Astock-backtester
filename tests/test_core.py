@@ -4,8 +4,6 @@ from datetime import date
 
 import pandas as pd
 import pytest
-from pydantic import ValidationError
-
 from astock_backtester import indicators
 from astock_backtester.condition_parser import (
     condition_examples,
@@ -13,7 +11,13 @@ from astock_backtester.condition_parser import (
     validate_condition_text,
     validate_exit_condition_text,
 )
-from astock_backtester.conditions import evaluate_condition, evaluate_group, registered_conditions
+from astock_backtester.conditions import (
+    EVALUATORS,
+    MASK_BUILDERS,
+    evaluate_condition,
+    evaluate_group,
+    registered_conditions,
+)
 from astock_backtester.data.trading_calendar import a_share_trade_dates
 from astock_backtester.indicators import (
     add_capital_flow_sum,
@@ -34,12 +38,12 @@ from astock_backtester.models import (
     ConditionGroup,
     ConditionNode,
     ConditionOperator,
-    DatasetCoverage,
     MarketBreadth,
     StrategyConfig,
     SyncJobStatus,
 )
 from astock_backtester.sample_data import sample_daily_bars
+from pydantic import ValidationError
 
 # Merged from: test_indicators.py, test_conditions.py, test_models.py, test_trading_calendar.py
 
@@ -577,6 +581,15 @@ def test_strategy_config_rejects_empty_entry_groups():
             exit_rules=[],
             score_threshold=None,
         )
+
+
+def test_condition_registry_stays_in_sync():
+    """Every registered condition must have both a row evaluator and a
+    vectorized mask builder, otherwise the engine prefilter silently drifts
+    away from the row-wise semantics."""
+    registry_ids = {definition.condition_id for definition in registered_conditions()}
+    assert set(EVALUATORS) == registry_ids
+    assert set(MASK_BUILDERS) == registry_ids
 
 
 def test_backtest_settings_defaults_to_conservative_execution():

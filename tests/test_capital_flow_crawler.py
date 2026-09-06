@@ -1,13 +1,13 @@
-import pytest
 from threading import Event
 
+import pytest
 from astock_backtester.data.capital_flow_crawler import (
-    CapitalFlowCrawler,
-    CapitalFlowFetchError,
     EASTMONEY_FUND_FLOW_KLINE_URL,
     SINA_FUND_FLOW_URL,
-    _normalize_code,
+    CapitalFlowCrawler,
+    CapitalFlowFetchError,
 )
+from astock_backtester.data.symbols import normalize_symbol
 
 
 def test_fetch_fund_flow_builds_eastmoney_request_and_filters_dates():
@@ -987,6 +987,6 @@ def test_fetch_many_fund_flows_does_not_reuse_recent_success_cache_after_empty_k
 
 
 def test_normalize_code_accepts_common_a_share_symbol_forms():
-    assert _normalize_code("SH600519") == "600519"
-    assert _normalize_code("600519.SH") == "600519"
-    assert _normalize_code(" sz000001 ") == "000001"
+    assert normalize_symbol("SH600519") == "600519"
+    assert normalize_symbol("600519.SH") == "600519"
+    assert normalize_symbol(" sz000001 ") == "000001"

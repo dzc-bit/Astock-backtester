@@ -2,17 +2,18 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
-from dataclasses import dataclass
-from datetime import datetime, timezone
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from importlib import resources
-from typing import Callable
 
 import pandas as pd
 import requests
 
-from astock_backtester.data.providers import normalize_symbol
+from astock_backtester.data.http_transport import MINIMAL_USER_AGENT, create_scraping_session
+from astock_backtester.data.symbols import normalize_symbol, sina_summary_symbol
 from astock_backtester.data.warehouse import Warehouse
 from astock_backtester.models import RiskAlertItem, RiskAlertsResponse
 
@@ -77,12 +78,12 @@ def _risk_from_name(symbol: str, name: str, source: str, now: datetime) -> RiskA
 class RiskAlertProvider:
     warehouse: Warehouse
     timeout: float = 1.5
-    requester: Callable[..., requests.Response] = requests.get
+    requester: Callable[..., requests.Response] = field(default_factory=lambda: create_scraping_session().get)
     adata_loader: Callable[[], pd.DataFrame] | None = None
     include_packaged_watchlist: bool = True
 
     def current_alerts(self) -> RiskAlertsResponse:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         diagnostics: list[str] = []
         watchlist_items, watchlist_diagnostics = self._alerts_from_local_watchlist(now)
         diagnostics.extend(watchlist_diagnostics)
@@ -333,24 +334,12 @@ class RiskAlertProvider:
                 seen.add(symbol)
         return symbols
 
-    def _sina_symbol(self, symbol: str) -> str | None:
-        code = normalize_symbol(symbol)
-        if not code:
-            return None
-        if code.startswith(("6", "9")):
-            return f"s_sh{code}"
-        if code.startswith(("0", "2", "3")):
-            return f"s_sz{code}"
-        if code.startswith(("4", "8")):
-            return f"s_bj{code}"
-        return None
-
     def _alerts_from_sina_local_symbols(self, now: datetime) -> tuple[list[RiskAlertItem], list[str]]:
         symbols = self._load_local_symbol_codes()
         if not symbols:
             return [], ["本地全市场代码表不存在，无法调用新浪实时名称风险源。"]
 
-        sina_symbols = [value for symbol in symbols if (value := self._sina_symbol(symbol))]
+        sina_symbols = [value for symbol in symbols if (value := sina_summary_symbol(symbol))]
         if not sina_symbols:
             return [], ["本地全市场代码表没有可识别的沪深北代码，无法调用新浪实时名称风险源。"]
 
@@ -364,7 +353,7 @@ class RiskAlertProvider:
                     timeout=self.timeout,
                     headers={
                         "Referer": "https://finance.sina.com.cn/",
-                        "User-Agent": "Mozilla/5.0",
+                        "User-Agent": MINIMAL_USER_AGENT,
                     },
                 )
                 response.raise_for_status()
