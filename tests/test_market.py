@@ -2,16 +2,14 @@ from __future__ import annotations
 
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
-from bs4 import BeautifulSoup
-
 from astock_backtester.data.briefing import (
-    MarketBriefingProvider,
     THS_FUPAN_URL,
-    THS_ZAOPAN_URL,
     THS_REFERER,
+    THS_ZAOPAN_URL,
+    MarketBriefingProvider,
     _is_noisy_content_line,
     _table_from_node,
 )
@@ -23,15 +21,16 @@ from astock_backtester.data.cls_finance import (
 )
 from astock_backtester.data.market_commentary import MarketCommentaryProvider
 from astock_backtester.models import (
+    MarketBreadth,
     MarketBriefingResponse,
     MarketBriefingSection,
-    MarketBreadth,
     MarketIndexQuote,
     MarketNewsItem,
     MarketNewsResponse,
     RealtimeMarketSnapshot,
     SectorMover,
 )
+from bs4 import BeautifulSoup
 
 # Merged from: test_cls_finance.py, test_market_briefing.py, test_market_commentary.py
 
@@ -1337,7 +1336,7 @@ class FakeRealtimeProvider:
         return RealtimeMarketSnapshot(
             status="live",
             source="fake-live",
-            updated_at=datetime(2026, 6, 5, 14, 50, tzinfo=timezone.utc),
+            updated_at=datetime(2026, 6, 5, 14, 50, tzinfo=UTC),
             indexes=[
                 MarketIndexQuote(
                     symbol="sh000001",
@@ -1347,7 +1346,7 @@ class FakeRealtimeProvider:
                     change=20.0,
                     change_pct=0.0065,
                     source="fake-live",
-                    updated_at=datetime(2026, 6, 5, 14, 50, tzinfo=timezone.utc),
+                    updated_at=datetime(2026, 6, 5, 14, 50, tzinfo=UTC),
                 )
             ],
             breadth=MarketBreadth(up=3600, down=1300, flat=180, total=5080, source="fake-live"),
@@ -1366,14 +1365,14 @@ class FakeRealtimeProvider:
 class FakeNewsProvider:
     def latest_news(self, limit: int = 12) -> MarketNewsResponse:
         return MarketNewsResponse(
-            updated_at=datetime(2026, 6, 5, 14, 55, tzinfo=timezone.utc),
+            updated_at=datetime(2026, 6, 5, 14, 55, tzinfo=UTC),
             source="fake-news",
             items=[
                 MarketNewsItem(
                     title="政策利好推动AI应用和算力方向走强",
                     summary="盘中AI应用、算力租赁、半导体方向成交活跃。",
                     source="示例财经",
-                    published_at=datetime(2026, 6, 5, 14, 30, tzinfo=timezone.utc),
+                    published_at=datetime(2026, 6, 5, 14, 30, tzinfo=UTC),
                     tags=["AI", "算力", "政策"],
                     sentiment="positive",
                 )
@@ -1385,7 +1384,7 @@ class FakeFupanProvider:
     def latest_fupan(self) -> MarketBriefingResponse:
         return MarketBriefingResponse(
             kind="fupan",
-            updated_at=datetime(2026, 6, 5, 15, 35, tzinfo=timezone.utc),
+            updated_at=datetime(2026, 6, 5, 15, 35, tzinfo=UTC),
             source="ths-fupan",
             source_url="https://stock.10jqka.com.cn/fupan/",
             summary="收盘后复盘：机器人、算力和AI应用方向活跃，指数震荡但题材承接尚可。",
@@ -1581,7 +1580,7 @@ def test_market_commentary_ignores_noisy_briefing_fallback_text():
         def latest_fupan(self) -> MarketBriefingResponse:
             return MarketBriefingResponse(
                 kind="fupan",
-                updated_at=datetime(2026, 6, 5, 15, 35, tzinfo=timezone.utc),
+                updated_at=datetime(2026, 6, 5, 15, 35, tzinfo=UTC),
                 source="ths-fupan",
                 source_url="https://stock.10jqka.com.cn/fupan/",
                 summary="同比指数盈利",
@@ -1619,7 +1618,7 @@ def test_market_commentary_labels_market_fallback_briefing_as_public_market_fall
         def latest_fupan(self) -> MarketBriefingResponse:
             return MarketBriefingResponse(
                 kind="fupan",
-                updated_at=datetime(2026, 6, 5, 15, 35, tzinfo=timezone.utc),
+                updated_at=datetime(2026, 6, 5, 15, 35, tzinfo=UTC),
                 source="ths-fupan+market-fallback",
                 source_url="https://stock.10jqka.com.cn/fupan/",
                 summary="公开行情回顾：指数震荡，半导体方向保持活跃。",
@@ -1650,7 +1649,7 @@ def test_market_commentary_labels_local_briefing_as_local_brief_review():
         def latest_fupan(self) -> MarketBriefingResponse:
             return MarketBriefingResponse(
                 kind="fupan",
-                updated_at=datetime(2026, 6, 5, 15, 35, tzinfo=timezone.utc),
+                updated_at=datetime(2026, 6, 5, 15, 35, tzinfo=UTC),
                 source="ths-fupan+local-brief",
                 source_url="https://stock.10jqka.com.cn/fupan/",
                 summary="本地简短复盘：当前只给防守口径。",
@@ -1678,7 +1677,7 @@ def test_market_commentary_builds_backend_brief_review_when_realtime_and_fupan_a
             return RealtimeMarketSnapshot(
                 status="unavailable",
                 source="fake-live-empty",
-                updated_at=datetime(2026, 6, 5, 14, 50, tzinfo=timezone.utc),
+                updated_at=datetime(2026, 6, 5, 14, 50, tzinfo=UTC),
                 indexes=[],
                 breadth=None,
                 strong_sectors=[],
@@ -1690,7 +1689,7 @@ def test_market_commentary_builds_backend_brief_review_when_realtime_and_fupan_a
         def latest_fupan(self) -> MarketBriefingResponse:
             return MarketBriefingResponse(
                 kind="fupan",
-                updated_at=datetime(2026, 6, 5, 15, 35, tzinfo=timezone.utc),
+                updated_at=datetime(2026, 6, 5, 15, 35, tzinfo=UTC),
                 source="fallback",
                 source_url=None,
                 summary="",
@@ -1720,7 +1719,7 @@ def test_market_commentary_reports_diagnostic_when_realtime_source_returns_unava
             return RealtimeMarketSnapshot(
                 status="unavailable",
                 source="fake-live",
-                updated_at=datetime(2026, 6, 5, 14, 50, tzinfo=timezone.utc),
+                updated_at=datetime(2026, 6, 5, 14, 50, tzinfo=UTC),
                 indexes=[],
                 breadth=None,
                 strong_sectors=[],
@@ -1748,7 +1747,7 @@ def test_market_commentary_does_not_build_definite_view_from_unavailable_snapsho
             return RealtimeMarketSnapshot(
                 status="unavailable",
                 source="local-latest",
-                updated_at=datetime(2026, 6, 5, 14, 50, tzinfo=timezone.utc),
+                updated_at=datetime(2026, 6, 5, 14, 50, tzinfo=UTC),
                 indexes=[
                     MarketIndexQuote(
                         symbol="local-market",
@@ -1758,7 +1757,7 @@ def test_market_commentary_does_not_build_definite_view_from_unavailable_snapsho
                         change=0.3,
                         change_pct=0.03,
                         source="local-latest",
-                        updated_at=datetime(2026, 6, 5, 14, 50, tzinfo=timezone.utc),
+                        updated_at=datetime(2026, 6, 5, 14, 50, tzinfo=UTC),
                     )
                 ],
                 breadth=MarketBreadth(up=4, down=1, flat=0, total=5, source="local-latest"),
@@ -1795,7 +1794,7 @@ def test_market_commentary_does_not_build_definite_view_from_empty_live_snapshot
             return RealtimeMarketSnapshot(
                 status="live",
                 source="fake-live-empty",
-                updated_at=datetime(2026, 6, 5, 14, 50, tzinfo=timezone.utc),
+                updated_at=datetime(2026, 6, 5, 14, 50, tzinfo=UTC),
                 indexes=[],
                 breadth=None,
                 strong_sectors=[],
@@ -1823,7 +1822,7 @@ def test_market_commentary_rejects_live_snapshot_with_partial_breadth_total():
             return RealtimeMarketSnapshot(
                 status="live",
                 source="ashare-sina+sina-a-share-live+ths-concept",
-                updated_at=datetime(2026, 6, 5, 14, 50, tzinfo=timezone.utc),
+                updated_at=datetime(2026, 6, 5, 14, 50, tzinfo=UTC),
                 indexes=[
                     MarketIndexQuote(
                         symbol="sh000001",
@@ -1859,7 +1858,7 @@ def test_market_commentary_rejects_live_snapshot_with_local_fallback_sectors():
             return RealtimeMarketSnapshot(
                 status="live",
                 source="ashare-sina+sina-a-share-live+local-market-group",
-                updated_at=datetime(2026, 6, 5, 14, 50, tzinfo=timezone.utc),
+                updated_at=datetime(2026, 6, 5, 14, 50, tzinfo=UTC),
                 indexes=[
                     MarketIndexQuote(
                         symbol="sh000001",

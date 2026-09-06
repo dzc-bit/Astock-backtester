@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from typing import Any
 from collections.abc import Callable
+from typing import Any
 
 from astock_backtester.conditions import registered_conditions
 from astock_backtester.engine import run_backtest

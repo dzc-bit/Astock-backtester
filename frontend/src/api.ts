@@ -47,6 +47,16 @@ import {
 
 type BackendResponse<T> = ({ ok: true } & T) | { ok: false; error: { code: string; message: string } };
 
+export class BackendError extends Error {
+  readonly code: string;
+
+  constructor(code: string, message: string) {
+    super(message);
+    this.name = "BackendError";
+    this.code = code;
+  }
+}
+
 async function callBackend<T>(payload: Record<string, unknown>): Promise<T> {
   if (!isTauriRuntime()) {
     if (payload.command === "coverage") {
@@ -56,7 +66,7 @@ async function callBackend<T>(payload: Record<string, unknown>): Promise<T> {
   }
   const response = await invoke<BackendResponse<T>>("backend_command", { payload });
   if (!response.ok) {
-    throw new Error(response.error.message);
+    throw new BackendError(response.error.code, response.error.message);
   }
   return response;
 }
@@ -118,7 +128,7 @@ async function consumeNdjsonStream(
       window.clearTimeout(idleTimer);
     }
     idleTimer = window.setTimeout(() => {
-      const error = new Error(`stream idle timeout after ${idleTimeoutMs}ms`);
+      const error = new BackendError("timeout", `stream idle timeout after ${idleTimeoutMs}ms`);
       rejectIdle(error);
       cancelReader(error);
       controller.abort(error);
@@ -141,7 +151,7 @@ async function consumeNdjsonStream(
     if (!response.ok) {
       armIdleTimer();
       const text = await Promise.race([response.text(), idleFailure, abortFailure]);
-      throw new Error(`HTTP ${response.status}: ${text || "local data service request failed"}`);
+      throw new BackendError("http_error", `HTTP ${response.status}: ${text || "local data service request failed"}`);
     }
     if (!response.body) {
       throw new Error("NDJSON stream is not available in this browser.");
@@ -197,13 +207,15 @@ async function serviceFetch<T>(
     });
     const json = await response.json();
     if (!response.ok) {
-      const code = json.code ? `${json.code} - ` : "";
-      throw new Error(`HTTP ${response.status}: ${code}${json.message ?? "local data service request failed"}`);
+      throw new BackendError(
+        typeof json.code === "string" ? json.code : "request_failed",
+        typeof json.message === "string" ? json.message : "local data service request failed"
+      );
     }
     return json as T;
   } catch (error) {
     if (controller.signal.aborted || (error instanceof DOMException && error.name === "AbortError")) {
-      throw new Error("本地数据服务请求超时，请稍后重试或重新连接本地服务。");
+      throw new BackendError("timeout", "本地数据服务请求超时，请稍后重试或重新连接本地服务。");
     }
     throw error;
   } finally {
@@ -257,7 +269,7 @@ type RealtimeSnapshotStreamEvent =
       updated_at?: string;
     }
   | { type: "result"; snapshot: RealtimeMarketSnapshot }
-  | { type: "error"; message?: string };
+  | { type: "error"; message?: string; code?: string };
 
 type RealtimeSnapshotStreamHandlers = {
   onSnapshot?: (snapshot: RealtimeMarketSnapshot) => void;
@@ -311,6 +323,7 @@ export async function loadRealtimeMarketSnapshotStream(
   let current: RealtimeMarketSnapshot | null = null;
   let finalResult: RealtimeMarketSnapshot | null = null;
   let streamError: string | null = null;
+  let streamErrorCode = "request_failed";
 
   const handleLine = (line: string) => {
     if (!line.trim()) {
@@ -319,6 +332,9 @@ export async function loadRealtimeMarketSnapshotStream(
     const event = JSON.parse(line) as RealtimeSnapshotStreamEvent;
     if (event.type === "error") {
       streamError = event.message ?? "Realtime market stream failed.";
+      if (event.code) {
+        streamErrorCode = event.code;
+      }
       return;
     }
     if (event.type === "result") {
@@ -340,7 +356,10 @@ export async function loadRealtimeMarketSnapshotStream(
   );
 
   if (!finalResult) {
-    throw new Error(streamError ?? "Realtime market stream ended before a final result was produced.");
+    throw new BackendError(
+      streamErrorCode,
+      streamError ?? "Realtime market stream ended before a final result was produced."
+    );
   }
   return finalResult;
 }
@@ -541,7 +560,7 @@ export async function runBacktestStreamWithDataService(
       | { type: "trade_closed"; trade: BacktestResult["trades"][number] }
       | { type: "trade_blocked"; trade: BacktestResult["trades"][number] }
       | { type: "result"; result: BacktestResult }
-      | { type: "error"; message?: string };
+      | { type: "error"; message?: string; code?: string };
     if (event.type === "phase") {
       handlers.onPhase?.(event.phase);
     } else if (event.type === "progress") {
@@ -552,7 +571,7 @@ export async function runBacktestStreamWithDataService(
       finalResult = event.result;
       handlers.onResult?.(event.result);
     } else if (event.type === "error") {
-      throw new Error(event.message ?? "Backtest stream failed.");
+      throw new BackendError(event.code ?? "request_failed", event.message ?? "Backtest stream failed.");
     }
   };
 

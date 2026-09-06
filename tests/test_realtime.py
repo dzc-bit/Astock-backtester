@@ -7,11 +7,10 @@ from datetime import UTC, datetime, timedelta, timezone
 from threading import Event, Lock, Thread
 from time import monotonic, sleep
 
+import astock_backtester.data.realtime as realtime_module
 import pandas as pd
 import pytest
 import requests
-
-import astock_backtester.data.realtime as realtime_module
 from astock_backtester.data.http_transport import resilient_get, should_allow_alternate_transport
 from astock_backtester.data.realtime import (
     HeavyMarketCrawlerProvider,
@@ -20,7 +19,6 @@ from astock_backtester.data.realtime import (
 )
 from astock_backtester.data.realtime_parsers import (
     BEIJING_TZ,
-    a_share_market_symbol,
     aggregate_ths_hot_topic_rows,
     aggregate_yesterday_limit_up_sectors,
     append_yesterday_sector_note,
@@ -41,6 +39,7 @@ from astock_backtester.data.realtime_parsers import (
     sector_rows_from_cls_hot_plate,
     unique_sources,
 )
+from astock_backtester.data.symbols import a_share_market_symbol
 from astock_backtester.data.warehouse import Warehouse
 from astock_backtester.models import (
     MarketBreadth,
@@ -427,7 +426,7 @@ def test_older_realtime_request_cannot_overwrite_newer_success_snapshot(tmp_path
     provider._remember_successful_snapshot(newer)
     provider._remember_successful_snapshot(older)
 
-    assert provider._retained_successful_snapshot().source == "newer"
+    assert provider.retained_successful_snapshot().source == "newer"
 
 
 def test_late_breadth_worker_cannot_publish_diagnostics_after_timeout(tmp_path):
@@ -585,21 +584,21 @@ def test_same_timestamp_reverse_completion_does_not_overwrite(tmp_path):
         status="live", source="gen-1", updated_at=same_ts, message="first"
     )
     provider._remember_successful_snapshot(first, generation=1)
-    assert provider._retained_successful_snapshot().source == "gen-1"
+    assert provider.retained_successful_snapshot().source == "gen-1"
 
     # Request 2 (generation=2) with SAME timestamp completes later
     second = RealtimeMarketSnapshot(
         status="live", source="gen-2", updated_at=same_ts, message="second"
     )
     provider._remember_successful_snapshot(second, generation=2)
-    assert provider._retained_successful_snapshot().source == "gen-2"
+    assert provider.retained_successful_snapshot().source == "gen-2"
 
     # Old request (generation=1) arrives late — must NOT overwrite gen-2
     late_old = RealtimeMarketSnapshot(
         status="live", source="gen-1-late", updated_at=same_ts, message="late"
     )
     provider._remember_successful_snapshot(late_old, generation=1)
-    assert provider._retained_successful_snapshot().source == "gen-2", (
+    assert provider.retained_successful_snapshot().source == "gen-2", (
         "P1-4 regression: old request (gen=1) overwrote newer (gen=2)"
     )
 
@@ -622,7 +621,7 @@ def test_remember_without_generation_uses_strict_timestamp(tmp_path):
     provider._remember_successful_snapshot(second)
 
     # With strict >, the first snapshot is kept (second has same ts, not >)
-    assert provider._retained_successful_snapshot().source == "first", (
+    assert provider.retained_successful_snapshot().source == "first", (
         "P1-4 regression: same-timestamp request overwrote existing snapshot"
     )
 
@@ -800,7 +799,7 @@ def test_mixed_generation_then_timestamp_arbitration(tmp_path):
             status="live", source="no-gen-stale", updated_at=t0, message="stale"
         ),
     )
-    assert provider._retained_successful_snapshot().source == "gen-5"
+    assert provider.retained_successful_snapshot().source == "gen-5"
 
     # Legacy with NEWER timestamp must also NOT overwrite generation-tracked
     provider._remember_successful_snapshot(
@@ -809,7 +808,7 @@ def test_mixed_generation_then_timestamp_arbitration(tmp_path):
         ),
     )
     # Round-4: legacy calls can never clobber generation-tracked snapshots
-    assert provider._retained_successful_snapshot().source == "gen-5", (
+    assert provider.retained_successful_snapshot().source == "gen-5", (
         "Round-4: legacy call with newer timestamp must not overwrite generation-tracked snapshot"
     )
 
@@ -837,7 +836,7 @@ def test_gen5_legacy_newer_timestamp_must_not_overwrite_gen6_generation_tracked(
         ),
         generation=6,
     )
-    assert provider._retained_successful_snapshot().source == "gen-6"
+    assert provider.retained_successful_snapshot().source == "gen-6"
 
     # gen=5 legacy (no generation) with NEWER timestamp arrives late
     provider._remember_successful_snapshot(
@@ -846,7 +845,7 @@ def test_gen5_legacy_newer_timestamp_must_not_overwrite_gen6_generation_tracked(
         ),
     )
     # BUG: the legacy call with newer timestamp must NOT overwrite gen-6
-    assert provider._retained_successful_snapshot().source == "gen-6", (
+    assert provider.retained_successful_snapshot().source == "gen-6", (
         "Round-4 regression: gen=5 legacy (newer ts) overwrote gen=6 generation-tracked"
     )
 
@@ -1835,7 +1834,7 @@ def test_realtime_provider_uses_beijing_dates_at_non_cn_host_midnight_boundary(m
     class FixedDatetime:
         @classmethod
         def now(cls, tz=None):
-            assert tz == timezone.utc
+            assert tz == UTC
             return NonCnHostClock()
 
     monkeypatch.setattr(realtime_module, "datetime", FixedDatetime)
@@ -2155,7 +2154,7 @@ def test_realtime_provider_replaces_local_yesterday_note_when_eastmoney_cache_wi
     provider._snapshot_from_local_with_budget = lambda *_args, **_kwargs: RealtimeMarketSnapshot(
         status="stale",
         source="local-latest",
-        updated_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(UTC),
         market_phase="trading",
         yesterday_strong_sectors=[
             SectorMover(name="Local sector", change_pct=0.01, source="local-yesterday-group")
@@ -2183,7 +2182,7 @@ def test_realtime_provider_keeps_valid_empty_eastmoney_cache_over_local_yesterda
     provider._snapshot_from_local_with_budget = lambda *_args, **_kwargs: RealtimeMarketSnapshot(
         status="stale",
         source="local-latest",
-        updated_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(UTC),
         market_phase="trading",
         yesterday_strong_sectors=[
             SectorMover(name="Local sector", change_pct=0.01, source="local-yesterday-group")
@@ -2333,7 +2332,7 @@ def test_realtime_provider_merges_retained_breadth_without_replacing_current_fie
         RealtimeMarketSnapshot(
             status="live",
             source="retained-snapshot",
-            updated_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(UTC),
             market_phase="trading",
             indexes=[MarketIndexQuote(symbol="sh000001", name="Retained index", last=1, source="retained")],
             breadth=MarketBreadth(up=3000, down=1000, flat=100, total=4100, source="retained-breadth"),
@@ -2351,7 +2350,7 @@ def test_realtime_provider_merges_retained_breadth_without_replacing_current_fie
     provider._snapshot_from_local_with_budget = lambda *_args, **_kwargs: RealtimeMarketSnapshot(
         status="stale",
         source="local-snapshot",
-        updated_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(UTC),
         market_phase="trading",
         breadth=MarketBreadth(up=1, down=1, flat=0, total=2, source="local-breadth"),
         message="local",
@@ -2378,7 +2377,7 @@ def test_realtime_provider_merges_retained_indexes_without_replacing_current_fie
         RealtimeMarketSnapshot(
             status="live",
             source="retained-snapshot",
-            updated_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(UTC),
             market_phase="trading",
             indexes=[MarketIndexQuote(symbol="sh000001", name="Retained index", last=1, source="retained")],
             breadth=MarketBreadth(up=3000, down=1000, flat=100, total=4100, source="retained-breadth"),
@@ -2400,7 +2399,7 @@ def test_realtime_provider_merges_retained_indexes_without_replacing_current_fie
     provider._snapshot_from_local_with_budget = lambda *_args, **_kwargs: RealtimeMarketSnapshot(
         status="stale",
         source="local-snapshot",
-        updated_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(UTC),
         market_phase="trading",
         indexes=[MarketIndexQuote(symbol="sh000001", name="Local index", last=3, source="local")],
         breadth=MarketBreadth(up=1, down=1, flat=0, total=2, source="local-breadth"),

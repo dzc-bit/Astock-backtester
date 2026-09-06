@@ -8,7 +8,6 @@ from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
-
 from astock_backtester.data.astock_adapter import AStockDataAdapter
 from astock_backtester.data.providers import ADataProvider
 from astock_backtester.data.warehouse import Warehouse
@@ -208,7 +207,7 @@ def main() -> None:
         if not batch:
             return
         warehouse.write_daily_bars(pd.concat([item[1] for item in batch], ignore_index=True))
-        for symbol, frame, source, seconds, rows, index in batch:
+        for symbol, _frame, source, seconds, rows, index in batch:
             imported_rows += rows
             append_jsonl(
                 progress_path,

@@ -3,7 +3,6 @@ from __future__ import annotations
 import math
 
 import pandas as pd
-
 from astock_backtester.data.importer import normalize_daily_bars
 from astock_backtester.data.providers import (
     ADataProvider,

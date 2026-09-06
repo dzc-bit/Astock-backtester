@@ -1,9 +1,14 @@
 import pandas as pd
 import pytest
-
 from astock_backtester.engine import run_backtest
 from astock_backtester.indicators import add_market_heat, add_moving_average, add_returns
-from astock_backtester.models import BacktestSettings, ConditionGroup, ConditionNode, ConditionOperator, StrategyConfig
+from astock_backtester.models import (
+    BacktestSettings,
+    ConditionGroup,
+    ConditionNode,
+    ConditionOperator,
+    StrategyConfig,
+)
 from astock_backtester.sample_data import sample_daily_bars
 
 
@@ -462,7 +467,9 @@ def test_backtest_filters_by_today_and_positive_count_capital_flow_conditions():
                     "main_net_inflow": flow,
                     "market_rising_ratio": 1.0,
                     "main_net_inflow_positive_count_3d": (
-                        float("nan") if trade_date < pd.Timestamp("2024-01-04") else sum(item > 0 for item in flows[: dates.get_loc(trade_date) + 1][-3:])
+                        float("nan")
+                        if trade_date < pd.Timestamp("2024-01-04")
+                        else sum(item > 0 for item in flows[: dates.get_loc(trade_date) + 1][-3:])
                     ),
                 }
             )
@@ -1575,7 +1582,16 @@ def test_limit_up_block_uses_board_specific_thresholds(symbol, is_st, open_price
     frame = pd.DataFrame(
         [
             backtest_row("2024-01-02", symbol=symbol, close=10.0, is_st=is_st),
-            backtest_row("2024-01-03", symbol=symbol, open_price=open_price, high=open_price, low=open_price, close=open_price, pre_close=pre_close, is_st=is_st),
+            backtest_row(
+                "2024-01-03",
+                symbol=symbol,
+                open_price=open_price,
+                high=open_price,
+                low=open_price,
+                close=open_price,
+                pre_close=pre_close,
+                is_st=is_st,
+            ),
             backtest_row("2024-01-04", symbol=symbol, open_price=open_price, close=open_price, pre_close=open_price, is_st=is_st),
         ]
     )

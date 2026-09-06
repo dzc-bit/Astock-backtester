@@ -1,6 +1,8 @@
 import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 import { Activity, Database, Flame, Gauge, ShieldAlert } from "lucide-react";
+import { useMarketPolling } from "./hooks/useMarketPolling";
 import {
+  BackendError,
   loadClsFinance,
   loadMarketBriefing,
   loadMarketNews,
@@ -31,12 +33,7 @@ import { StrategyWorkbench } from "./components/StrategyWorkbench";
 import { TradesTable } from "./components/TradesTable";
 import { TonghuashunBriefingPanel } from "./components/TonghuashunBriefingPanel";
 import { UpdatePanel } from "./components/UpdatePanel";
-import {
-  detectMarketSessionPhase,
-  initialMarketRefreshMeta,
-  refreshIntervalForMarketResult,
-  refreshIntervalForPhase
-} from "./marketRefresh";
+import { initialMarketRefreshMeta } from "./marketRefresh";
 import { defaultSettings, defaultStrategy } from "./strategyDefaults";
 import type {
   BacktestResult,
@@ -212,7 +209,11 @@ function marketDegreeTextClass(value: number | null | undefined): "up-text" | "d
   return "flat-text";
 }
 
-function translateError(message: string): string {
+function translateError(error: unknown): string {
+  if (error instanceof BackendError && error.code === "no_local_data") {
+    return "未找到已缓存的日线行情，请先确认 a-stock-data 数据包已导入到本地缓存。";
+  }
+  const message = error instanceof Error ? error.message : String(error);
   if (message.includes("No cached daily bars found")) {
     return "未找到已缓存的日线行情，请先确认 a-stock-data 数据包已导入到本地缓存。";
   }
@@ -488,158 +489,20 @@ export function App() {
       queueStrategySavePrompt(strategy);
       setRunPhases(["校验参数", "读取本地数据", "计算指标", "撮合交易", "生成结果"]);
     } catch (caught) {
-      setError(caught instanceof Error ? translateError(caught.message) : "回测运行失败。");
+      setError(translateError(caught));
       setRunProgressMessage(null);
     } finally {
       setIsRunningBacktest(false);
     }
   };
 
-  useEffect(() => {
-    if (!dataService) {
-      return;
-    }
-    let cancelled = false;
-    let timer: number | undefined;
-    let activeRequest: AbortController | undefined;
-    let hasCompleteSnapshot = marketSnapshot !== null && marketSnapshot.status !== "unavailable";
-    const refreshMarket = async () => {
-      const requestController = new AbortController();
-      activeRequest = requestController;
-      const phase = detectMarketSessionPhase();
-      let nextRefreshMs = refreshIntervalForPhase(phase);
-      const isInitialLoad = !hasCompleteSnapshot;
-      if (isInitialLoad) {
-        setIsLoadingMarket(true);
-        setMarketRefreshMeta((current) => ({
-          ...current,
-          phase,
-          status: "refreshing",
-          message: "刷新中",
-          next_refresh_ms: refreshIntervalForPhase(phase)
-        }));
-      }
-      try {
-        const applySnapshot = (snapshot: RealtimeMarketSnapshot, isPartial = false) => {
-          if (cancelled || (isPartial && hasCompleteSnapshot)) {
-            return;
-          }
-          if (!isPartial && snapshot.status !== "unavailable") {
-            hasCompleteSnapshot = true;
-          }
-          setMarketSnapshot((current) => (snapshot.status === "unavailable" && current ? current : snapshot));
-          const nextPhase = snapshot.market_phase ?? phase;
-          const nextInterval = refreshIntervalForMarketResult(
-            nextPhase,
-            snapshot.diagnostics,
-            snapshot.status === "unavailable"
-          );
-          nextRefreshMs = nextInterval;
-          setMarketRefreshMeta((current) => {
-            const usingLastSuccess = snapshot.status === "unavailable" && Boolean(current.last_success_at);
-            return {
-              phase: nextPhase,
-              status: isPartial ? "refreshing" : usingLastSuccess ? "using_last_success" : snapshot.status === "unavailable" ? "unavailable" : "idle",
-              message:
-                isPartial
-                  ? snapshot.message
-                  : usingLastSuccess
-                  ? "实时接口暂不可用，使用最近数据"
-                  : snapshot.status === "unavailable"
-                    ? "实时接口暂不可用"
-                    : nextPhase === "trading"
-                      ? "实时行情已更新"
-                      : "非交易时段，使用最近数据",
-              last_success_at: isPartial
-                ? current.last_success_at ?? null
-                : snapshot.status === "unavailable"
-                  ? current.last_success_at ?? null
-                  : snapshot.updated_at,
-              last_error: snapshot.status === "unavailable" ? snapshot.message : undefined,
-              next_refresh_ms: nextInterval
-            };
-          });
-        };
-        const snapshot = await loadRealtimeMarketSnapshotStream(dataService.base_url, {
-          onSnapshot: (partial) => applySnapshot(partial, true)
-        }, { signal: requestController.signal });
-        applySnapshot(snapshot);
-      } catch (caught) {
-        if (cancelled || requestController.signal.aborted) {
-          return;
-        }
-        try {
-          const snapshot = await loadRealtimeMarketSnapshot(dataService.base_url);
-          if (!cancelled) {
-            if (snapshot.status !== "unavailable") {
-              hasCompleteSnapshot = true;
-            }
-            setMarketSnapshot((current) => (snapshot.status === "unavailable" && current ? current : snapshot));
-            const nextPhase = snapshot.market_phase ?? phase;
-            const nextInterval = refreshIntervalForMarketResult(
-              nextPhase,
-              snapshot.diagnostics,
-              snapshot.status === "unavailable"
-            );
-            nextRefreshMs = nextInterval;
-            setMarketRefreshMeta((current) => {
-              const usingLastSuccess = snapshot.status === "unavailable" && Boolean(current.last_success_at);
-              return {
-                phase: nextPhase,
-                status: usingLastSuccess ? "using_last_success" : snapshot.status === "unavailable" ? "unavailable" : "idle",
-                message:
-                  usingLastSuccess
-                    ? "实时接口暂不可用，使用最近数据"
-                    : snapshot.status === "unavailable"
-                      ? "实时接口暂不可用"
-                      : nextPhase === "trading"
-                        ? "实时行情已更新"
-                        : "非交易时段，使用最近数据",
-                last_success_at: snapshot.status === "unavailable" ? current.last_success_at ?? null : snapshot.updated_at,
-                last_error: snapshot.status === "unavailable" ? snapshot.message : undefined,
-                next_refresh_ms: nextInterval
-              };
-            });
-          }
-        } catch (fallbackCaught) {
-          if (!cancelled) {
-            const reason = fallbackCaught instanceof Error
-              ? fallbackCaught.message
-              : caught instanceof Error
-                ? caught.message
-                : "请求失败";
-            setMarketRefreshMeta((current) => ({
-              phase,
-              status: current.last_success_at ? "using_last_success" : "unavailable",
-              message: current.last_success_at ? "实时接口暂不可用，使用最近数据" : "实时接口暂不可用",
-              last_success_at: current.last_success_at ?? null,
-              last_error: reason,
-              next_refresh_ms: refreshIntervalForPhase(phase, true)
-            }));
-            nextRefreshMs = refreshIntervalForPhase(phase, true);
-          }
-        }
-      } finally {
-        if (activeRequest === requestController) {
-          activeRequest = undefined;
-        }
-        if (!cancelled) {
-          if (isInitialLoad) {
-            setIsLoadingMarket(false);
-          }
-          timer = window.setTimeout(refreshMarket, nextRefreshMs);
-        }
-      }
-    };
-    void refreshMarket();
-    return () => {
-      cancelled = true;
-      activeRequest?.abort();
-      if (timer !== undefined) {
-        window.clearTimeout(timer);
-      }
-    };
-  }, [dataService]);
+  useMarketPolling({
+    dataService,
+    marketSnapshot,
+    setIsLoadingMarket,
+    setMarketSnapshot,
+    setMarketRefreshMeta
+  });
 
   const loadNews = useCallback(async (isCancelled: () => boolean): Promise<boolean> => {
     if (!dataService) {

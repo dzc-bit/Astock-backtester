@@ -1,0 +1,85 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  backend:
+    name: Backend (pytest + ruff)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install backend with dev dependencies
+        run: python -m pip install -e ".[dev]"
+      - name: Lint (ruff)
+        run: python -m ruff check backend tests scripts
+      - name: Test (pytest with coverage)
+        run: python -m pytest tests -q --tb=short --cov=astock_backtester --cov-report=term-missing:skip-covered --cov-report=xml
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-coverage
+          path: coverage.xml
+          if-no-files-found: error
+
+  frontend:
+    name: Frontend (eslint + tsc + vitest)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: Install JS dependencies
+        run: npm ci
+      - name: Lint (eslint)
+        run: npm run lint
+      - name: Typecheck (tsc)
+        run: npm run typecheck
+      - name: Test (vitest with coverage)
+        run: npm run test:coverage
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-coverage
+          path: frontend/coverage/lcov.info
+          if-no-files-found: error
+
+  desktop:
+    name: Desktop (cargo test)
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: Install JS dependencies
+        run: npm ci
+      - name: Build frontend assets
+        run: npm run build
+      - name: Prepare sidecar resource placeholder
+        # tauri-build validates bundle.resources at compile time; release builds
+        # replace this placeholder via scripts/build-data-service.ps1 and CI
+        # never bundles, so a stub is enough here.
+        run: |
+          New-Item -ItemType Directory -Force src-tauri/bin | Out-Null
+          Set-Content -Path src-tauri/bin/astock-data-service.exe -Value "CI placeholder"
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: Test (cargo test)
+        run: cargo test --manifest-path src-tauri/Cargo.toml

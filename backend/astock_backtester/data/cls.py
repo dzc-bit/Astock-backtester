@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import hashlib
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 import requests
 
+from astock_backtester.data.http_transport import MINIMAL_USER_AGENT
 
 CLS_APP_PARAMS = {
     "os": "web",
@@ -14,7 +16,7 @@ CLS_APP_PARAMS = {
 CLS_QUOTE_BASE_URL = "https://x-quote.cls.cn"
 CLS_SITE_BASE_URL = "https://www.cls.cn"
 CLS_HEADERS = {
-    "User-Agent": "Mozilla/5.0",
+    "User-Agent": MINIMAL_USER_AGENT,
     "Referer": "https://www.cls.cn/",
 }
 

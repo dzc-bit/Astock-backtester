@@ -1,12 +1,14 @@
 use serde_json::Value;
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
+use std::thread;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, State};
 
 use crate::python_runtime::{backend_dir, project_root, python_command};
@@ -447,6 +449,10 @@ pub fn ensure_data_service(
     manager.ensure_running(&app, &cache_dir)
 }
 
+/// Upper bound for one fallback backend CLI invocation.  Without it a hung
+/// Python process would leave the frontend waiting forever.
+const BACKEND_COMMAND_TIMEOUT_SECS: u64 = 300;
+
 #[tauri::command]
 pub fn backend_command(payload: Value) -> Result<Value, String> {
     let root = project_root()?;
@@ -468,16 +474,52 @@ pub fn backend_command(payload: Value) -> Result<Value, String> {
             .write_all(payload.to_string().as_bytes())
             .map_err(|err| format!("failed to write backend stdin: {err}"))?;
     }
+    // Signal EOF so the CLI cannot block waiting for more payload bytes.
+    drop(child.stdin.take());
 
-    let output = child
-        .wait_with_output()
-        .map_err(|err| format!("failed to read backend output: {err}"))?;
+    // Drain the pipes on worker threads; a full stdout pipe would otherwise
+    // deadlock the child while this thread waits for it to exit.
+    let mut stdout_pipe = child.stdout.take().ok_or("backend stdout unavailable")?;
+    let mut stderr_pipe = child.stderr.take().ok_or("backend stderr unavailable")?;
+    let stdout_reader = thread::spawn(move || {
+        let mut buffer = Vec::new();
+        let _ = stdout_pipe.read_to_end(&mut buffer);
+        buffer
+    });
+    let stderr_reader = thread::spawn(move || {
+        let mut buffer = Vec::new();
+        let _ = stderr_pipe.read_to_end(&mut buffer);
+        buffer
+    });
 
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).to_string());
+    let deadline = Instant::now() + Duration::from_secs(BACKEND_COMMAND_TIMEOUT_SECS);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    // The pipe-reader threads are left to finish on their own:
+                    // kill closes the pipes, so their read_to_end returns EOF.
+                    return Err(format!(
+                        "backend command timed out after {BACKEND_COMMAND_TIMEOUT_SECS}s"
+                    ));
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+            Err(err) => return Err(format!("failed to wait for backend: {err}")),
+        }
+    };
+
+    let stdout = stdout_reader.join().unwrap_or_default();
+    let stderr = stderr_reader.join().unwrap_or_default();
+
+    if !status.success() {
+        return Err(String::from_utf8_lossy(&stderr).to_string());
     }
 
-    serde_json::from_slice(&output.stdout).map_err(|err| format!("invalid backend json: {err}"))
+    serde_json::from_slice(&stdout).map_err(|err| format!("invalid backend json: {err}"))
 }
 
 #[tauri::command]
@@ -585,10 +627,10 @@ mod tests {
 
     #[test]
     fn saved_strategies_path_stays_under_runtime_strategy_config_dir() {
-        let root = std::path::Path::new(r"D:\New project 6");
+        let root = unique_temp_dir("saved-strategies-path");
 
         assert_eq!(
-            saved_strategies_path_from_root(root),
+            saved_strategies_path_from_root(&root),
             root.join("运行产物").join("策略配置").join("saved-strategies.json")
         );
     }

@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time as monotonic_time
+from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor, TimeoutError, as_completed
 from copy import deepcopy
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from threading import Event, Lock
-from typing import Any, Callable, Iterable
+from typing import Any
 
 import pandas as pd
 import requests
@@ -20,8 +22,7 @@ from astock_backtester.data.cls_finance import (
     THS_MARKET_SCORE_HEADERS,
     read_ths_browser_cookie,
 )
-from astock_backtester.data.http_transport import resilient_get, should_allow_alternate_transport
-from astock_backtester.data.providers import normalize_symbol
+from astock_backtester.data.http_transport import MINIMAL_USER_AGENT, resilient_get, should_allow_alternate_transport
 from astock_backtester.data.realtime_parsers import (
     BEIJING_TZ,
     CLS_HOT_PLATE_URL,
@@ -45,7 +46,6 @@ from astock_backtester.data.realtime_parsers import (
     THS_INDUSTRY_HTML_URL,
     THS_MARKET_SUMMARY_URL,
     THS_STOCK_CODE_RE,
-    a_share_market_symbol,
     is_valid_full_market_breadth,
 )
 from astock_backtester.data.realtime_parsers import (
@@ -99,6 +99,7 @@ from astock_backtester.data.realtime_parsers import (
 from astock_backtester.data.realtime_parsers import (
     unique_sources as _unique_sources,
 )
+from astock_backtester.data.symbols import a_share_market_symbol, normalize_symbol
 from astock_backtester.data.trading_calendar import a_share_trade_dates
 from astock_backtester.data.warehouse import Warehouse
 from astock_backtester.models import (
@@ -108,9 +109,11 @@ from astock_backtester.models import (
     SectorMover,
 )
 
+logger = logging.getLogger(__name__)
+
 
 def unavailable_market_snapshot(message: str, *, diagnostics: list[str] | None = None) -> RealtimeMarketSnapshot:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     return RealtimeMarketSnapshot(
         status="unavailable",
         source="service-fallback",
@@ -129,6 +132,7 @@ class BrowserMarketProvider:
         try:
             from playwright.sync_api import sync_playwright
         except Exception:
+            logger.warning("silent failure in fetch_breadth_from_dom", exc_info=True)
             return None
         try:
             with sync_playwright() as playwright:
@@ -138,6 +142,7 @@ class BrowserMarketProvider:
                 text = page.locator("body").inner_text(timeout=int(self.timeout * 1000))
                 browser.close()
         except Exception:
+            logger.warning("silent failure in fetch_breadth_from_dom", exc_info=True)
             return None
         match = THS_BREADTH_RE.search(text)
         if not match:
@@ -177,6 +182,7 @@ class HeavyMarketCrawlerProvider:
             response.raise_for_status()
             response.encoding = response.encoding or "gbk"
         except Exception:
+            logger.warning("silent failure in _fetch_public_html_breadth", exc_info=True)
             return None
         text = BeautifulSoup(response.text, "html.parser").get_text(" ", strip=True)
         match = THS_BREADTH_RE.search(text)
@@ -294,7 +300,7 @@ class RealtimeMarketProvider:
                 if generation is not None:
                     self._last_snapshot_generation = generation
 
-    def _retained_successful_snapshot(self) -> RealtimeMarketSnapshot | None:
+    def retained_successful_snapshot(self) -> RealtimeMarketSnapshot | None:
         with self._state_lock:
             if self._last_successful_snapshot is None:
                 return None
@@ -309,7 +315,7 @@ class RealtimeMarketProvider:
         raise RuntimeError("Realtime market snapshot stream ended without a result.")
 
     def market_snapshot_events(self) -> Iterable[dict[str, Any]]:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         # P1-4: each request gets a monotonic generation so that late
         # arrivals cannot overwrite results from a newer request.
         request_generation = self._next_request_generation()
@@ -394,7 +400,7 @@ class RealtimeMarketProvider:
                 skip_topic_fetch=skip_local_topic_fetch,
             )
         )
-        retained = self._retained_successful_snapshot()
+        retained = self.retained_successful_snapshot()
         retained_fields: list[str] = []
 
         indexes = current_indexes
@@ -799,6 +805,7 @@ class RealtimeMarketProvider:
             )
             response.raise_for_status()
         except Exception:
+            logger.warning("silent failure in _fetch_indexes", exc_info=True)
             return []
         response.encoding = response.encoding or "gbk"
         decoded = _decode_sina_response(response.text)
@@ -904,11 +911,11 @@ class RealtimeMarketProvider:
         return candidate.date().isoformat()
 
     def _latest_trade_date(self) -> str:
-        today = pd.Timestamp(datetime.now(timezone.utc).astimezone(BEIJING_TZ).date()).normalize()
+        today = pd.Timestamp(datetime.now(UTC).astimezone(BEIJING_TZ).date()).normalize()
         return self._trade_date_on_or_before(today)
 
     def _previous_trade_date(self) -> str:
-        today = pd.Timestamp(datetime.now(timezone.utc).astimezone(BEIJING_TZ).date()).normalize()
+        today = pd.Timestamp(datetime.now(UTC).astimezone(BEIJING_TZ).date()).normalize()
         return self._trade_date_on_or_before(today - pd.Timedelta(days=1))
 
     def _yesterday_pool_dates(self) -> tuple[str, str]:
@@ -1033,7 +1040,7 @@ class RealtimeMarketProvider:
                     timeout=max(0.05, remaining),
                     headers={
                         "Referer": "https://quote.eastmoney.com/ztb/detail",
-                        "User-Agent": "Mozilla/5.0",
+                        "User-Agent": MINIMAL_USER_AGENT,
                     },
                     params={
                         "ut": "7eea3edcaed734bea9cbfc24409ed989",
@@ -1675,6 +1682,7 @@ class RealtimeMarketProvider:
                 )
                 response.raise_for_status()
             except Exception:
+                logger.warning("silent failure in _fetch_sina_breadth", exc_info=True)
                 return None
             raw_content = getattr(response, "content", b"")
             if raw_content:
@@ -1724,6 +1732,7 @@ class RealtimeMarketProvider:
         try:
             latest = self.warehouse.read_latest_daily_bars(days=1)
         except Exception:
+            logger.warning("silent failure in _latest_local_symbols", exc_info=True)
             return []
         if latest.empty or "symbol" not in latest.columns:
             return []
@@ -2003,6 +2012,7 @@ class RealtimeMarketProvider:
             else:
                 frame = ak.stock_board_industry_name_em()
         except Exception:
+            logger.warning("silent failure in _fetch_akshare_sector_rows", exc_info=True)
             return []
         if frame is None or getattr(frame, "empty", True):
             return []
@@ -2046,11 +2056,12 @@ class RealtimeMarketProvider:
                 timeout=self._sector_request_timeout(),
                 headers={
                     "Referer": "https://finance.sina.com.cn/",
-                    "User-Agent": "Mozilla/5.0",
+                    "User-Agent": MINIMAL_USER_AGENT,
                 },
             )
             response.raise_for_status()
         except Exception:
+            logger.warning("silent failure in _fetch_sina_sectors", exc_info=True)
             return []
         response.encoding = response.encoding or "gbk"
         text = response.text
@@ -2134,6 +2145,7 @@ class RealtimeMarketProvider:
                 headers=THS_HEADERS,
             )
         except Exception:
+            logger.warning("silent failure in _fetch_ths_concept_section_rows", exc_info=True)
             if self._source_chain_cancelled(cancel_event, deadline, diagnostics, "strong-sector"):
                 return []
             return []
@@ -2198,6 +2210,7 @@ class RealtimeMarketProvider:
                     headers=THS_HEADERS,
                 )
             except Exception:
+                logger.warning("silent failure in _fetch_ths_industry_html_rows", exc_info=True)
                 break
             if self._source_chain_cancelled(cancel_event, deadline, diagnostics, "strong-sector"):
                 return []
@@ -2586,6 +2599,7 @@ class RealtimeMarketProvider:
             )
             response.raise_for_status()
         except Exception:
+            logger.warning("silent failure in _fetch_ths_board_members", exc_info=True)
             return []
         response.encoding = response.encoding or "gbk"
         soup = BeautifulSoup(response.text, "html.parser")

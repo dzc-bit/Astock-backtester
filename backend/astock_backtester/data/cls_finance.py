@@ -1,33 +1,45 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shutil
 import subprocess
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from pathlib import Path
 from threading import Lock
 from time import monotonic
-from typing import Any, Callable
+from typing import Any
 
 import requests
 from bs4 import BeautifulSoup
 
 from astock_backtester.data.cls import CLS_QUOTE_BASE_URL, CLS_SITE_BASE_URL, cls_request_json
 from astock_backtester.data.http_transport import resilient_get, should_allow_alternate_transport
-from astock_backtester.data.providers import normalize_symbol
 from astock_backtester.data.realtime_parsers import (
     THS_HEADERS,
     THS_MARKET_SUMMARY_URL,
+)
+from astock_backtester.data.realtime_parsers import (
     breadth_from_cls_distribution as _breadth_from_cls_distribution,
+)
+from astock_backtester.data.realtime_parsers import (
     breadth_from_cls_home_data as _breadth_from_cls_home_data,
+)
+from astock_backtester.data.realtime_parsers import (
     normalize_change_pct as _normalize_change_pct,
+)
+from astock_backtester.data.realtime_parsers import (
     parse_float as _parse_float,
+)
+from astock_backtester.data.realtime_parsers import (
     parse_int as _parse_int,
 )
+from astock_backtester.data.symbols import normalize_symbol
 from astock_backtester.models import (
     ClsFinanceAnchor,
     ClsFinanceEmotion,
@@ -36,7 +48,6 @@ from astock_backtester.models import (
     ClsFinanceResponse,
     ClsFinanceTlinePoint,
 )
-
 
 CLS_FINANCE_URL = "https://www.cls.cn/finance"
 CLS_TLINE_URL = f"{CLS_QUOTE_BASE_URL}/quote/index/tline"
@@ -76,6 +87,9 @@ _ths_cookie_cache_lock = Lock()
 _ths_cookie_cache_value: str | None = None
 _ths_cookie_cache_until: float = 0.0
 _THS_COOKIE_CACHE_TTL: float = 90.0
+
+
+logger = logging.getLogger(__name__)
 
 
 def _cls_payload_data(payload: Any, diagnostics: list[str], source: str) -> Any | None:
@@ -253,7 +267,7 @@ class ClsFinanceProvider:
         }
         return (
             ClsFinanceResponse(
-                updated_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(UTC),
                 source="cls-finance",
                 source_url=CLS_FINANCE_URL,
                 preclose_px=preclose_px,
@@ -676,6 +690,7 @@ def read_ths_browser_cookie(timeout_s: float = 1.2) -> str | None:
                 **startup_kwargs,
             )
     except Exception:
+        logger.warning("silent failure in read_ths_browser_cookie", exc_info=True)
         return None
     cookie = completed.stdout.strip()
     if completed.returncode != 0 or "v=" not in cookie:

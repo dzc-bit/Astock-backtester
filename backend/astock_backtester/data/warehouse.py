@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Sequence
 from datetime import date
 from pathlib import Path
-from typing import Sequence
 
 import pandas as pd
 import pyarrow.parquet as pq
@@ -337,7 +337,7 @@ class Warehouse:
                 source_start_symbols = {
                     symbol
                     for symbol, flow_start in flow_start_by_symbol.items()
-                    if _uses_symbol_capital_flow_source_start(
+                    if uses_symbol_capital_flow_source_start(
                         symbol,
                         flow_start,
                         first_daily_date_by_symbol.get(symbol),
@@ -382,6 +382,37 @@ class Warehouse:
             ),
         ]
 
+    def read_capital_flow_missing_symbols(self, start_date: str, end_date: str) -> set[str]:
+        """Return symbols whose rows in the latest daily-bars partition have no
+        ``main_net_inflow`` value within ``[start_date, end_date]``.
+
+        Encapsulates the parquet layout so HTTP/service layers do not need to
+        know how daily bars are stored.
+        """
+        paths = sorted(self.daily_bars_root.glob("year=*/daily_bars.parquet"))
+        if not paths:
+            return set()
+        latest_path = paths[-1]
+        columns_to_read = ["symbol", "trade_date", "main_net_inflow"]
+        try:
+            available = set(pq.ParquetFile(latest_path).schema_arrow.names)
+        except FileNotFoundError:
+            return set()
+        columns_to_read = [column for column in columns_to_read if column in available]
+        if "symbol" not in columns_to_read or "main_net_inflow" not in columns_to_read:
+            return set()
+        frame = self._safe_read_parquet(latest_path, columns=columns_to_read)
+        if frame.empty:
+            return set()
+        frame["trade_date"] = pd.to_datetime(frame["trade_date"], errors="coerce")
+        frame = frame.dropna(subset=["trade_date"])
+        frame = frame[frame["trade_date"] >= pd.Timestamp(start_date)]
+        frame = frame[frame["trade_date"] <= pd.Timestamp(end_date)]
+        if frame.empty:
+            return set()
+        has_any_flow = frame.groupby(frame["symbol"].astype(str))["main_net_inflow"].any()
+        return set(has_any_flow[~has_any_flow].index)
+
     def _safe_read_parquet(self, path: Path, **kwargs) -> pd.DataFrame:
         try:
             return pd.read_parquet(path, **kwargs)
@@ -397,7 +428,7 @@ def _require_ohlc_rows(frame: pd.DataFrame) -> pd.DataFrame:
     return frame.dropna(subset=OHLC_COLUMNS)
 
 
-def _uses_symbol_capital_flow_source_start(
+def uses_symbol_capital_flow_source_start(
     symbol: str,
     flow_start: pd.Timestamp,
     first_daily_date: pd.Timestamp | None = None,

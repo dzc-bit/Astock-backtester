@@ -12,7 +12,9 @@ from collections.abc import Iterable
 from datetime import datetime, time, timedelta, timezone
 
 from astock_backtester.data.cls import CLS_QUOTE_BASE_URL
-from astock_backtester.data.providers import normalize_symbol
+from astock_backtester.data.http_transport import MINIMAL_USER_AGENT
+from astock_backtester.data.parsing import parse_float
+from astock_backtester.data.symbols import normalize_symbol
 from astock_backtester.models import MarketBreadth, MarketIndexQuote, SectorMover
 
 INDEXES = [
@@ -28,15 +30,15 @@ BEIJING_TZ = timezone(timedelta(hours=8))
 
 THS_HEADERS = {
     "Referer": "https://q.10jqka.com.cn/",
-    "User-Agent": "Mozilla/5.0",
+    "User-Agent": MINIMAL_USER_AGENT,
 }
 THS_HOT_TOPIC_HEADERS = {
     "Referer": "http://zx.10jqka.com.cn/",
-    "User-Agent": "Mozilla/5.0",
+    "User-Agent": MINIMAL_USER_AGENT,
 }
 SINA_HEADERS = {
     "Referer": "https://finance.sina.com.cn/",
-    "User-Agent": "Mozilla/5.0",
+    "User-Agent": MINIMAL_USER_AGENT,
 }
 SINA_BREADTH_BATCH_SIZE = 400
 MIN_FULL_MARKET_BREADTH_TOTAL = 3000
@@ -82,16 +84,6 @@ def parse_int(value: object) -> int | None:
         return None
     try:
         return int(match.group(0))
-    except ValueError:
-        return None
-
-
-def parse_float(value: object) -> float | None:
-    text = str("" if value is None else value).strip().replace("%", "").replace(",", "")
-    if not text:
-        return None
-    try:
-        return float(text)
     except ValueError:
         return None
 
@@ -489,22 +481,3 @@ def is_valid_full_market_breadth(
             and breadth.total >= int(local_symbol_count * MIN_LOCAL_BREADTH_RATIO)
         )
     return breadth.total >= MIN_FULL_MARKET_BREADTH_TOTAL
-
-
-def a_share_market_symbol(symbol: str) -> str | None:
-    """Convert a normalized A-share code to the ``sh``/``sz``/``bj`` prefix form
-    used by Sina and Tencent quote APIs.
-
-    This unifies the previously duplicated ``_sina_stock_symbol`` and
-    ``_tencent_stock_symbol`` methods on ``RealtimeMarketProvider``.
-    """
-    code = normalize_symbol(symbol)
-    if not code:
-        return None
-    if code.startswith(("6", "9")):
-        return f"sh{code}"
-    if code.startswith(("0", "2", "3")):
-        return f"sz{code}"
-    if code.startswith(("4", "8")):
-        return f"bj{code}"
-    return None

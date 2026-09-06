@@ -6,9 +6,9 @@ from datetime import date
 from typing import Any
 
 from astock_backtester.backtest_runner import condition_definitions_json, run_configured_backtest
+from astock_backtester.data.astock_adapter import AStockDataAdapter
 from astock_backtester.data.cache import LocalCache
 from astock_backtester.data.importer import read_daily_bars
-from astock_backtester.data.astock_adapter import AStockDataAdapter
 from astock_backtester.models import (
     BacktestSettings,
     ConditionGroup,
@@ -94,7 +94,10 @@ def handle_command(payload: dict[str, Any]) -> dict[str, Any]:
                 "ok": True,
                 "status": {
                     "configured": True,
-                    "message": "a-stock-data HTTP sources are configured for Baidu daily K-line, Eastmoney capital flow, and Eastmoney stock metadata.",
+                    "message": (
+                        "a-stock-data HTTP sources are configured for Baidu daily K-line, Eastmoney capital flow, "
+                        "and Eastmoney stock metadata."
+                    ),
                 },
             }
         if command == "fetch_daily_bars":
