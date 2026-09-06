@@ -35,12 +35,27 @@ Windows 桌面版 A 股策略回测工具。项目使用 React + TypeScript 构�
 
 | 层级 | 目录 | 说明 |
 | --- | --- | --- |
-| 前端 | `frontend/src` | React + TypeScript，负责页面、状态、图表和结构化接口消费 |
-| 桌面容器 | `src-tauri/src` | Tauri + Rust，负责桌面命令、本地服务启动、策略保存和更新器 |
-| 本地后端 | `backend/astock_backtester` | Python，负责 HTTP 服务、数据 provider、仓库、回测和模型 |
-| 测试 | `tests`、`frontend/src/**/*.test.*` | 覆盖后端、前端、Rust 和数据服务边界 |
+| 前端 | `frontend/src` | React + TypeScript，页面、状态、图表和结构化接口消费；API 层统一在 `api.ts`（含浏览器预览 mock 双轨），轮询类逻辑收敛在 `hooks/` |
+| 桌面容器 | `src-tauri/src` | Tauri + Rust，负责桌面命令、本地服务启动（含 sidecar 五重身份校验）、策略保存和更新器 |
+| 本地后端 | `backend/astock_backtester` | Python，自写 HTTP 服务 + 数据 provider + 仓库 + 回测引擎；回测条件在 `conditions.py` 注册表统一维护（行级求值与向量化预过滤成对注册） |
+| 共享数据设施 | `backend/astock_backtester/data` | `symbols.py`/`parsing.py` 收敛符号与数值解析，`http_transport.py` 统一 UA、代理策略和重试传输 |
+| 测试 | `tests`、`frontend/src/*.test.*` | 三层共约 900 个用例：后端 602（行为级，含回测交易规则逐条验证）、前端 237、Rust 58；回环 HTTP 测试自带代理隔离 |
 
-前端只消费本地后端返回的结构化 JSON；上游网站、爬虫逻辑和字段清洗规则由后端 provider 封装。
+依赖方向保持单向（`service → data/* → models`，data 层不反向依赖根包），全仓零 import 环。错误响应携带稳定 `code`（`no_local_data` / `validation_error` / `payload_error` / `request_failed`），前端按错误码翻译文案。
+
+## 质量门禁
+
+CI（`.github/workflows/ci.yml`，windows-latest）在 push/PR 时运行三组检查：pytest + ruff、eslint + tsc + vitest、cargo test。本地等价命令：
+
+```powershell
+python -m ruff check backend tests scripts
+npm run lint
+npm run typecheck
+npm run test:coverage
+cargo test --manifest-path src-tauri/Cargo.toml
+```
+
+覆盖率（pytest-cov + vitest v8）当前只出报告不设阈值。
 
 ## 本地 HTTP 接口
 
@@ -79,10 +94,12 @@ python -m pip install -e .
 
 ```powershell
 npm run test:ui -- --run
+npm run lint
 npm run typecheck
 npm run build
 npm run build:data-service
 python -m pytest tests -q
+python -m ruff check backend tests scripts
 cargo test --manifest-path src-tauri/Cargo.toml
 ```
 

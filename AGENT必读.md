@@ -407,3 +407,29 @@ git branch --show-current
 - 无归属 untracked 文件
 
 只提交源码、测试、文档和必要版本文件。提交前额外确认 `项目说明书.md`、`应用创新类项目报告.md`、`演示文档操作提醒.md` 仍为 ignored/untracked，不能进入 GitHub。
+
+## 15. 质量门禁与架构不变量
+
+仓库有 CI（`.github/workflows/ci.yml`，全 windows-latest 环境，push/PR 触发）：pytest+ruff、eslint+tsc+vitest、cargo test 三个 job。提交前先在本地跑等价门禁，不要依赖 CI 兜底。
+
+### 门禁命令（在常规命令之外新增）
+
+```powershell
+python -m ruff check backend tests scripts
+.\.tools\node-v20.18.1-win-x64\npm.cmd run lint
+.\.tools\node-v20.18.1-win-x64\npm.cmd run test:coverage
+```
+
+- ruff：line-length 140，规则集 E/F/I/UP/B；`scripts/*.py` 豁免 E402（脚本有意先调 sys.path）。
+- eslint：flat config，`react-hooks/rules-of-hooks` 为 error、`exhaustive-deps` 为 warn；测试文件豁免 `no-explicit-any`。
+- 覆盖率只出报告不设阈值：`pytest-cov` + `@vitest/coverage-v8`。
+
+### 架构不变量（违反即回退）
+
+1. **符号与数值解析只有一个家**：符号规范化/新浪转换在 `data/symbols.py`，宽松数值解析在 `data/parsing.py`。任何爬虫不得再私建 `_normalize_code`、`_to_float`、`_sina_symbol` 之类的本地副本。
+2. **HTTP 策略集中在 `data/http_transport.py`**：UA 常量（MINIMAL/USER/BROWSER）、`create_scraping_session()`（trust_env=False，爬虫请求不读系统代理）、`resilient_get()`（瞬时错误重试 + curl_cffi 降级）。新增数据源先复用这一层。
+3. **禁止跨模块私有访问**：service/operations/sync 只能用公共接口——`RealtimeMarketProvider.retained_successful_snapshot()`、`DataServiceState.start_coverage_refresh()`、`Warehouse.read_capital_flow_missing_symbols()`、`SyncJobManager.start_full_market()/cancel_job()`。不允许再出现 `getattr(obj, "私有名", None)` 式的测试兼容 shim。
+4. **依赖方向单向**：`data/*` 只允许依赖 `models` 与 data 内共享模块（symbols/parsing/http_transport/importer/trading_calendar/cls），禁止反向 import 根包（service/engine/cli）。当前全仓 0 个 import 环。
+5. **回测条件必须双注册**：`conditions.py` 里每个 condition_id 必须同时有行级 `EVALUATORS` 和向量化 `MASK_BUILDERS`；`tests/test_core.py::test_condition_registry_stays_in_sync` 是守卫，新增条件只改 conditions.py 一个文件。
+6. **错误响应必须带稳定 code**：后端错误码 `no_local_data / validation_error / payload_error / request_failed`（`service.py::_stream_error_code`），数据缺失类失败抛 `LocalDataUnavailable`；前端经 `api.ts` 的 `BackendError` 消费，`App.tsx::translateError` 按码翻译、子串匹配只是兜底。新增错误路径必须带码。
+7. **回环测试不走代理**：`tests/test_data_service_http.py` 用 `ProxyHandler({})` 的 opener 发起全部回环请求；开发机开着 Clash 等系统代理时测试也必须绿。
