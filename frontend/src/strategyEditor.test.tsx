@@ -1,7 +1,7 @@
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { App } from "../App";
+import { App } from "./App";
 
 const apiMocks = vi.hoisted(() => ({
   ensureDataService: vi.fn(),
@@ -27,7 +27,7 @@ const apiMocks = vi.hoisted(() => ({
 
 // Spread the real api module so newly added exports (e.g. BackendError) stay
 // available to the component under test; mocked functions always win.
-vi.mock("../api", async (importOriginal) => ({
+vi.mock("./api", async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
   ...apiMocks
 }));
