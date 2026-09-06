@@ -68,6 +68,13 @@ jobs:
         run: npm ci
       - name: Build frontend assets
         run: npm run build
+      - name: Prepare sidecar resource placeholder
+        # tauri-build validates bundle.resources at compile time; release builds
+        # replace this placeholder via scripts/build-data-service.ps1 and CI
+        # never bundles, so a stub is enough here.
+        run: |
+          New-Item -ItemType Directory -Force src-tauri/bin | Out-Null
+          Set-Content -Path src-tauri/bin/astock-data-service.exe -Value "CI placeholder"
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
       - name: Cache cargo build
