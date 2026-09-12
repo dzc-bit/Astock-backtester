@@ -591,6 +591,9 @@ class DataServiceHandler(BaseHTTPRequestHandler):
         if self.path == "/ai/status":
             self._send_json(self.server.state.ai_service().status().model_dump(mode="json"))
             return
+        if self.path == "/ai/news":
+            self._send_json(self.server.state.ai_service().news_digest_view())
+            return
         if self.path == "/ai/config":
             self._send_json(self.server.state.ai_service().config_view())
             return

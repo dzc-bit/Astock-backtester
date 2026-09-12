@@ -68,6 +68,14 @@ export type AiChatHandlers = {
   onResult?: (event: AiResultEvent) => void;
 };
 
+export type AiApiStyle = "chat-completions" | "responses" | "anthropic";
+
+export const AI_API_STYLE_LABELS: Record<AiApiStyle, string> = {
+  "chat-completions": "Chat Completions（OpenAI 兼容 · 默认）",
+  responses: "Responses（OpenAI 新接口）",
+  anthropic: "Anthropic Messages"
+};
+
 export type AiStatus = {
   configured: boolean;
   base_url: string;
@@ -84,6 +92,7 @@ export type AiConfigView = {
   base_url: string;
   model: string;
   embedding_model: string;
+  api_style: AiApiStyle;
   api_key_masked: string;
   temperature: number;
   max_steps: number;
@@ -97,10 +106,27 @@ export type AiConfigUpdatePayload = {
   model: string;
   embedding_model: string;
   api_key: string;
+  api_style: AiApiStyle;
   temperature: number;
   max_steps: number;
   insights_enabled: boolean;
   insight_max_per_hour: number;
+};
+
+export type AiDigestItem = {
+  id: string;
+  title: string;
+  summary: string;
+  tags: string[];
+  symbols: string[];
+  source: string;
+  created_at: string;
+};
+
+export type AiNewsDigest = {
+  items: AiDigestItem[];
+  count: number;
+  updated_at: string | null;
 };
 
 export type AiInsight = {

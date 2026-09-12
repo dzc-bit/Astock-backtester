@@ -154,20 +154,23 @@ export function mockRealtimeMarketSnapshot(): RealtimeMarketSnapshot {
 }
 
 export function mockMarketNews(): MarketNewsResponse {
+  const base = new Date("2026-05-27T10:30:00+08:00").toISOString();
+  const at = (offsetMinutes: number) => new Date(new Date("2026-05-27T10:30:00+08:00").getTime() - offsetMinutes * 60_000).toISOString();
   return {
-    updated_at: new Date("2026-05-27T10:30:00+08:00").toISOString(),
-    source: "browser-preview",
+    updated_at: base,
+    source: "eastmoney-columns+eastmoney-rolling+eastmoney-fast-news+cls-telegraph+sina-rolling",
     diagnostics: [],
     items: [
-      {
-        title: "政策利好推动科技板块走强",
-        summary: "半导体、AI 应用方向盘中活跃。",
-        source: "东方财富",
-        published_at: new Date("2026-05-27T10:20:00+08:00").toISOString(),
-        url: "https://example.test/news",
-        tags: ["科技", "政策"],
-        sentiment: "positive"
-      }
+      { title: "政策利好推动科技板块走强", summary: "半导体、AI 应用方向盘中活跃。", source: "东方财富", published_at: at(10), url: "https://example.test/news/1", tags: ["科技", "政策"], sentiment: "positive" },
+      { title: "央行开展 4200 亿元逆回购操作", summary: "公开市场净投放 1800 亿元，资金面平稳偏松。", source: "财联社电报", published_at: at(25), url: "https://example.test/news/2", tags: ["宏观"], sentiment: "neutral" },
+      { title: "北向资金今日净买入超 80 亿元", summary: "白酒、电池板块获集中加仓。", source: "新浪财经", published_at: at(41), url: "https://example.test/news/3", tags: ["资金"], sentiment: "positive" },
+      { title: "工信部：加快推进制造业数字化转型", summary: "工业软件、智能制造装备方向受关注。", source: "东方财富", published_at: at(58), url: "https://example.test/news/4", tags: ["政策", "行业"], sentiment: "positive" },
+      { title: "国际油价小幅回落 布伦特原油跌破 78 美元", summary: "市场权衡供给与需求前景。", source: "环球市场播报", published_at: at(73), url: "https://example.test/news/5", tags: ["海外"], sentiment: "negative" },
+      { title: "多家存储芯片厂上调合约报价", summary: "涨价周期带动产业链业绩预期上修。", source: "东方财富7×24", published_at: at(89), url: "https://example.test/news/6", tags: ["行业"], sentiment: "positive" },
+      { title: "两市成交额连续第 5 个交易日突破万亿", summary: "量能维持高位，题材轮动加快。", source: "财联社电报", published_at: at(104), url: "https://example.test/news/7", tags: ["情绪"], sentiment: "neutral" },
+      { title: "光伏硅料价格企稳 组件排产环比回升", summary: "产业链库存去化接近尾声。", source: "新浪财经", published_at: at(120), url: "https://example.test/news/8", tags: ["行业"], sentiment: "positive" },
+      { title: "美股三大指数期货窄幅震荡", summary: "市场等待本周 CPI 数据落地。", source: "环球市场播报", published_at: at(136), url: "https://example.test/news/9", tags: ["海外"], sentiment: "neutral" },
+      { title: "某白酒龙头公告中期分红方案", summary: "分红比例高于市场预期，高股息方向获支撑。", source: "东方财富", published_at: at(150), url: "https://example.test/news/10", tags: ["个股"], sentiment: "positive" }
     ]
   };
 }
@@ -235,7 +238,9 @@ export function mockClsFinance(): ClsFinanceResponse {
       }
     ],
     emotion: {
-      market_degree: 56,
+      market_degree: 4.9,
+      market_degree_source: "ths-market-summary",
+      market_degree_label: "同花顺大盘评级",
       shsz_balance: "2.64万亿",
       shsz_balance_change: "-1524亿",
       up_limit: 130,

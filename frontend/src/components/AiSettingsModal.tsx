@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Eye, EyeOff, Settings, X } from "lucide-react";
-import type { AiConfigUpdatePayload, AiConfigView } from "../aiTypes";
+import { AI_API_STYLE_LABELS } from "../aiTypes";
+import type { AiApiStyle, AiConfigUpdatePayload, AiConfigView } from "../aiTypes";
 
 type Props = {
   open: boolean;
@@ -18,6 +19,7 @@ export function AiSettingsModal({ open, config, isSaving = false, errorMessage, 
   const [embeddingModel, setEmbeddingModel] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [keyVisible, setKeyVisible] = useState(false);
+  const [apiStyle, setApiStyle] = useState<AiApiStyle>("chat-completions");
   const [temperature, setTemperature] = useState(0.3);
   const [maxSteps, setMaxSteps] = useState(8);
   const [insightsEnabled, setInsightsEnabled] = useState(true);
@@ -32,6 +34,7 @@ export function AiSettingsModal({ open, config, isSaving = false, errorMessage, 
     setEmbeddingModel(config.embedding_model);
     setApiKey("");
     setKeyVisible(false);
+    setApiStyle(config.api_style);
     setTemperature(config.temperature);
     setMaxSteps(config.max_steps);
     setInsightsEnabled(config.insights_enabled);
@@ -63,6 +66,7 @@ export function AiSettingsModal({ open, config, isSaving = false, errorMessage, 
       model: model.trim(),
       embedding_model: embeddingModel.trim(),
       api_key: apiKey.trim(),
+      api_style: apiStyle,
       temperature: Number.isFinite(temperature) ? temperature : 0.3,
       max_steps: Number.isFinite(maxSteps) ? maxSteps : 8,
       insights_enabled: insightsEnabled,
@@ -95,6 +99,16 @@ export function AiSettingsModal({ open, config, isSaving = false, errorMessage, 
           <label className="ai-field">
             <span>模型名称</span>
             <input value={model} onChange={(event) => setModel(event.target.value)} placeholder="deepseek-chat" autoComplete="off" />
+          </label>
+          <label className="ai-field">
+            <span>API 协议格式</span>
+            <select value={apiStyle} onChange={(event) => setApiStyle(event.target.value as AiApiStyle)}>
+              {(Object.keys(AI_API_STYLE_LABELS) as AiApiStyle[]).map((style) => (
+                <option key={style} value={style}>
+                  {AI_API_STYLE_LABELS[style]}
+                </option>
+              ))}
+            </select>
           </label>
           <div className="ai-field">
             <span className="ai-field-label-row">

@@ -1,11 +1,13 @@
 import { invoke } from "@tauri-apps/api/core";
-import { ExternalLink, Newspaper, RefreshCw } from "lucide-react";
+import { Bot, ExternalLink, Newspaper, RefreshCw } from "lucide-react";
 import type { MouseEvent } from "react";
+import type { AiDigestItem } from "../aiTypes";
 import type { MarketNewsResponse } from "../types";
 import { isTauriRuntime } from "../tauriRuntime";
 
 type Props = {
   news: MarketNewsResponse | null;
+  aiDigest?: AiDigestItem[];
   isLoading?: boolean;
   onRefresh?: () => void;
 };
@@ -36,8 +38,43 @@ function handleNewsLinkClick(event: MouseEvent<HTMLAnchorElement>, url: string):
   void openExternalUrl(url);
 }
 
-export function NewsPanel({ news, isLoading = false, onRefresh }: Props) {
+function AiDigestSection({ items }: { items: AiDigestItem[] }) {
+  if (items.length === 0) {
+    return null;
+  }
+  return (
+    <div className="ai-digest" aria-label="AI 聚合要点">
+      <div className="ai-digest-head">
+        <Bot size={15} aria-hidden="true" />
+        <strong>AI 聚合要点</strong>
+        <small>Agent 启动时自动汇总多源数据 · 不构成投资建议</small>
+      </div>
+      <ul>
+        {items.slice(0, 6).map((item) => (
+          <li key={item.id}>
+            <strong>{item.title}</strong>
+            <span>{item.summary}</span>
+            <div className="ai-digest-meta">
+              <span className="ai-digest-source">ai-agent</span>
+              {item.tags.map((tag) => (
+                <small key={tag}>{tag}</small>
+              ))}
+              {item.symbols.map((symbol) => (
+                <small key={symbol} className="ai-digest-symbol">
+                  {symbol}
+                </small>
+              ))}
+            </div>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+export function NewsPanel({ news, aiDigest, isLoading = false, onRefresh }: Props) {
   const items = news?.items ?? [];
+  const digestItems = aiDigest ?? [];
   return (
     <section className="surface news-panel" aria-label="资讯与事件">
       <div className="section-title">
@@ -50,6 +87,8 @@ export function NewsPanel({ news, isLoading = false, onRefresh }: Props) {
           {isLoading ? "刷新中" : "刷新资讯"}
         </button>
       </div>
+
+      <AiDigestSection items={digestItems} />
 
       {items.length === 0 ? (
         <div className="empty-state">

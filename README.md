@@ -8,7 +8,9 @@ Windows 桌面版 A 股策略回测工具。项目使用 React + TypeScript 构�
 
 本轮新增 AI 投研助手模块（`backend/astock_backtester/ai/`，独立子包，对存量模块只读）：
 
-- **评股 Agent**：`POST /ai/chat/stream` NDJSON 流式对话。Agent 通过 15 个工具（实时行情、新闻、复盘、风险清单、本地日线+均线、条件校验、受控回测、腾讯估值、东财研报、龙虎榜、涨停池、DuckDB 只读 SQL、统计函数、受控数据补齐、知识检索）完成个股诊断与行情问答；正文流式输出，工具调用过程可视化，所有数字要求标注来源工具。其中 `update_stock_data` 是唯一写工具（走数据中心同款补齐链路）。
+- **评股 Agent**：`POST /ai/chat/stream` NDJSON 流式对话。Agent 通过 17 个工具（实时行情、新闻、复盘、风险清单、本地日线+均线、条件校验、受控回测、腾讯估值、东财研报、龙虎榜、涨停池、DuckDB 只读 SQL、统计函数、受控数据补齐、知识检索、多股对比、AI 聚合要点）完成个股诊断与行情问答；正文流式输出，工具调用过程可视化，所有数字要求标注来源工具。其中 `update_stock_data` 是唯一写工具（走数据中心同款补齐链路）。
+- **多协议接入**：设置里可选 API 协议格式——`chat-completions`（OpenAI 兼容，默认）、`responses`（OpenAI Responses API）、`anthropic`（Anthropic Messages API，含 tool_use/tool_result 流式映射）；密钥/协议等配置仅存本地。
+- **启动 AI 资讯聚合**：服务启动时（已配置模型）Agent 自动汇总新闻/涨停池/昨日涨停表现/实时行情/复盘等多源数据，生成 3-6 条结构化"AI 聚合要点"，展示在资讯面板顶部（标注 ai-agent，与原始资讯模块严格分离），也可通过 `GET /ai/news` 与 `latest_market_digest` 工具消费；之后按固定间隔自动刷新。
 - **NL→策略 DSL**：自然语言生成条件 DSL → 先校验（校验失败带模板示例自我修正）→ 受控运行本地回测 → 结果可一键"应用到策略工作台"。
 - **上下文工程与分层记忆**（参考 MemGPT/Letta、mem0 的分层思路，本地化裁剪）：短期上下文窗口硬性保留最近 10 条协议消息，溢出部分归档并压缩为会话滚动纪要；长期记忆由模型在每轮结束后提取持久事实（关注标的/策略偏好/参数习惯），去重合并进 `运行产物/AI记忆/memory.json`，并按更新时间注入后续 system prompt。工具全量结果留在后端 `ToolResultStore`，进上下文的只有每工具摘要；爬取内容以不可信分隔符包裹（提示词注入防御）。
 - **真实执行能力（NL→SQL + 计算函数 + 受控写入）**：Agent 可对本地日线数据仓发起 DuckDB 只读 SQL 查询（`query_warehouse_sql`，hive 分区 parquet 直查，强制 SELECT/WITH、自动 LIMIT 500），可调用统计函数（`compute_stock_stats`：区间收益/年化波动/最大回撤/资金合计），可通过 `update_stock_data` 用数据中心同款补齐链路把指定股票区间数据写回仓库——这是唯一的写路径，SQL 层禁止任何写语句。
@@ -79,7 +81,7 @@ cargo test --manifest-path src-tauri/Cargo.toml
 | 复盘/早盘 | `GET /market/fupan`、`GET /market/zaopan` |
 | 风险与策略 | `GET /risk/alerts`、`GET /strategy/recommended`、`POST /strategy/conditions/validate` |
 | 回测 | `POST /run/backtest/stream` |
-| AI 助手 | `GET /ai/status`、`GET /ai/config`、`POST /ai/config`、`GET /ai/config/reveal`（仅限本机桌面端，带 Host/Origin 校验）、`POST /ai/chat/stream`、`GET /ai/events/stream` |
+| AI 助手 | `GET /ai/status`、`GET /ai/news`、`GET /ai/config`、`POST /ai/config`、`GET /ai/config/reveal`（仅限本机桌面端，带 Host/Origin 校验）、`POST /ai/chat/stream`、`GET /ai/events/stream` |
 
 `/run/backtest/stream` 与 `/ai/chat/stream` 返回 NDJSON，需要逐行解析；`/ai/chat/stream` 的最后一个事件为 `{"type":"result", ...}`（错误时为 `error`）。`/ai/events/stream` 为长连接（insight / data_fresh / heartbeat）。
 

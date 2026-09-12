@@ -1,40 +1,142 @@
-/* AI 助手抽屉与设置弹窗。独立文件，避免与全局 styles.css 冲突。 */
-
-.ai-entry-button {
-  cursor: pointer;
-  position: relative;
-  border: 1px solid #ddd6fe;
-  background: #f5f3ff;
-  color: #6d28d9;
-  font: inherit;
-  font-size: 13px;
-  border-radius: 999px;
-  padding: 6px 14px;
-}
-
-.ai-entry-button:hover {
-  border-color: #7c3aed;
-}
-
-.ai-badge {
-  display: inline-flex;
+/* AI 助手悬浮球（FAB）。低于 .modal-backdrop（z-index 40），高于页面内容。 */
+.ai-fab {
+  position: fixed;
+  right: 22px;
+  bottom: 22px;
+  width: 54px;
+  height: 54px;
+  display: flex;
   align-items: center;
   justify-content: center;
-  min-width: 18px;
-  height: 18px;
-  margin-left: 4px;
-  padding: 0 5px;
+  border: none;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #7c3aed, #2563eb);
+  color: #ffffff;
+  cursor: pointer;
+  box-shadow: 0 10px 28px rgba(124, 58, 237, 0.42);
+  z-index: 35;
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+.ai-fab:hover {
+  transform: translateY(-2px) scale(1.04);
+  box-shadow: 0 14px 34px rgba(124, 58, 237, 0.5);
+}
+
+.ai-fab.open {
+  background: #ffffff;
+  color: #6d28d9;
+  border: 1px solid #ddd6fe;
+  box-shadow: 0 10px 28px rgba(26, 39, 60, 0.2);
+}
+
+.ai-fab-badge {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 6px;
   border-radius: 999px;
   background: #d92d20;
   color: #ffffff;
   font-size: 11px;
   font-weight: 700;
+  border: 2px solid #ffffff;
 }
 
 .section-title-actions {
   display: flex;
   align-items: center;
   gap: 10px;
+}
+
+/* AI 聚合要点（资讯面板顶部区块） */
+.ai-digest {
+  margin: 0 0 14px;
+  border: 1px solid #e4dcfb;
+  background: linear-gradient(120deg, rgba(124, 58, 237, 0.06), rgba(37, 99, 235, 0.04)), #fdfdff;
+  border-radius: 12px;
+  padding: 12px 14px;
+}
+
+.ai-digest-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #6d28d9;
+  margin-bottom: 8px;
+}
+
+.ai-digest-head small {
+  color: #8b98ab;
+  font-weight: 400;
+  margin-left: auto;
+}
+
+.ai-digest ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.ai-digest li {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 10px;
+  background: #ffffff;
+  border: 1px solid #ece7fd;
+  border-radius: 10px;
+}
+
+.ai-digest li strong {
+  font-size: 13px;
+  color: #17212f;
+}
+
+.ai-digest li span {
+  font-size: 12.5px;
+  color: #44506b;
+  line-height: 1.6;
+}
+
+.ai-digest-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.ai-digest-meta small {
+  border: 1px solid #e3e9f1;
+  border-radius: 999px;
+  padding: 1px 8px;
+  font-size: 11px;
+  color: #5c6a80;
+  background: #f8fafc;
+}
+
+.ai-digest-source {
+  font-size: 11px;
+  font-weight: 700;
+  color: #6d28d9;
+  border: 1px solid #ddd6fe;
+  border-radius: 999px;
+  padding: 1px 8px;
+  background: #f5f3ff;
+}
+
+.ai-digest-symbol {
+  color: #2563eb !important;
+  border-color: #d4e2ff !important;
+  background: #eef4ff !important;
 }
 
 .ai-drawer {
@@ -397,12 +499,14 @@
   flex: 1;
 }
 
-.ai-field input {
+.ai-field input,
+.ai-field select {
   border: 1px solid #cfd9e6;
   border-radius: 8px;
   padding: 9px 12px;
   font: inherit;
   font-size: 13px;
+  background: #ffffff;
 }
 
 .ai-field-label-row {

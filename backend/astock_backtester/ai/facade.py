@@ -17,6 +17,7 @@ from typing import Any
 from astock_backtester.ai.agent import AgentRunner
 from astock_backtester.ai.config import AiConfig, AiConfigStore, ai_base_dir_from_cache_dir
 from astock_backtester.ai.context import ContextBudget, ToolResultStore
+from astock_backtester.ai.digest import DigestEngine, DigestStore
 from astock_backtester.ai.errors import AiNotConfigured, ai_error_code
 from astock_backtester.ai.insights import HEARTBEAT_INTERVAL_SECONDS, EventBroker, InsightEngine
 from astock_backtester.ai.llm_client import OpenAiCompatibleClient
@@ -41,7 +42,7 @@ class AiService:
         self._budget = ContextBudget()
         self._registry = ToolRegistry()
         self._registry.register_all(build_local_tools(backend))
-        self._registry.register_all(build_astock_data_tools())
+        self._registry.register_all(build_astock_data_tools(backend))
         self._registry.register_all(build_query_tools(backend))
         self._knowledge = KnowledgeIndex(
             embedder=self._model.embed,
@@ -50,7 +51,16 @@ class AiService:
         self._registry.register(build_knowledge_tool(self._knowledge, self._budget))
         self._agent = AgentRunner(self._model, self._registry, self._result_store, self._budget)
         self._memory = MemoryStore(base_dir)
+        self._digest_store = DigestStore(base_dir)
         self._broker = EventBroker()
+        self._digest = DigestEngine(
+            broker=self._broker,
+            backend=backend,
+            model_provider=lambda: self._model if self._config_store.load().is_configured() else None,
+            config_provider=self._config_store.load,
+            store=self._digest_store,
+        )
+        self._registry.register(self._build_digest_tool())
         self._engine = InsightEngine(
             self._broker,
             backend,
@@ -58,6 +68,7 @@ class AiService:
             config_provider=self._config_store.load,
         )
         self._engine.start()
+        self._digest.start()
         self._log = log
         self._log("info", f"AI 子系统已初始化：{len(self._registry.names())} 个工具（未配置模型前仅提供状态与快讯通道）")
 
@@ -77,6 +88,41 @@ class AiService:
             memory_count=self._memory.count(),
         )
 
+    def news_digest_view(self) -> dict[str, Any]:
+        return self._digest.view()
+
+    def refresh_news_digest(self) -> dict[str, Any]:
+        return self._digest.run_once(force=True)
+
+    def _build_digest_tool(self) -> Any:
+        from astock_backtester.ai.tools.registry import AiTool
+
+        store = self._digest_store
+
+        def execute(_: dict[str, Any]) -> dict[str, Any]:
+            items = store.load()
+            if not items:
+                return {"ok": False, "error": "还没有 AI 聚合简报（启动且配置模型后自动生成）。"}
+            rows = [
+                {key: getattr(item, key) for key in ("title", "summary", "tags", "symbols", "created_at")}
+                for item in items[:8]
+            ]
+            return {"ok": True, "items": rows}
+
+        def summarize(payload: dict[str, Any]) -> str:
+            lines = ["AI 聚合要点："]
+            for item in payload.get("items", []):
+                lines.append(f"- {item.get('title')}｜{item.get('summary')}")
+            return "\n".join(lines)
+
+        return AiTool(
+            name="latest_market_digest",
+            description="读取启动时 AI 自动聚合的多源市场要点（新闻/涨停池/行情/复盘），回答'今日发生了什么/最新消息'前先调用。",
+            parameters={"type": "object", "properties": {}, "additionalProperties": False},
+            executor=execute,
+            summarizer=summarize,
+        )
+
     def reveal_api_key(self) -> str:
         return self._config_store.load().api_key
 
@@ -91,6 +137,7 @@ class AiService:
             api_key=str(payload.get("api_key", "") or ""),
             model=str(payload.get("model", current.model)),
             embedding_model=str(payload.get("embedding_model", current.embedding_model)),
+            api_style=str(payload.get("api_style", current.api_style)),
             temperature=float(payload.get("temperature", current.temperature)),
             max_steps=int(payload.get("max_steps", current.max_steps)),
             insights_enabled=bool(payload.get("insights_enabled", current.insights_enabled)),

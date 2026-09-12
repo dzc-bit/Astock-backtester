@@ -1,9 +1,10 @@
-import { lazy, Suspense, useEffect, useState } from "react";
-import { Activity, Database, Flame, Gauge, ShieldAlert, Sparkles } from "lucide-react";
+import { lazy, Suspense, useCallback, useEffect, useState } from "react";
+import { Activity, Database, Flame, Gauge, ShieldAlert, Sparkles, X } from "lucide-react";
 import { AiAssistantPanel } from "./components/AiAssistantPanel";
+import { loadAiNewsDigest, revealAiKey } from "./aiApi";
 import { useAiEventStream } from "./hooks/useAiEventStream";
 import { useMarketModules } from "./hooks/useMarketModules";
-import type { AiInsight, AiTask } from "./aiTypes";
+import type { AiDigestItem, AiInsight, AiTask } from "./aiTypes";
 import "./ai-panel.css";
 import { useMarketPolling } from "./hooks/useMarketPolling";
 import {
@@ -225,6 +226,7 @@ export function App() {
   const [aiTask, setAiTask] = useState<AiTask | null>(null);
   const [aiInsights, setAiInsights] = useState<AiInsight[]>([]);
   const [aiUnseenInsights, setAiUnseenInsights] = useState(0);
+  const [aiDigest, setAiDigest] = useState<AiDigestItem[]>([]);
 
   useEffect(() => {
     if (strategyLoadStatus === "failed" && strategyLoadError) {
@@ -401,6 +403,33 @@ export function App() {
     refreshRiskAlerts
   } = useMarketModules(dataService, coverage);
 
+  const loadAiDigest = useCallback(
+    async (isCancelled: () => boolean): Promise<boolean> => {
+      if (!dataService) {
+        return false;
+      }
+      try {
+        const digest = await loadAiNewsDigest(dataService.base_url);
+        if (!isCancelled()) {
+          setAiDigest(digest.items ?? []);
+        }
+        return (digest.items ?? []).length > 0;
+      } catch {
+        // AI 简报不可用（未配置模型等）时保持空列表，不影响原始资讯模块。
+        return false;
+      }
+    },
+    [dataService]
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    void loadAiDigest(() => cancelled);
+    return () => {
+      cancelled = true;
+    };
+  }, [loadAiDigest]);
+
   useAiEventStream({
     baseUrl: dataService?.base_url ?? null,
     enabled: Boolean(dataService),
@@ -414,6 +443,8 @@ export function App() {
         refreshNews();
       } else if (module === "risk") {
         refreshRiskAlerts();
+      } else if (module === "ai_news") {
+        void loadAiDigest(() => false);
       }
     }
   });
@@ -552,26 +583,13 @@ export function App() {
         </div>
         <div className="topbar-actions" aria-label="运行状态">
           <UpdatePanel />
-          <button
-            className="status-pill ai-entry-button"
-            type="button"
-            aria-label={`打开 AI 投研助手${aiUnseenInsights > 0 ? `，${aiUnseenInsights} 条未读快讯` : ""}`}
-            onClick={() => {
-              setAiOpen(true);
-              setAiUnseenInsights(0);
-            }}
-          >
-            <Sparkles size={16} aria-hidden="true" />
-            AI 助手
-            {aiUnseenInsights > 0 ? <span className="ai-badge">{aiUnseenInsights}</span> : null}
-          </button>
           <span className="status-pill"><Activity size={16} aria-hidden="true" /> 保守日线撮合</span>
           <span className="status-pill"><Database size={16} aria-hidden="true" /> 本地缓存</span>
         </div>
       </header>
       <div className="market-news-layout">
         <MarketDashboard snapshot={marketSnapshot} isLoading={isLoadingMarket} refreshMeta={marketRefreshMeta} />
-        <NewsPanel news={marketNews} isLoading={isLoadingNews} onRefresh={refreshNews} />
+        <NewsPanel news={marketNews} aiDigest={aiDigest} isLoading={isLoadingNews} onRefresh={refreshNews} />
       </div>
       <div className="market-insight-layout">
         <ClsFinancePanel finance={clsFinance} isLoading={isLoadingClsFinance} />
@@ -695,6 +713,18 @@ export function App() {
           setStrategySaveMessage("已套用 AI 生成的策略，可在策略工作台继续调整。");
         }}
       />
+      <button
+        className={`ai-fab ${aiOpen ? "open" : ""}`}
+        type="button"
+        aria-label={aiOpen ? "关闭 AI 投研助手" : `打开 AI 投研助手${aiUnseenInsights > 0 ? `，${aiUnseenInsights} 条未读快讯` : ""}`}
+        onClick={() => {
+          setAiOpen((open) => !open);
+          setAiUnseenInsights(0);
+        }}
+      >
+        {aiOpen ? <X size={22} aria-hidden="true" /> : <Sparkles size={22} aria-hidden="true" />}
+        {!aiOpen && aiUnseenInsights > 0 ? <span className="ai-fab-badge">{aiUnseenInsights}</span> : null}
+      </button>
     </main>
   );
 }

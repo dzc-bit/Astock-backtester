@@ -15,15 +15,25 @@ CONFIG_DIR_NAME = "AI配置"
 CONFIG_FILE_NAME = "ai-config.json"
 
 
+SUPPORTED_API_STYLES = ("chat-completions", "responses", "anthropic")
+
+
 @dataclass
 class AiConfig:
     """OpenAI-compatible provider settings. Empty by default until the user
-    fills them in the desktop settings dialog."""
+    fills them in the desktop settings dialog.
+
+    ``api_style`` selects the wire protocol:
+    - ``chat-completions``: POST {base}/chat/completions（OpenAI 兼容，默认）;
+    - ``responses``: OpenAI Responses API（GPT-5 系等新接口）;
+    - ``anthropic``: Anthropic Messages API（{base}/v1/messages）。
+    """
 
     base_url: str = ""
     api_key: str = ""
     model: str = ""
     embedding_model: str = ""
+    api_style: str = "chat-completions"
     temperature: float = 0.3
     max_steps: int = 8
     insights_enabled: bool = True
@@ -38,6 +48,8 @@ class AiConfig:
         cfg.api_key = cfg.api_key.strip()
         cfg.model = cfg.model.strip()
         cfg.embedding_model = cfg.embedding_model.strip()
+        if cfg.api_style not in SUPPORTED_API_STYLES:
+            cfg.api_style = "chat-completions"
         cfg.temperature = min(max(cfg.temperature, 0.0), 2.0)
         cfg.max_steps = max(1, min(int(cfg.max_steps), 16))
         cfg.insight_max_per_hour = max(0, min(int(cfg.insight_max_per_hour), 60))
@@ -104,6 +116,7 @@ class AiConfigStore:
             "base_url": config.base_url,
             "model": config.model,
             "embedding_model": config.embedding_model,
+            "api_style": config.api_style,
             "api_key_masked": masked_key(config.api_key),
             "temperature": config.temperature,
             "max_steps": config.max_steps,

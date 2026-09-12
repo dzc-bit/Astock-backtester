@@ -64,6 +64,16 @@ INSIGHT_PROMPT = """基于以下最新市场数据，写一条面向 A 股用户
 
 {data}"""
 
+DIGEST_PROMPT = """你是 A 股资讯编辑。下面是刚刚从多个数据源（东财/财联社/新浪新闻、涨停池、昨日涨停表现、实时行情、复盘）聚合的原始数据。
+请整理成 3-6 条“市场要点”，要求：
+- 只使用给定数据中的事实与数字，禁止编造；每条标注信息来自哪个源（如 来源：财联社电报 / 涨停池 / 实时行情）。
+- title 一句话（≤30 字），summary 2-3 句。
+- tags 从 [政策, 行业, 资金, 情绪, 海外, 个股, 宏观] 里选 1-2 个；symbols 列出相关 6 位代码，没有就空数组。
+- 只输出 JSON 数组：[{{"title": "...", "summary": "...", "tags": [...], "symbols": [...]}}]
+
+原始数据：
+{data}"""
+
 
 def build_system_prompt(knowledge_ready: bool) -> str:
     note = KNOWLEDGE_NOTE_WITH_RAG if knowledge_ready else KNOWLEDGE_NOTE_WITHOUT_RAG
@@ -76,3 +86,7 @@ def build_compaction_messages(history_text: str) -> list[dict[str, str]]:
 
 def build_insight_messages(data_text: str) -> list[dict[str, str]]:
     return [{"role": "user", "content": INSIGHT_PROMPT.format(data=data_text)}]
+
+
+def build_digest_messages(data_text: str) -> list[dict[str, str]]:
+    return [{"role": "user", "content": DIGEST_PROMPT.format(data=data_text)}]

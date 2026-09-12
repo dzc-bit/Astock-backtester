@@ -20,7 +20,7 @@ import random
 import threading
 import time
 from datetime import date, datetime, timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import requests
 
@@ -28,11 +28,22 @@ from astock_backtester.ai.tools.registry import AiTool
 from astock_backtester.data.http_transport import USER_AGENT, create_scraping_session
 from astock_backtester.data.symbols import a_share_market_symbol, normalize_symbol
 
+if TYPE_CHECKING:
+    from astock_backtester.ai.tools.local_tools import AiBackend
+
 DATACENTER_URL = "https://datacenter-web.eastmoney.com/api/data/v1/get"
 REPORT_API = "https://reportapi.eastmoney.com/report/list"
 ZT_POOL_URL = "https://push2ex.eastmoney.com/{endpoint}"
 ZTB_UT = "7eea3edcaed734bea9cbfc24409ed989"
 EM_MIN_INTERVAL_SECONDS = 1.0
+
+ZT_POOL_ENDPOINTS = {
+    "zt": ("getTopicZTPool", "fbt:asc"),
+    "zb": ("getTopicZBPool", "fbt:asc"),
+    "dt": ("getTopicDTPool", "fund:asc"),
+    "yzt": ("getYesterdayZTPool", "zs:desc"),
+}
+ZT_POOL_NAMES = {"zt": "涨停", "zb": "炸板", "dt": "跌停", "yzt": "昨日涨停"}
 
 _em_lock = threading.Lock()
 _em_last_call = 0.0
@@ -99,70 +110,128 @@ def _wan(amount: Any) -> float | None:
         return None
 
 
-def build_astock_data_tools() -> list[AiTool]:
+def _fmt_zt_time(value: Any) -> str:
+    digits = str(value or "").zfill(6)
+    return f"{digits[0:2]}:{digits[2:4]}:{digits[4:6]}"
+
+
+def fetch_tencent_quotes(raw_symbols: list[str]) -> tuple[list[dict[str, Any]], list[str]]:
+    """Batch Tencent realtime valuation quotes. Returns (quotes, diagnostics)."""
+    prefixed: list[str] = []
+    key_to_symbol: dict[str, str] = {}
+    diagnostics: list[str] = []
+    for raw in raw_symbols[:10]:
+        symbol = normalize_symbol(raw)
+        market_symbol = a_share_market_symbol(symbol)
+        if market_symbol is None:
+            diagnostics.append(f"{raw} 不是可识别的 A 股代码，已跳过")
+            continue
+        prefixed.append(market_symbol)
+        key_to_symbol[market_symbol[2:]] = symbol
+    if not prefixed:
+        return [], diagnostics
+    url = "https://qt.gtimg.cn/q=" + ",".join(prefixed)
+    try:
+        response = create_scraping_session().get(url, headers={"User-Agent": USER_AGENT}, timeout=10)
+        response.raise_for_status()
+        text = response.content.decode("gbk", errors="replace")
+    except requests.RequestException as exc:
+        raise RuntimeError(f"腾讯行情请求失败：{exc}") from exc
+
+    quotes: list[dict[str, Any]] = []
+    for line in text.strip().split(";"):
+        if "=" not in line or '"' not in line:
+            continue
+        key = line.split("=")[0].split("_")[-1]
+        values = line.split('"')[1].split("~")
+        if len(values) < 53:
+            continue
+        code = key_to_symbol.get(key[2:], key[2:])
+
+        def _num(field_values: list[str], index: int) -> float | None:
+            try:
+                return float(field_values[index]) if field_values[index] else None
+            except (ValueError, IndexError):
+                return None
+
+        price = _num(values, 3) or 0.0
+        last_close = _num(values, 4) or 0.0
+        amount_wan = _num(values, 37) or 0.0
+        stale = amount_wan == 0 and price == last_close and price > 0
+        quotes.append(
+            {
+                "symbol": code,
+                "name": values[1],
+                "price": price,
+                "change_pct": _num(values, 32),
+                "turnover_pct": _num(values, 38),
+                "pe_ttm": _num(values, 39),
+                "float_mcap_yi": _num(values, 44),
+                "total_mcap_yi": _num(values, 45),
+                "pb": _num(values, 46),
+                "limit_up": _num(values, 47),
+                "limit_down": _num(values, 48),
+                "vol_ratio": _num(values, 49),
+                "pe_static": _num(values, 52),
+                "is_stale": stale,
+                "stale_reason": "成交量为 0（停牌/未开盘/废码），非当日真实成交" if stale else "",
+            }
+        )
+    return quotes, diagnostics
+
+
+def fetch_limit_up_rows(pool_type: str, trade_date: str | None = None) -> list[dict[str, Any]]:
+    """Fetch one limit-pool as plain rows (shared by the tool and the digest)."""
+    if pool_type not in ZT_POOL_ENDPOINTS:
+        raise ValueError("pool_type 只能是 zt/zb/dt/yzt")
+    endpoint, sort = ZT_POOL_ENDPOINTS[pool_type]
+    raw_date = str(trade_date or date.today().strftime("%Y%m%d")).replace("-", "")
+    params = {
+        "ut": ZTB_UT,
+        "dpt": "wz.ztzt",
+        "Pageindex": 0,
+        "pagesize": 300,
+        "sort": sort,
+        "date": raw_date,
+    }
+    response = _em_get(
+        ZT_POOL_URL.format(endpoint=endpoint),
+        params=params,
+        headers={"Referer": "https://quote.eastmoney.com/"},
+        timeout=10,
+    )
+    response.raise_for_status()
+    pool = (response.json().get("data") or {}).get("pool") or []
+    items = []
+    for row in pool:
+        zttj = row.get("zttj") or {}
+        items.append(
+            {
+                "symbol": row.get("c"),
+                "name": row.get("n"),
+                "price": (row.get("p") or 0) / 1000,
+                "change_pct": round(row.get("zdp") or 0, 2),
+                "turnover": round(row.get("hs") or 0, 2),
+                "limit_days": row.get("lbc"),
+                "first_seal": _fmt_zt_time(row.get("fbt")),
+                "seal_fund": row.get("fund"),
+                "break_times": row.get("zbc"),
+                "industry": row.get("hybk", ""),
+                "zt_stat": f"{zttj.get('days', '?')}天{zttj.get('ct', '?')}板",
+            }
+        )
+    return items
+
+
+def build_astock_data_tools(backend: AiBackend | None = None) -> list[AiTool]:
     def stock_valuation(args: dict[str, Any]) -> dict[str, Any]:
         raw_symbols = [str(s) for s in args.get("symbols", [])][:10]
         if not raw_symbols:
             return {"ok": False, "error": "symbols 不能为空"}
-        prefixed: list[str] = []
-        key_to_symbol: dict[str, str] = {}
-        diagnostics: list[str] = []
-        for raw in raw_symbols:
-            symbol = normalize_symbol(raw)
-            market_symbol = a_share_market_symbol(symbol)
-            if market_symbol is None:
-                diagnostics.append(f"{raw} 不是可识别的 A 股代码，已跳过")
-                continue
-            prefixed.append(market_symbol)
-            key_to_symbol[market_symbol[2:]] = symbol
-        if not prefixed:
-            return {"ok": False, "error": "没有可查询的有效代码", "diagnostics": diagnostics}
-        url = "https://qt.gtimg.cn/q=" + ",".join(prefixed)
         try:
-            response = create_scraping_session().get(url, headers={"User-Agent": USER_AGENT}, timeout=10)
-            response.raise_for_status()
-            text = response.content.decode("gbk", errors="replace")
-        except requests.RequestException as exc:
-            return {"ok": False, "error": f"腾讯行情请求失败：{exc}", "diagnostics": diagnostics}
-        quotes: list[dict[str, Any]] = []
-        for line in text.strip().split(";"):
-            if "=" not in line or '"' not in line:
-                continue
-            key = line.split("=")[0].split("_")[-1]
-            values = line.split('"')[1].split("~")
-            if len(values) < 53:
-                continue
-            code = key_to_symbol.get(key[2:], key[2:])
-
-            def _num(field_values: list[str], index: int) -> float | None:
-                try:
-                    return float(field_values[index]) if field_values[index] else None
-                except (ValueError, IndexError):
-                    return None
-
-            price = _num(values, 3) or 0.0
-            last_close = _num(values, 4) or 0.0
-            amount_wan = _num(values, 37) or 0.0
-            stale = amount_wan == 0 and price == last_close and price > 0
-            quotes.append(
-                {
-                    "symbol": code,
-                    "name": values[1],
-                    "price": price,
-                    "change_pct": _num(values, 32),
-                    "turnover_pct": _num(values, 38),
-                    "pe_ttm": _num(values, 39),
-                    "float_mcap_yi": _num(values, 44),
-                    "total_mcap_yi": _num(values, 45),
-                    "pb": _num(values, 46),
-                    "limit_up": _num(values, 47),
-                    "limit_down": _num(values, 48),
-                    "vol_ratio": _num(values, 49),
-                    "pe_static": _num(values, 52),
-                    "is_stale": stale,
-                    "stale_reason": "成交量为 0（停牌/未开盘/废码），非当日真实成交" if stale else "",
-                }
-            )
+            quotes, diagnostics = fetch_tencent_quotes(raw_symbols)
+        except RuntimeError as exc:
+            return {"ok": False, "error": str(exc), "diagnostics": []}
         return {"ok": bool(quotes), "quotes": quotes, "diagnostics": diagnostics}
 
     def summarize_valuation(payload: dict[str, Any]) -> str:
@@ -272,50 +341,22 @@ def build_astock_data_tools() -> list[AiTool]:
 
     def limit_up_pool(args: dict[str, Any]) -> dict[str, Any]:
         pool_type = str(args.get("pool_type", "zt")).strip().lower()
-        endpoints = {"zt": ("getTopicZTPool", "fbt:asc"), "zb": ("getTopicZBPool", "fbt:asc"),
-                     "dt": ("getTopicDTPool", "fund:asc"), "yzt": ("getYesterdayZTPool", "zs:desc")}
-        if pool_type not in endpoints:
+        if pool_type not in ZT_POOL_ENDPOINTS:
             return {"ok": False, "error": "pool_type 只能是 zt/zb/dt/yzt"}
         raw_date = str(args.get("trade_date") or date.today().strftime("%Y%m%d")).replace("-", "")
-        endpoint, sort = endpoints[pool_type]
-        params = {
-            "ut": ZTB_UT,
-            "dpt": "wz.ztzt",
-            "Pageindex": 0,
-            "pagesize": 300,
-            "sort": sort,
-            "date": raw_date,
-        }
         try:
-            response = _em_get(
-                ZT_POOL_URL.format(endpoint=endpoint),
-                params=params,
-                headers={"Referer": "https://quote.eastmoney.com/"},
-                timeout=10,
-            )
-            response.raise_for_status()
-            pool = (response.json().get("data") or {}).get("pool") or []
+            rows = fetch_limit_up_rows(pool_type, raw_date)
         except (requests.RequestException, ValueError) as exc:
             return {"ok": False, "error": f"涨停板接口失败：{exc}"}
-        if not pool:
+        if not rows:
             return {"ok": True, "pool": [], "note": "该日期无数据（非交易日或尚未生成）"}
-        pool_type_names = {"zt": "涨停", "zb": "炸板", "dt": "跌停", "yzt": "昨日涨停"}
-        items = []
-        for row in pool[:20]:
-            zttj = row.get("zttj") or {}
-            items.append(
-                {
-                    "symbol": row.get("c"),
-                    "name": row.get("n"),
-                    "price": (row.get("p") or 0) / 1000,
-                    "change_pct": round(row.get("zdp") or 0, 2),
-                    "limit_days": row.get("lbc"),
-                    "break_times": row.get("zbc"),
-                    "industry": row.get("hybk", ""),
-                    "zt_stat": f"{zttj.get('days', '?')}天{zttj.get('ct', '?')}板",
-                }
-            )
-        return {"ok": True, "pool_type": pool_type_names[pool_type], "trade_date": raw_date, "count": len(pool), "items": items}
+        return {
+            "ok": True,
+            "pool_type": ZT_POOL_NAMES[pool_type],
+            "trade_date": raw_date,
+            "count": len(rows),
+            "items": rows[:20],
+        }
 
     def summarize_limit_up(payload: dict[str, Any]) -> str:
         if not payload.get("items"):
@@ -325,6 +366,51 @@ def build_astock_data_tools() -> list[AiTool]:
             lines.append(
                 f"- {item.get('name')}（{item.get('symbol')}）{item.get('zt_stat')} 连板{item.get('limit_days')} "
                 f"炸板{item.get('break_times')}次 {item.get('industry')}"
+            )
+        return "\n".join(lines)
+
+    def compare_stocks(args: dict[str, Any]) -> dict[str, Any]:
+        raw_symbols = [str(s) for s in args.get("symbols", [])][:6]
+        if len(raw_symbols) < 2:
+            return {"ok": False, "error": "至少需要 2 只股票代码（最多 6 只）"}
+        try:
+            quotes, diagnostics = fetch_tencent_quotes(raw_symbols)
+        except RuntimeError as exc:
+            return {"ok": False, "error": str(exc)}
+        rows: list[dict[str, Any]] = []
+        for quote in quotes:
+            row = dict(quote)
+            if backend is not None:
+                window = max(20, min(int(args.get("window", 60)), 250))
+                from datetime import timedelta
+
+                end = date.today()
+                start = end - timedelta(days=window * 3)
+                frame = backend.warehouse.read_daily_bars(
+                    symbols=[quote["symbol"]], start_date=start.isoformat(), end_date=end.isoformat(), require_ohlc=True
+                )
+                if not frame.empty:
+                    closes = frame.sort_values("trade_date")["close"].astype(float)
+                    returns = closes.pct_change().dropna()
+                    row["window_return_pct"] = round(float(closes.iloc[-1] / closes.iloc[0] - 1.0), 4)
+                    row["annualized_volatility_pct"] = (
+                        round(float(returns.std() * (242**0.5)), 4) if len(returns) > 2 else None
+                    )
+                    row["max_drawdown_pct"] = round(float((closes / closes.cummax() - 1.0).min()), 4)
+            rows.append(row)
+        return {"ok": bool(rows), "rows": rows, "diagnostics": diagnostics}
+
+    def summarize_compare(payload: dict[str, Any]) -> str:
+        lines = ["多股对比（估值 + 区间统计）："]
+        for row in payload.get("rows", []):
+            lines.append(
+                f"- {row.get('symbol')} {row.get('name')}：¥{row.get('price')} PE {row.get('pe_ttm')} / PB {row.get('pb')}，"
+                f"总市值 {row.get('total_mcap_yi')} 亿"
+                + (
+                    f"，近段收益 {row.get('window_return_pct', 0):+.2%}，回撤 {row.get('max_drawdown_pct', 0):.2%}"
+                    if row.get("window_return_pct") is not None
+                    else ""
+                )
             )
         return "\n".join(lines)
 
@@ -383,5 +469,22 @@ def build_astock_data_tools() -> list[AiTool]:
             },
             executor=limit_up_pool,
             summarizer=summarize_limit_up,
+        ),
+        AiTool(
+            name="compare_stocks",
+            description=(
+                "多股横向对比（2-6 只）：并排列出估值（PE/PB/市值）与本地区间统计（收益/波动/回撤），"
+                "用于选股比较场景，一次调用代替逐只查询。"
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "symbols": {"type": "array", "items": {"type": "string"}, "description": "2-6 个 6 位代码"},
+                    "window": {"type": "integer", "description": "本地统计窗口，默认 60 个交易日"},
+                },
+                "required": ["symbols"],
+            },
+            executor=compare_stocks,
+            summarizer=summarize_compare,
         ),
     ]

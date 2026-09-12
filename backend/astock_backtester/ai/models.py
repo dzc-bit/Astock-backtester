@@ -61,6 +61,7 @@ class AiConfigUpdate(BaseModel):
     model: str = ""
     embedding_model: str = ""
     api_key: str = ""
+    api_style: str = "chat-completions"
     temperature: float = 0.3
     max_steps: int = 8
     insights_enabled: bool = True

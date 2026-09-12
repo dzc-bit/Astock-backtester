@@ -7,12 +7,14 @@ import type {
   AiConfigUpdatePayload,
   AiConfigView,
   AiEventStreamEvent,
+  AiNewsDigest,
   AiStatus
 } from "./aiTypes";
 import {
   mockAiChatEvents,
   mockAiConfig,
   mockAiEventStream,
+  mockAiNewsDigest,
   mockAiSaveConfig,
   mockAiStatus
 } from "./aiMocks";
@@ -70,6 +72,18 @@ export async function revealAiKey(baseUrl: string): Promise<string> {
     throw new BackendError(typeof json.code === "string" ? json.code : "request_failed", "读取 API Key 失败");
   }
   return String(json.api_key ?? "");
+}
+
+export async function loadAiNewsDigest(baseUrl: string): Promise<AiNewsDigest> {
+  if (!isTauriRuntime()) {
+    return mockAiNewsDigest();
+  }
+  const response = await fetch(`${baseUrl}/ai/news`);
+  const json = await response.json();
+  if (!response.ok) {
+    throw new BackendError(typeof json.code === "string" ? json.code : "request_failed", "AI 资讯聚合读取失败");
+  }
+  return json as AiNewsDigest;
 }
 
 export async function runAiChatStream(

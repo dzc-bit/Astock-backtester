@@ -4,6 +4,7 @@ import type {
   AiConfigUpdatePayload,
   AiConfigView,
   AiEventStreamEvent,
+  AiNewsDigest,
   AiStatus
 } from "./aiTypes";
 import type { StrategyConfig } from "./types";
@@ -26,6 +27,7 @@ export function mockAiConfig(): AiConfigView {
     base_url: "https://mock.local/v1",
     model: "demo-model",
     embedding_model: "demo-embedding",
+    api_style: "chat-completions",
     api_key_masked: "sk-****demo",
     temperature: 0.3,
     max_steps: 8,
@@ -41,7 +43,45 @@ export function mockAiSaveConfig(payload: AiConfigUpdatePayload): AiConfigView {
     base_url: payload.base_url,
     model: payload.model,
     embedding_model: payload.embedding_model,
+    api_style: payload.api_style,
     configured: Boolean(payload.base_url && payload.model)
+  };
+}
+
+export function mockAiNewsDigest(): AiNewsDigest {
+  const created = new Date().toISOString();
+  return {
+    count: 3,
+    updated_at: created,
+    items: [
+      {
+        id: "digest-1",
+        title: "政策利好落地，科技方向盘中活跃",
+        summary: "半导体与 AI 应用获政策催化，北向资金净买入超 80 亿元（来源：财联社电报/东方财富）。",
+        tags: ["政策", "资金"],
+        symbols: [],
+        source: "ai-agent",
+        created_at: created
+      },
+      {
+        id: "digest-2",
+        title: "涨停家数回升，连板梯队高度抬升",
+        summary: "今日涨停池数量明显增加，昨日涨停平均表现转正，短线情绪回暖（来源：涨停池/实时行情）。",
+        tags: ["情绪"],
+        symbols: ["601869"],
+        source: "ai-agent",
+        created_at: created
+      },
+      {
+        id: "digest-3",
+        title: "存储芯片厂上调合约报价",
+        summary: "涨价周期带动产业链业绩预期上修，光量子计算亦取得突破（来源：东方财富7×24）。",
+        tags: ["行业"],
+        symbols: [],
+        source: "ai-agent",
+        created_at: created
+      }
+    ]
   };
 }
 
