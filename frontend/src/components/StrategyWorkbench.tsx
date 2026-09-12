@@ -1,5 +1,5 @@
-﻿import { CheckCircle2, Plus, RotateCcw, Trash2 } from "lucide-react";
-import { useState } from "react";
+﻿import { CheckCircle2, Plus, RotateCcw, Sparkles, Trash2 } from "lucide-react";
+import { useEffect, useState } from "react";
 import { isBuiltInStrategyPreset } from "../savedStrategies";
 import { conditionLibrary, defaultStrategy } from "../strategyDefaults";
 import type {
@@ -342,7 +342,15 @@ export function StrategyWorkbench({
   const [settingDrafts, setSettingDrafts] = useState<Record<string, string>>({});
   const [entryAddMessage, setEntryAddMessage] = useState<string | null>(null);
   const [exitAddMessage, setExitAddMessage] = useState<string | null>(null);
+  const [workbenchTab, setWorkbenchTab] = useState<"basics" | "ai">("basics");
   const group = firstGroup(strategy);
+
+  useEffect(() => {
+    if (strategySaveMessage?.includes("已套用")) {
+      // 套用推荐/已保存/AI 生成的策略后，自动切回基础配置，直接看到已生效的条件。
+      setWorkbenchTab("basics");
+    }
+  }, [strategySaveMessage]);
 
   const updateSettings = (patch: Partial<BacktestSettingsConfig>) => {
     onSettingsChange({ ...settings, ...patch });
@@ -496,9 +504,27 @@ export function StrategyWorkbench({
           重置策略
         </button>
       </div>
-      <div className="section-aliases" aria-label="原配置模块">
-        <h3>回测设置</h3>
-        <h3>策略条件</h3>
+      <div className="workbench-tabs" role="tablist" aria-label="策略配置栏目">
+        <button
+          className={`workbench-tab ${workbenchTab === "basics" ? "active" : ""}`}
+          type="button"
+          role="tab"
+          aria-selected={workbenchTab === "basics"}
+          onClick={() => setWorkbenchTab("basics")}
+        >
+          基础配置
+        </button>
+        <button
+          className={`workbench-tab ${workbenchTab === "ai" ? "active" : ""}`}
+          type="button"
+          role="tab"
+          aria-selected={workbenchTab === "ai"}
+          onClick={() => setWorkbenchTab("ai")}
+        >
+          <Sparkles size={15} aria-hidden="true" />
+          AI 推荐
+          <span className="workbench-tab-count">{savedStrategies.length + recommendedStrategies.length}</span>
+        </button>
       </div>
       {strategySaveMessage ? (
         <div className="strategy-save-banner">
@@ -524,7 +550,9 @@ export function StrategyWorkbench({
         </div>
       ) : null}
 
-      <section className="saved-strategies-panel" aria-label="已保存策略">
+      {workbenchTab === "ai" ? (
+        <>
+          <section className="saved-strategies-panel" aria-label="已保存策略">
         <div className="saved-strategies-head">
           <div>
             <span className="section-kicker">运行完成后可保存到这里</span>
@@ -597,7 +625,11 @@ export function StrategyWorkbench({
         disabled={disabled}
         onApply={applyRecommendedStrategy}
       />
+          </>
+      ) : null}
 
+      {workbenchTab === "basics" ? (
+      <>
       <div className="workbench-grid">
         <div className="config-panel">
           <h3>回测范围</h3>
@@ -1082,9 +1114,11 @@ export function StrategyWorkbench({
               ) : null}
             </div>
           </div>
-        </div>
       </div>
+      </div>
+      </>
+      ) : null}
       </fieldset>
-    </section>
+      </section>
   );
 }

@@ -407,8 +407,10 @@ describe("A 股回测工作台界面", () => {
     expect(screen.getByRole("button", { name: "检查更新" })).toBeInTheDocument();
     expect(screen.getByText(/当前版本/)).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "数据中心" })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "策略条件" })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "回测设置" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: /基础配置/ })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: /AI 推荐/ })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "回测范围" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "写入条件" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "收益概览" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "交易明细" })).toBeInTheDocument();
     expect(screen.getAllByText("市场热度").length).toBeGreaterThan(0);
@@ -1047,7 +1049,9 @@ describe("A 股回测工作台界面", () => {
     render(<App />);
 
     await screen.findByText("日线行情");
+    await user.click(screen.getByRole("tab", { name: /AI 推荐/ }));
     await user.click(await screen.findByRole("button", { name: "套用放量突破" }));
+    // 套用后自动切回基础配置，直接从那里运行回测
     await user.click(screen.getByRole("button", { name: "运行历史回测" }));
 
     expect(apiMocks.runBacktestStreamWithDataService).toHaveBeenCalledWith(
@@ -1535,6 +1539,7 @@ describe("A 股回测工作台界面", () => {
     expect(screen.getByText(`建议名称：${savedName}`)).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "保存策略" }));
     expect(await screen.findByText(`已保存策略：${savedName}`)).toBeInTheDocument();
+    await user.click(screen.getByRole("tab", { name: /AI 推荐/ }));
     expect(screen.getByRole("heading", { name: "已保存策略" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: `套用已保存策略${savedName}` })).toBeInTheDocument();
     expect(screen.getByText(savedName)).toBeInTheDocument();
@@ -1548,6 +1553,7 @@ describe("A 股回测工作台界面", () => {
     await user.click(screen.getByRole("button", { name: "套用放量突破" }));
     await user.click(screen.getByRole("button", { name: `套用已保存策略${savedName}` }));
     expect(await screen.findByText(`已套用已保存策略：${savedName}`)).toBeInTheDocument();
+    await user.click(screen.getByRole("tab", { name: /AI 推荐/ }));
 
     await user.click(screen.getByRole("button", { name: `删除已保存策略${savedName}` }));
     expect(await screen.findByText(`已删除已保存策略：${savedName}`)).toBeInTheDocument();
@@ -1578,6 +1584,7 @@ describe("A 股回测工作台界面", () => {
     await user.click(screen.getByRole("button", { name: "暂不保存" }));
     expect(await screen.findByText("本次未保存策略，你可以继续调整后再次运行。")).toBeInTheDocument();
     expect(window.localStorage.getItem("astock-saved-strategies")).toBeNull();
+    await user.click(screen.getByRole("tab", { name: /AI 推荐/ }));
     expect(screen.getByRole("heading", { name: "已保存策略" })).toBeInTheDocument();
   });
 
@@ -1854,9 +1861,12 @@ describe("A 股回测工作台界面", () => {
   });
 
   it("keeps built-in local strategies visible without delete actions", async () => {
+    const user = userEvent.setup();
     render(<App />);
 
-    await screen.findByRole("heading", { name: "已保存策略" });
+    await screen.findByText("日线行情");
+    await user.click(screen.getByRole("tab", { name: /AI 推荐/ }));
+    expect(screen.getByRole("heading", { name: "已保存策略" })).toBeInTheDocument();
 
     expect(screen.getByText("基础均衡策略")).toBeInTheDocument();
     expect(screen.getByText("放量突破策略")).toBeInTheDocument();
@@ -1874,7 +1884,7 @@ describe("A 股回测工作台界面", () => {
     await user.click(screen.getByRole("button", { name: "运行历史回测" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent("未找到已缓存的日线行情");
-    expect(screen.getByRole("heading", { name: "策略条件" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "写入条件" })).toBeInTheDocument();
   });
 
   it("uses a Chinese fallback for unrecognized backend errors", async () => {
