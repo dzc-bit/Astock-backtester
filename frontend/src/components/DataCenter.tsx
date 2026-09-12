@@ -8,9 +8,12 @@ import {
   loadDailyBarsCoverage,
   loadDataServiceHealth,
   loadDataServiceLogs,
+  loadDiagnosticsSources,
   loadSyncJob,
   startFullMarketSync
 } from "../api";
+import { aiInsightOneshot } from "../aiApi";
+import type { DataSourceHealth, DiagnosticsSourcesResponse } from "../types";
 import { recentAShareTradingDateRange } from "../tradingCalendar";
 import type { DailyBarsCoverageItem, DataServiceStatus, DatasetCoverage, ServiceLogEntry, SyncJobStatus } from "../types";
 
@@ -155,6 +158,42 @@ function isPendingEmptyHealthCoverage(coverage: DatasetCoverage[], refreshing: b
   return Boolean(refreshing) && isEmptyCoverageSnapshot(coverage);
 }
 
+function lifecycleBadge(item: DailyBarsCoverageItem, windowStart: string): { label: string; tone: "good" | "warn" } | null {
+  if (item.delisted_date || item.lifecycle_status === "delisted") {
+    return { label: `已退市${item.delisted_date ? `（${item.delisted_date}）` : ""}`, tone: "warn" };
+  }
+  if (item.listing_date && windowStart && windowStart < item.listing_date) {
+    return { label: `未上市（${item.listing_date} 起）`, tone: "good" };
+  }
+  return null;
+}
+
+function formatSecondsSinceSuccess(seconds: number | null | undefined): string {
+  if (seconds == null) {
+    return "尚无成功记录";
+  }
+  if (seconds < 60) {
+    return `${Math.round(seconds)} 秒前成功`;
+  }
+  if (seconds < 3600) {
+    return `${Math.round(seconds / 60)} 分钟前成功`;
+  }
+  return `${Math.round(seconds / 3600)} 小时前成功`;
+}
+
+function sourceHealthLabel(source: DataSourceHealth): string {
+  if (source.source === "realtime") {
+    return source.status === "live" ? "实时行情源" : source.status === "stale" ? "实时行情源（沿用最近成功）" : "实时行情源不可用";
+  }
+  if (source.source === "news") {
+    return "市场新闻源";
+  }
+  if (source.source === "finance") {
+    return "财联社行情源";
+  }
+  return source.source;
+}
+
 export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceReady }: Props) {
   const [service, setService] = useState<DataServiceStatus | null>(null);
   const [symbolsInput, setSymbolsInput] = useState("");
@@ -168,6 +207,10 @@ export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceRead
   const [message, setMessage] = useState("正在连接本地数据服务");
   const [busyAction, setBusyAction] = useState<BusyAction>(null);
   const [coverageRefreshToken, setCoverageRefreshToken] = useState(0);
+  const [diagnostics, setDiagnostics] = useState<DiagnosticsSourcesResponse | null>(null);
+  const [isDiagnosing, setIsDiagnosing] = useState(false);
+  const [aiCoverageDiagnosis, setAiCoverageDiagnosis] = useState<string | null>(null);
+  const [diagnosisError, setDiagnosisError] = useState<string | null>(null);
   const syncRunning = isSyncRunning(syncJob);
   const syncImportedRows = syncRunning && syncJob ? syncJob.imported_rows : 0;
   const busy = busyAction !== null || syncRunning;
@@ -261,6 +304,36 @@ export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceRead
     setLogs(recentLogs.items);
   };
 
+  const refreshDiagnostics = async (activeService: DataServiceStatus) => {
+    try {
+      setDiagnostics(await loadDiagnosticsSources(activeService.base_url));
+    } catch {
+      // 健康监控失败不影响数据中心其他能力，保留上一次结果。
+    }
+  };
+
+  const handleDiagnoseCoverage = async () => {
+    if (!service || isDiagnosing) {
+      return;
+    }
+    setIsDiagnosing(true);
+    setDiagnosisError(null);
+    setAiCoverageDiagnosis(null);
+    try {
+      const text = await aiInsightOneshot(service.base_url, "data_coverage", {
+        coverage,
+        details: items.slice(0, 8)
+      });
+      setAiCoverageDiagnosis(text);
+    } catch (caught) {
+      setDiagnosisError(
+        caught instanceof Error ? caught.message : "AI 诊断失败，请稍后重试。"
+      );
+    } finally {
+      setIsDiagnosing(false);
+    }
+  };
+
   useEffect(() => {
     let cancelled = false;
     void ensureDataService(cacheDir)
@@ -273,6 +346,7 @@ export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceRead
         setMessage(status.message);
         const range = await refreshServiceState(status);
         await refreshDetails(status, [], range.startDate, range.endDate);
+        void refreshDiagnostics(status);
       })
       .catch((error: unknown) => {
         if (!cancelled) {
@@ -615,7 +689,20 @@ export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceRead
           <button className="secondary-button" type="button" onClick={handleImportFile} disabled={!service || busy || !importPath.trim()}>
             {busyAction === "file" ? "正在导入本地文件" : "导入本地文件"}
           </button>
+          <button className="secondary-button" type="button" aria-label="AI 诊断缺失" onClick={handleDiagnoseCoverage} disabled={!service || isDiagnosing}>
+            {isDiagnosing ? "AI 诊断中…" : "AI 诊断缺失"}
+          </button>
         </div>
+        {diagnosisError ? (
+          <div className="condition-validation bad" role="alert">
+            {diagnosisError}
+          </div>
+        ) : null}
+        {aiCoverageDiagnosis ? (
+          <p className="ai-oneshot-line" aria-label="AI 覆盖诊断">
+            {aiCoverageDiagnosis}
+          </p>
+        ) : null}
         <p className={`operation-status ${busy ? "is-busy" : ""}`} role="status" aria-label="数据中心状态">
           {message}
         </p>
@@ -706,16 +793,53 @@ export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceRead
       )}
 
       <div className="coverage-details">
-        {items.map((item) => (
-          <article key={item.symbol} className="coverage-item">
-            <strong>{item.symbol}</strong>
-            <span>{item.start_date ?? "-"} 至 {item.end_date ?? "-"}，{item.rows} 行</span>
-            <span>缺失交易日: {formatList(item.missing_trade_dates)}</span>
-            <span>缺失资金流: {formatList(item.missing_capital_flow_dates)}</span>
-            <span>缺失市值: {formatList(item.missing_market_cap_dates)}</span>
-          </article>
-        ))}
+        {items.map((item) => {
+          const badge = lifecycleBadge(item, startDate);
+          return (
+            <article key={item.symbol} className="coverage-item">
+              <strong>
+                {item.symbol}
+                {badge ? <span className={`health-pill ${badge.tone}`}>{badge.label}</span> : null}
+              </strong>
+              <span>{item.start_date ?? "-"} 至 {item.end_date ?? "-"}，{item.rows} 行</span>
+              <span>缺失交易日: {formatList(item.missing_trade_dates)}</span>
+              <span>缺失资金流: {formatList(item.missing_capital_flow_dates)}</span>
+              <span>缺失市值: {formatList(item.missing_market_cap_dates)}</span>
+            </article>
+          );
+        })}
       </div>
+
+      <details className="source-health-card">
+        <summary>数据源健康监控</summary>
+        {diagnostics ? (
+          <div className="source-health-list" aria-label="数据源健康状态">
+            {diagnostics.sources.map((source) => (
+              <div className={`source-health-row ${source.ok ? "ok" : "bad"}`} key={source.source}>
+                <strong>{sourceHealthLabel(source)}</strong>
+                <span className={`health-pill ${source.ok ? "good" : "warn"}`}>
+                  {source.ok ? "可用" : "不可用"}
+                </span>
+                <small>{formatSecondsSinceSuccess(source.seconds_since_success)}</small>
+                {source.diagnostics.length > 0 ? (
+                  <ul>
+                    {source.diagnostics.slice(0, 3).map((message) => (
+                      <li key={message}>{message}</li>
+                    ))}
+                  </ul>
+                ) : null}
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="muted-code">尚未获取数据源健康状态，连接本地服务后自动加载。</p>
+        )}
+        {service ? (
+          <button className="secondary-button compact" type="button" onClick={() => void refreshDiagnostics(service)}>
+            刷新数据源健康
+          </button>
+        ) : null}
+      </details>
     </section>
   );
 }

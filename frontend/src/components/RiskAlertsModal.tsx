@@ -1,5 +1,6 @@
 import { AlertTriangle, X } from "lucide-react";
 import type { RiskAlertsResponse } from "../types";
+import { AiOneShotLine } from "./AiOneShotLine";
 
 type Props = {
   open: boolean;
@@ -7,6 +8,7 @@ type Props = {
   isLoading?: boolean;
   onClose: () => void;
   onRefresh: () => void;
+  aiBaseUrl?: string | null;
 };
 
 const severityLabels = {
@@ -19,7 +21,7 @@ function isFailureDiagnostic(message: string): boolean {
   return /(失败|不可用|不存在|Could not open|Invalid data|超时|timeout|error|Exception)/i.test(message);
 }
 
-export function RiskAlertsModal({ open, alerts, isLoading = false, onClose, onRefresh }: Props) {
+export function RiskAlertsModal({ open, alerts, isLoading = false, onClose, onRefresh, aiBaseUrl = null }: Props) {
   if (!open) {
     return null;
   }
@@ -53,6 +55,28 @@ export function RiskAlertsModal({ open, alerts, isLoading = false, onClose, onRe
             {isLoading ? "刷新中" : "刷新风险"}
           </button>
         </div>
+        {aiBaseUrl ? (
+          <AiOneShotLine
+            key={`${items.length}-${alerts?.updated_at ?? ""}`}
+            baseUrl={aiBaseUrl}
+            scene="risk_alerts"
+            context={{
+              count: items.length,
+              severity: {
+                high: items.filter((item) => item.severity === "high").length,
+                medium: items.filter((item) => item.severity === "medium").length,
+                low: items.filter((item) => item.severity === "low").length
+              },
+              sample: items.slice(0, 5).map((item) => ({
+                symbol: item.symbol,
+                name: item.name,
+                risk_type: item.risk_type,
+                reason: item.reason
+              }))
+            }}
+            label="AI 风险解读"
+          />
+        ) : null}
         <div className="risk-modal-body">
           {items.length === 0 ? (
             <div className="empty-state">

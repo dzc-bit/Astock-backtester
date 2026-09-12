@@ -1,10 +1,10 @@
 import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 import { Activity, Database, Flame, Gauge, ShieldAlert, Sparkles, X } from "lucide-react";
 import { AiAssistantPanel } from "./components/AiAssistantPanel";
-import { loadAiNewsDigest, revealAiKey } from "./aiApi";
+import { aiParseConditions, loadAiNewsDigest, loadAiStatus, revealAiKey } from "./aiApi";
 import { useAiEventStream } from "./hooks/useAiEventStream";
 import { useMarketModules } from "./hooks/useMarketModules";
-import type { AiDigestItem, AiInsight, AiTask } from "./aiTypes";
+import type { AiConditionParseResult, AiDigestItem, AiInsight, AiStatus as AiStatusView, AiTask } from "./aiTypes";
 import "./ai-panel.css";
 import { useMarketPolling } from "./hooks/useMarketPolling";
 import {
@@ -227,6 +227,40 @@ export function App() {
   const [aiInsights, setAiInsights] = useState<AiInsight[]>([]);
   const [aiUnseenInsights, setAiUnseenInsights] = useState(0);
   const [aiDigest, setAiDigest] = useState<AiDigestItem[]>([]);
+  const [aiStatus, setAiStatus] = useState<AiStatusView | null>(null);
+
+  useEffect(() => {
+    if (!dataService) {
+      setAiStatus(null);
+      return;
+    }
+    let cancelled = false;
+    loadAiStatus(dataService.base_url)
+      .then((status) => {
+        if (!cancelled) {
+          setAiStatus(status);
+        }
+      })
+      .catch(() => {
+        // AI 状态读取失败时按未配置处理，只影响 AI 点评入口的可用性。
+        if (!cancelled) {
+          setAiStatus(null);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [dataService]);
+
+  const handleParseConditions = useCallback(
+    async (text: string): Promise<AiConditionParseResult> => {
+      if (!dataService) {
+        throw new Error("本地数据服务未连接，暂时无法使用 AI 条件解析。");
+      }
+      return aiParseConditions(dataService.base_url, text);
+    },
+    [dataService]
+  );
 
   useEffect(() => {
     if (strategyLoadStatus === "failed" && strategyLoadError) {
@@ -661,6 +695,9 @@ export function App() {
           stockSymbolValidation={stockSymbolValidation}
           isValidatingStockSymbols={isValidatingStockSymbols}
           onValidateStockSymbols={validateCustomStockSymbols}
+          aiReady={Boolean(aiStatus?.configured)}
+          onParseConditions={handleParseConditions}
+          optimizeBaseUrl={dataService?.base_url ?? null}
         />
         {error ? <div className="error-banner" role="alert">{error}</div> : null}
         <div className="results-trades-grid">
@@ -677,6 +714,9 @@ export function App() {
               onRun={runBacktest}
               riskAlertCount={riskAlertCount}
               onOpenRiskAlerts={() => setRiskModalOpen(true)}
+              aiBaseUrl={aiStatus?.configured ? dataService?.base_url ?? null : null}
+              strategy={strategy}
+              settings={settings}
               onAskAi={(task) => {
                 setAiTask(task);
                 setAiOpen(true);
@@ -699,6 +739,7 @@ export function App() {
         isLoading={isLoadingRiskAlerts}
         onClose={() => setRiskModalOpen(false)}
         onRefresh={refreshRiskAlerts}
+        aiBaseUrl={aiStatus?.configured ? dataService?.base_url ?? null : null}
       />
       <AiAssistantPanel
         open={aiOpen}

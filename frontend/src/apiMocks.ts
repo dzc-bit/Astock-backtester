@@ -18,6 +18,7 @@ import type {
   DailyBarsCoverageResponse,
   DataServiceHealth,
   DataServiceStatus,
+  DiagnosticsSourcesResponse,
   FetchResult,
   ImportResult,
   MarketBriefingResponse,
@@ -295,6 +296,37 @@ export function mockNewsSummary(): NewsSummaryResponse {
     highlights: ["AI 应用与算力消息热度靠前", "新能源设备出现局部修复"],
     risks: ["高位股波动加大", "行业价格压力仍在"],
     diagnostics: []
+  };
+}
+
+export function mockDiagnosticsSources(): DiagnosticsSourcesResponse {
+  return {
+    ok: true,
+    generated_at: new Date().toISOString(),
+    sources: [
+      {
+        source: "realtime",
+        ok: true,
+        status: "live",
+        snapshot_source: "browser-preview",
+        updated_at: new Date().toISOString(),
+        seconds_since_success: 12,
+        diagnostics: []
+      },
+      {
+        source: "news",
+        ok: true,
+        seconds_since_success: 45,
+        item_count: 18,
+        diagnostics: []
+      },
+      {
+        source: "finance",
+        ok: false,
+        seconds_since_success: null,
+        diagnostics: ["同花顺大盘评分读取失败：缺少浏览器脚本生成的访问凭证（演示数据）。"]
+      }
+    ]
   };
 }
 

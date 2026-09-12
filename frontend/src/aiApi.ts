@@ -4,23 +4,47 @@ import type {
   AiChatEvent,
   AiChatHandlers,
   AiChatRequest,
+  AiConditionParseResult,
   AiConfigUpdatePayload,
   AiConfigView,
   AiEventStreamEvent,
+  AiInsightOneshotResult,
+  AiInsightScene,
   AiNewsDigest,
   AiStatus
 } from "./aiTypes";
+import type { BacktestSettingsConfig, OptimizeStreamHandlers, StrategyConfig } from "./types";
 import {
   mockAiChatEvents,
   mockAiConfig,
+  mockAiConditionParse,
   mockAiEventStream,
+  mockAiInsightOneshot,
   mockAiNewsDigest,
+  mockAiOptimizeEvents,
   mockAiSaveConfig,
   mockAiStatus
 } from "./aiMocks";
 
 const AI_CHAT_STREAM_IDLE_TIMEOUT_MS = 180_000;
 const AI_EVENTS_IDLE_TIMEOUT_MS = 40_000;
+const AI_OPTIMIZE_IDLE_TIMEOUT_MS = 120_000;
+
+async function aiPostJson<T>(baseUrl: string, path: string, body: Record<string, unknown>, fallbackMessage: string): Promise<T> {
+  const response = await fetch(`${baseUrl}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  });
+  const json = await response.json();
+  if (!response.ok) {
+    throw new BackendError(
+      typeof json.code === "string" ? json.code : "request_failed",
+      typeof json.message === "string" ? json.message : fallbackMessage
+    );
+  }
+  return json as T;
+}
 
 export async function loadAiStatus(baseUrl: string): Promise<AiStatus> {
   if (!isTauriRuntime()) {
@@ -84,6 +108,89 @@ export async function loadAiNewsDigest(baseUrl: string): Promise<AiNewsDigest> {
     throw new BackendError(typeof json.code === "string" ? json.code : "request_failed", "AI 资讯聚合读取失败");
   }
   return json as AiNewsDigest;
+}
+
+export async function aiParseConditions(baseUrl: string, text: string): Promise<AiConditionParseResult> {
+  if (!isTauriRuntime()) {
+    return mockAiConditionParse(text);
+  }
+  return aiPostJson<AiConditionParseResult>(baseUrl, "/ai/conditions/parse", { text }, "AI 条件解析失败");
+}
+
+export async function aiInsightOneshot(
+  baseUrl: string,
+  scene: AiInsightScene,
+  context: Record<string, unknown>
+): Promise<string> {
+  if (!isTauriRuntime()) {
+    return mockAiInsightOneshot(scene);
+  }
+  const result = await aiPostJson<AiInsightOneshotResult>(baseUrl, "/ai/insight/oneshot", { scene, context }, "AI 点评生成失败");
+  return result.text;
+}
+
+export async function runAiOptimizeStream(
+  baseUrl: string,
+  request: { strategy: StrategyConfig; settings: BacktestSettingsConfig; grid: Record<string, number[]> },
+  handlers: OptimizeStreamHandlers = {},
+  options: { signal?: AbortSignal } = {}
+): Promise<void> {
+  if (!isTauriRuntime()) {
+    for (const event of mockAiOptimizeEvents(request)) {
+      dispatchOptimizeEvent(event, handlers);
+    }
+    return;
+  }
+  await consumeNdjsonStream(
+    `${baseUrl}/ai/optimize`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/x-ndjson" },
+      body: JSON.stringify(request)
+    },
+    options,
+    AI_OPTIMIZE_IDLE_TIMEOUT_MS,
+    (line) => {
+      if (!line.trim()) {
+        return;
+      }
+      const event = JSON.parse(line) as Record<string, unknown> & { type: string };
+      if (event.type === "combination") {
+        handlers.onCombination?.(event as never);
+      } else if (event.type === "progress") {
+        handlers.onProgress?.(event as never);
+      } else if (event.type === "phase") {
+        handlers.onPhase?.(String(event.phase ?? ""));
+      } else if (event.type === "result") {
+        handlers.onResult?.(event as never);
+      } else if (event.type === "error") {
+        throw new BackendError(
+          typeof event.code === "string" ? event.code : "request_failed",
+          typeof event.message === "string" ? event.message : "AI 参数寻优失败"
+        );
+      }
+    }
+  );
+}
+
+function dispatchOptimizeEvent(
+  event: Record<string, unknown> & { type: string },
+  handlers: OptimizeStreamHandlers
+): void {
+  if (event.type === "combination") {
+    handlers.onCombination?.(event as never);
+  } else if (event.type === "progress") {
+    handlers.onProgress?.(event as never);
+  } else if (event.type === "phase") {
+    handlers.onPhase?.(String(event.phase ?? ""));
+  } else if (event.type === "result") {
+    handlers.onResult?.(event as never);
+  } else if (event.type === "error") {
+    throw new BackendError(
+      typeof event.code === "string" ? event.code : "request_failed",
+      typeof event.message === "string" ? event.message : "AI 参数寻优失败"
+    );
+  }
 }
 
 export async function runAiChatStream(

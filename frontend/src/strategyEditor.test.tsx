@@ -86,6 +86,15 @@ async function flushAsyncEffects(): Promise<void> {
   });
 }
 
+// 手工条件编辑器（校验→添加→模板）已收进"高级模式"折叠区，默认收起；
+// 交互前先展开，语义与折叠前保持一致。
+async function openAdvancedMode(user: ReturnType<typeof userEvent.setup>): Promise<void> {
+  const toggle = screen.getByRole("button", { name: /高级模式/ });
+  if (toggle.getAttribute("aria-expanded") === "false") {
+    await user.click(toggle);
+  }
+}
+
 describe("A 股回测工作台界面", () => {
   beforeEach(() => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
@@ -401,7 +410,10 @@ describe("A 股回测工作台界面", () => {
   });
 
   it("renders the Chinese workstation areas", async () => {
+    const user = userEvent.setup();
     render(<App />);
+
+    await openAdvancedMode(user);
 
     expect(screen.getByRole("heading", { name: "A股策略回测工作台" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "检查更新" })).toBeInTheDocument();
@@ -799,7 +811,10 @@ describe("A 股回测工作台界面", () => {
   });
 
   it("exposes common A-share strategy conditions in Chinese", async () => {
+    const user = userEvent.setup();
     render(<App />);
+
+    await openAdvancedMode(user);
 
     expect(screen.getAllByText("流通市值区间").length).toBeGreaterThan(0);
     expect(screen.getAllByText("近N日主力净流入").length).toBeGreaterThan(0);
@@ -816,6 +831,7 @@ describe("A 股回测工作台界面", () => {
     render(<App />);
 
     await screen.findByText("日线行情");
+    await openAdvancedMode(user);
     await user.clear(screen.getByLabelText("新增条件表达式"));
     await user.type(screen.getByLabelText("新增条件表达式"), "流通市值50亿到300亿");
     await user.click(screen.getByRole("button", { name: "校验条件" }));
@@ -874,6 +890,7 @@ describe("A 股回测工作台界面", () => {
     render(<App />);
 
     await screen.findByText("日线行情");
+    await openAdvancedMode(user);
     await user.clear(screen.getByLabelText("新增条件表达式"));
     await user.type(screen.getByLabelText("新增条件表达式"), "流通市值50亿到300亿");
     await user.click(screen.getByRole("button", { name: "校验条件" }));
@@ -891,6 +908,7 @@ describe("A 股回测工作台界面", () => {
     render(<App />);
 
     await screen.findByText("日线行情");
+    await openAdvancedMode(user);
     const entryRules = screen.getByRole("heading", { name: "入场规则" }).closest(".entry-rules-panel");
     expect(entryRules).not.toBeNull();
     expect(entryRules).toHaveTextContent("入场条件模板");
@@ -908,6 +926,7 @@ describe("A 股回测工作台界面", () => {
     render(<App />);
 
     await screen.findByText("日线行情");
+    await openAdvancedMode(user);
     const exitRules = screen.getByRole("heading", { name: "离场规则" }).closest(".exit-rules-panel");
     expect(exitRules).not.toBeNull();
     expect(exitRules).toHaveTextContent("离场条件模板");
@@ -937,6 +956,7 @@ describe("A 股回测工作台界面", () => {
     render(<App />);
 
     await screen.findByText("日线行情");
+    await openAdvancedMode(user);
     await user.click(screen.getByRole("button", { name: "套用数据中心日期" }));
     await user.selectOptions(screen.getByLabelText("股票池"), "custom");
     await user.type(screen.getByLabelText("自选代码"), "600519,000001");
@@ -983,6 +1003,7 @@ describe("A 股回测工作台界面", () => {
     render(<App />);
 
     await screen.findByText("日线行情");
+    await openAdvancedMode(user);
     await user.clear(screen.getByLabelText("新增条件表达式"));
     await user.type(screen.getByLabelText("新增条件表达式"), "随便乱写条件");
     await user.click(screen.getByRole("button", { name: "校验条件" }));
@@ -992,9 +1013,11 @@ describe("A 股回测工作台界面", () => {
   });
 
   it("uses expression-only strategy conditions without parameter selectors", async () => {
+    const user = userEvent.setup();
     render(<App />);
 
     await screen.findByText("日线行情");
+    await openAdvancedMode(user);
 
     expect(screen.getByLabelText("新增条件表达式")).toBeInTheDocument();
     expect(screen.queryByLabelText("新增条件")).not.toBeInTheDocument();
@@ -1483,6 +1506,7 @@ describe("A 股回测工作台界面", () => {
     render(<App />);
 
     await screen.findByText("日线行情");
+    await openAdvancedMode(user);
     expect(screen.getByRole("heading", { name: "离场规则" })).toBeInTheDocument();
     expect(screen.getByText(/固定持仓 3 天/)).toBeInTheDocument();
     await user.clear(screen.getByLabelText("新增离场条件表达式"));
@@ -1520,6 +1544,7 @@ describe("A 股回测工作台界面", () => {
     render(<App />);
 
     await screen.findByText("日线行情");
+    await openAdvancedMode(user);
     await user.clear(screen.getByLabelText("新增条件表达式"));
     await user.type(screen.getByLabelText("新增条件表达式"), "收盘价站上20日均线");
     await user.click(screen.getByRole("button", { name: "校验条件" }));
@@ -1565,6 +1590,7 @@ describe("A 股回测工作台界面", () => {
     render(<App />);
 
     await screen.findByText("日线行情");
+    await openAdvancedMode(user);
     await user.clear(screen.getByLabelText("新增条件表达式"));
     await user.type(screen.getByLabelText("新增条件表达式"), "收盘价站上20日均线");
     await user.click(screen.getByRole("button", { name: "校验条件" }));
@@ -1673,6 +1699,7 @@ describe("A 股回测工作台界面", () => {
     render(<App />);
 
     await screen.findByText("日线行情");
+    await openAdvancedMode(user);
     await user.clear(screen.getByLabelText("新增离场条件表达式"));
     await user.type(screen.getByLabelText("新增离场条件表达式"), "突破20日最低");
     await user.click(screen.getByRole("button", { name: "校验离场条件" }));
@@ -1775,6 +1802,7 @@ describe("A 股回测工作台界面", () => {
     render(<App />);
 
     await screen.findByText("日线行情");
+    await openAdvancedMode(user);
     await user.clear(screen.getByLabelText("新增离场条件表达式"));
     await user.type(screen.getByLabelText("新增离场条件表达式"), "收盘价跌破3日均线");
     await user.click(screen.getByRole("button", { name: "校验离场条件" }));
@@ -1817,6 +1845,7 @@ describe("A 股回测工作台界面", () => {
     render(<App />);
 
     await screen.findByText("日线行情");
+    await openAdvancedMode(user);
     await user.clear(screen.getByLabelText("新增离场条件表达式"));
     await user.type(screen.getByLabelText("新增离场条件表达式"), "MACD死叉");
     await user.click(screen.getByRole("button", { name: "校验离场条件" }));
@@ -1833,9 +1862,11 @@ describe("A 股回测工作台界面", () => {
   });
 
   it("shows exit rules as readable sell rules without backend parser fields", async () => {
+    const user = userEvent.setup();
     render(<App />);
 
     await screen.findByText("日线行情");
+    await openAdvancedMode(user);
 
     const exitRules = screen.getByRole("heading", { name: "离场规则" }).closest(".exit-rules-panel");
     expect(exitRules).not.toBeNull();
@@ -1847,7 +1878,10 @@ describe("A 股回测工作台界面", () => {
   });
 
   it("renders the entry rule editor inside the same panel layout as exit rules", async () => {
+    const user = userEvent.setup();
     render(<App />);
+
+    await openAdvancedMode(user);
 
     const entryHeading = await screen.findByRole("heading", { name: "入场规则" });
 
@@ -1884,6 +1918,7 @@ describe("A 股回测工作台界面", () => {
     await user.click(screen.getByRole("button", { name: "运行历史回测" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent("未找到已缓存的日线行情");
+    await openAdvancedMode(user);
     expect(screen.getByRole("heading", { name: "写入条件" })).toBeInTheDocument();
   });
 

@@ -6,6 +6,7 @@ import type {
   DataServiceHealth,
   DataServiceStatus,
   DailyBarsCoverageResponse,
+  DiagnosticsSourcesResponse,
   FetchResult,
   ImportResult,
   ConditionValidationResult,
@@ -31,6 +32,7 @@ import {
   mockDataServiceHealth,
   mockDataServiceLogs,
   mockDataServiceStatus,
+  mockDiagnosticsSources,
   mockFetchCapitalFlowResult,
   mockFetchDailyBarsResult,
   mockImportDailyBarsResult,
@@ -403,6 +405,13 @@ export async function loadRiskAlerts(baseUrl: string): Promise<RiskAlertsRespons
     return mockRiskAlerts();
   }
   return serviceFetch<RiskAlertsResponse>(baseUrl, "/risk/alerts");
+}
+
+export async function loadDiagnosticsSources(baseUrl: string): Promise<DiagnosticsSourcesResponse> {
+  if (!isTauriRuntime()) {
+    return mockDiagnosticsSources();
+  }
+  return serviceFetch<DiagnosticsSourcesResponse>(baseUrl, "/diagnostics/sources");
 }
 
 export async function validateConditionExpression(

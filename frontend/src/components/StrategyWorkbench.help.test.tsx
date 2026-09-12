@@ -1,9 +1,11 @@
+import userEvent from "@testing-library/user-event";
 import { render, screen } from "@testing-library/react";
 import { expect, it, vi } from "vitest";
 import { defaultSettings, defaultStrategy } from "../strategyDefaults";
 import { StrategyWorkbench } from "./StrategyWorkbench";
 
-it("shows structured entry and exit writing templates for condition help", () => {
+it("shows structured entry and exit writing templates for condition help", async () => {
+  const user = userEvent.setup();
   render(
     <StrategyWorkbench
       coverage={[]}
@@ -28,6 +30,9 @@ it("shows structured entry and exit writing templates for condition help", () =>
       onDeleteSavedStrategy={() => {}}
     />
   );
+
+  // 手工编辑器默认收起：先展开高级模式，再断言模板仍在其中。
+  await user.click(screen.getByRole("button", { name: /高级模式/ }));
 
   expect(screen.getByRole("heading", { name: "可写入能力" })).toBeInTheDocument();
   expect(screen.getByRole("heading", { name: "入场条件模板" })).toBeInTheDocument();

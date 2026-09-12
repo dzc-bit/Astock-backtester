@@ -35,6 +35,9 @@ export type DailyBarsCoverageItem = {
   missing_trade_dates: string[];
   missing_capital_flow_dates: string[];
   missing_market_cap_dates: string[];
+  listing_date?: string | null;
+  delisted_date?: string | null;
+  lifecycle_status?: "unknown" | "listed" | "delisted";
 };
 
 export type DailyBarsCoverageResponse = {
@@ -452,4 +455,55 @@ export type SavedStrategyPreset = {
   name: string;
   saved_at: string;
   strategy: StrategyConfig;
+};
+
+export type DataSourceHealth = {
+  source: string;
+  ok: boolean;
+  status?: string;
+  snapshot_source?: string;
+  updated_at?: string | null;
+  seconds_since_success?: number | null;
+  item_count?: number;
+  diagnostics: string[];
+};
+
+export type DiagnosticsSourcesResponse = {
+  ok: boolean;
+  generated_at?: string;
+  sources: DataSourceHealth[];
+};
+
+export type OptimizeGrid = Partial<Record<OptimizeGridKey, number[]>>;
+
+export type OptimizeGridKey =
+  | "fixed_holding_days"
+  | "max_positions"
+  | "max_daily_buys"
+  | "position_size_pct"
+  | "take_profit_pct"
+  | "stop_loss_pct"
+  | "min_listing_days";
+
+export type OptimizeCombination = {
+  index: number;
+  params: Partial<Record<OptimizeGridKey, number>>;
+  metrics: BacktestMetrics;
+};
+
+export type OptimizeSummary = {
+  combinations: OptimizeCombination[];
+  best: OptimizeCombination | null;
+  failures: Array<{ params: Record<string, number>; error: string }>;
+  total: number;
+  evaluated: number;
+  insight?: string | null;
+  insight_error?: string | null;
+};
+
+export type OptimizeStreamHandlers = {
+  onPhase?: (phase: string) => void;
+  onProgress?: (event: { completed: number; total: number }) => void;
+  onCombination?: (combination: OptimizeCombination) => void;
+  onResult?: (summary: OptimizeSummary) => void;
 };

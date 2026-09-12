@@ -3,6 +3,9 @@ import { useEffect, useState } from "react";
 import { isBuiltInStrategyPreset } from "../savedStrategies";
 import { conditionLibrary, defaultStrategy } from "../strategyDefaults";
 import type {
+  AiConditionParseResult
+} from "../aiTypes";
+import type {
   BacktestSettingsConfig,
   ConditionNode,
   ConditionValidationResult,
@@ -13,6 +16,7 @@ import type {
   StrategyConfig
 } from "../types";
 import { RecommendedStrategies } from "./RecommendedStrategies";
+import { StrategyOptimizer } from "./StrategyOptimizer";
 
 type Props = {
   coverage: DatasetCoverage[];
@@ -39,6 +43,9 @@ type Props = {
   stockSymbolValidation?: StockSymbolValidationResult | null;
   isValidatingStockSymbols?: boolean;
   onValidateStockSymbols?: (symbols: string[]) => void;
+  aiReady?: boolean;
+  onParseConditions?: (text: string) => Promise<AiConditionParseResult>;
+  optimizeBaseUrl?: string | null;
 };
 
 type ParamType = "currency" | "days" | "number" | "percent";
@@ -330,7 +337,10 @@ export function StrategyWorkbench({
   onSettingsDraftErrorsChange,
   stockSymbolValidation = null,
   isValidatingStockSymbols = false,
-  onValidateStockSymbols
+  onValidateStockSymbols,
+  aiReady = false,
+  onParseConditions,
+  optimizeBaseUrl = null
 }: Props) {
   const dateRange = settingDateRange(coverage);
   const examples = validationExamples.length > 0 ? validationExamples : defaultExamples;
@@ -343,6 +353,13 @@ export function StrategyWorkbench({
   const [entryAddMessage, setEntryAddMessage] = useState<string | null>(null);
   const [exitAddMessage, setExitAddMessage] = useState<string | null>(null);
   const [workbenchTab, setWorkbenchTab] = useState<"basics" | "ai">("basics");
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [nlConditionText, setNlConditionText] = useState("");
+  const [isParsingConditions, setIsParsingConditions] = useState(false);
+  const [conditionParse, setConditionParse] = useState<AiConditionParseResult | null>(null);
+  const [conditionParseError, setConditionParseError] = useState<string | null>(null);
+  const [conditionParseSelection, setConditionParseSelection] = useState<Record<string, boolean>>({});
+  const [conditionParseMessage, setConditionParseMessage] = useState<string | null>(null);
   const group = firstGroup(strategy);
 
   useEffect(() => {
@@ -491,6 +508,83 @@ export function StrategyWorkbench({
     onStrategyChange(nextStrategy);
   };
 
+  const toggleParsedCondition = (id: string, checked: boolean) => {
+    setConditionParseSelection((current) => ({ ...current, [id]: checked }));
+  };
+
+  const handleParseConditions = async () => {
+    if (!onParseConditions || !nlConditionText.trim() || isParsingConditions || disabled) {
+      return;
+    }
+    setIsParsingConditions(true);
+    setConditionParseError(null);
+    setConditionParseMessage(null);
+    try {
+      const result = await onParseConditions(nlConditionText);
+      setConditionParse(result);
+      const selection: Record<string, boolean> = {};
+      for (const node of [...result.entry, ...result.exit]) {
+        selection[node.id] = true;
+      }
+      setConditionParseSelection(selection);
+    } catch (caught) {
+      setConditionParse(null);
+      setConditionParseError(
+        caught instanceof Error ? caught.message : "AI 解析失败，请展开高级模式手工写入条件。"
+      );
+    } finally {
+      setIsParsingConditions(false);
+    }
+  };
+
+  const confirmWriteParsedConditions = () => {
+    if (!conditionParse) {
+      return;
+    }
+    const chosenEntry = conditionParse.entry.filter((node) => conditionParseSelection[node.id] !== false);
+    const chosenExit = conditionParse.exit.filter((node) => conditionParseSelection[node.id] !== false);
+    const existingEntrySignatures = new Set(group.conditions.map(conditionSignature));
+    const existingExitSignatures = new Set(strategy.exit_rules.map(conditionSignature));
+    const entryAdditions: ConditionNode[] = [];
+    for (const node of chosenEntry) {
+      if (existingEntrySignatures.has(conditionSignature(node))) {
+        continue;
+      }
+      existingEntrySignatures.add(conditionSignature(node));
+      entryAdditions.push(cloneCondition(node, group.conditions.length + entryAdditions.length));
+    }
+    const exitAdditions: ConditionNode[] = [];
+    for (const node of chosenExit) {
+      if (existingExitSignatures.has(conditionSignature(node))) {
+        continue;
+      }
+      existingExitSignatures.add(conditionSignature(node));
+      exitAdditions.push(cloneCondition(node, strategy.exit_rules.length + exitAdditions.length));
+    }
+    if (entryAdditions.length === 0 && exitAdditions.length === 0) {
+      setConditionParseMessage("所选条件已在当前策略中，未重复写入。");
+      return;
+    }
+    // 单次提交同时更新入场与离场，避免两次 onStrategyChange 互相基于旧值覆盖。
+    onStrategyChange({
+      ...strategy,
+      entry_groups:
+        entryAdditions.length > 0
+          ? [
+              {
+                ...group,
+                conditions: [...group.conditions, ...entryAdditions]
+              },
+              ...strategy.entry_groups.slice(1)
+            ]
+          : strategy.entry_groups,
+      exit_rules: exitAdditions.length > 0 ? [...strategy.exit_rules, ...exitAdditions] : strategy.exit_rules
+    });
+    setConditionParseMessage(
+      `已写入 ${entryAdditions.length} 条入场 / ${exitAdditions.length} 条离场条件，可在下方确认或展开高级模式调整。`
+    );
+  };
+
   return (
     <section className="surface strategy-workbench">
       <fieldset className="workbench-fieldset" disabled={disabled}>
@@ -630,6 +724,111 @@ export function StrategyWorkbench({
 
       {workbenchTab === "basics" ? (
       <>
+      <div className="ai-condition-panel" aria-label="AI 条件理解">
+        <div className="ai-condition-head">
+          <h3>
+            <Sparkles size={15} aria-hidden="true" />
+            AI 条件理解
+          </h3>
+          <span className={`status-pill compact ${aiReady ? "" : "ai-off"}`}>
+            {aiReady ? "AI 已就绪" : "AI 未配置"}
+          </span>
+        </div>
+        <label>
+          用一句话描述你的买卖条件
+          <textarea
+            aria-label="自然语言条件"
+            rows={2}
+            value={nlConditionText}
+            disabled={disabled || !aiReady}
+            onChange={(event) => setNlConditionText(event.target.value)}
+            placeholder="例：近5天放量上涨、主力净流入为正，破20日线卖"
+          />
+        </label>
+        <div className="inline-actions">
+          <button
+            className="primary-button"
+            type="button"
+            aria-label="AI 理解并写入"
+            disabled={disabled || !aiReady || !nlConditionText.trim() || isParsingConditions}
+            onClick={handleParseConditions}
+          >
+            {isParsingConditions ? "AI 解析中…" : "AI 理解并写入"}
+          </button>
+          <span className="muted-code">
+            {aiReady
+              ? "支持口语描述，解析结果可勾选后一键写入。"
+              : "AI 未配置时不可用；可展开高级模式手工写入，不受影响。"}
+          </span>
+        </div>
+        {conditionParseError ? (
+          <div className="condition-validation bad" role="alert">
+            {conditionParseError}
+          </div>
+        ) : null}
+        {conditionParse ? (
+          <div className="condition-parse-result">
+            {conditionParse.entry.length > 0 ? (
+              <div className="parse-group" aria-label="AI 解析的入场条件">
+                <strong>入场条件（勾选后写入）</strong>
+                {conditionParse.entry.map((node) => (
+                  <label key={node.id} className="parse-item">
+                    <input
+                      type="checkbox"
+                      checked={conditionParseSelection[node.id] !== false}
+                      onChange={(event) => toggleParsedCondition(node.id, event.target.checked)}
+                    />
+                    <span>{node.expression}</span>
+                    <small className="parse-badge">入场</small>
+                  </label>
+                ))}
+              </div>
+            ) : null}
+            {conditionParse.exit.length > 0 ? (
+              <div className="parse-group" aria-label="AI 解析的离场条件">
+                <strong>离场条件（勾选后写入）</strong>
+                {conditionParse.exit.map((node) => (
+                  <label key={node.id} className="parse-item">
+                    <input
+                      type="checkbox"
+                      checked={conditionParseSelection[node.id] !== false}
+                      onChange={(event) => toggleParsedCondition(node.id, event.target.checked)}
+                    />
+                    <span>{node.expression}</span>
+                    <small className="parse-badge">离场</small>
+                  </label>
+                ))}
+              </div>
+            ) : null}
+            {conditionParse.approximations.length > 0 ? (
+              <ul className="parse-approximations" aria-label="近似说明">
+                {conditionParse.approximations.map((note) => (
+                  <li key={note}>{note}</li>
+                ))}
+              </ul>
+            ) : null}
+            {conditionParse.dropped.length > 0 ? (
+              <div className="condition-validation bad">
+                未识别：{conditionParse.dropped.map((item) => `『${item.expression}』`).join("、")}
+              </div>
+            ) : null}
+            <div className="inline-actions">
+              <button
+                className="primary-button"
+                type="button"
+                aria-label="确认写入策略"
+                disabled={disabled}
+                onClick={confirmWriteParsedConditions}
+              >
+                <Plus size={16} aria-hidden="true" />
+                写入策略
+              </button>
+              {conditionParseMessage ? <span className="muted-code">{conditionParseMessage}</span> : null}
+            </div>
+          </div>
+        ) : null}
+      </div>
+
       <div className="workbench-grid">
         <div className="config-panel">
           <h3>回测范围</h3>
@@ -878,6 +1077,16 @@ export function StrategyWorkbench({
         </div>
       </div>
 
+      <div className="advanced-conditions">
+        <button
+          className="secondary-button advanced-toggle"
+          type="button"
+          aria-expanded={advancedOpen}
+          onClick={() => setAdvancedOpen((open) => !open)}
+        >
+          {advancedOpen ? "收起高级模式（手工编辑条件与模板）" : "高级模式：手工编辑条件与模板"}
+        </button>
+        {advancedOpen ? (
       <div className="strategy-grid">
         <div className="condition-library">
           <h3>写入条件</h3>
@@ -1116,6 +1325,10 @@ export function StrategyWorkbench({
           </div>
       </div>
       </div>
+        ) : null}
+      </div>
+
+      <StrategyOptimizer strategy={strategy} settings={settings} baseUrl={optimizeBaseUrl} disabled={disabled} />
       </>
       ) : null}
       </fieldset>

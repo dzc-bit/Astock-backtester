@@ -1,4 +1,4 @@
-import type { StrategyConfig } from "./types";
+import type { StrategyConfig, ConditionNode } from "./types";
 
 export type AiToolStep = {
   id: string;
@@ -186,6 +186,22 @@ export type AiEventStreamEvent = {
 export type AiTask = {
   message: string;
   context?: AiChatContext | null;
+};
+
+export type AiConditionParseResult = {
+  entry: ConditionNode[];
+  exit: ConditionNode[];
+  approximations: string[];
+  dropped: Array<{ kind: string; expression: string; error: string; examples?: string }>;
+};
+
+export type AiInsightScene = "results_overview" | "data_coverage" | "risk_alerts";
+
+export type AiInsightOneshotResult = {
+  ok: boolean;
+  scene: AiInsightScene;
+  text: string;
+  generated_at: string;
 };
 
 export function translateAiError(error: unknown): string {

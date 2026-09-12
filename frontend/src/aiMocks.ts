@@ -1,13 +1,15 @@
 import type {
   AiChatEvent,
   AiChatRequest,
+  AiConditionParseResult,
   AiConfigUpdatePayload,
   AiConfigView,
   AiEventStreamEvent,
+  AiInsightScene,
   AiNewsDigest,
   AiStatus
 } from "./aiTypes";
-import type { StrategyConfig } from "./types";
+import type { BacktestSettingsConfig, OptimizeCombination, StrategyConfig } from "./types";
 
 export function mockAiStatus(): AiStatus {
   return {
@@ -161,6 +163,112 @@ export function mockAiChatEvents(request: AiChatRequest): AiChatEvent[] {
 }
 
 let mockEventStreamEmitted = false;
+
+export function mockAiConditionParse(text: string): AiConditionParseResult {
+  const trimmed = text.trim() || "近5天放量上涨，破20日线卖";
+  return {
+    entry: [
+      {
+        id: `ai-parse-entry-0-${trimmed.length}`,
+        condition_id: "volume_ratio_between",
+        enabled: true,
+        params: { window: 2, min: 1.2, max: 2.5 },
+        data_lag_days: 0,
+        expression: "量比2日介于1.2到2.5"
+      },
+      {
+        id: "ai-parse-entry-1",
+        condition_id: "capital_flow_n_day_sum_at_least",
+        enabled: true,
+        params: { window: 5, min: 3_000_000 },
+        data_lag_days: 0,
+        expression: "近5日主力净流入大于300万"
+      }
+    ],
+    exit: [
+      {
+        id: "ai-parse-exit-0",
+        condition_id: "close_below_ma",
+        enabled: true,
+        params: { window: 20 },
+        data_lag_days: 0,
+        expression: "收盘价跌破20日均线"
+      }
+    ],
+    approximations: [`『${trimmed.slice(0, 8)}…』→量比2日介于1.2到2.5`],
+    dropped: []
+  };
+}
+
+const ONESHOT_MOCK_TEXTS: Record<AiInsightScene, string> = {
+  results_overview: "本次回测收益平稳但交易次数偏少，胜率的优势不足以支撑加仓，建议先扩大日期范围验证稳定性。（演示数据）",
+  data_coverage: "缺失集中在资金流字段，日线覆盖完整；新上市股票的上市前区间不再计为缺失，点击“补齐资金流”即可修复。（演示数据）",
+  risk_alerts: "风险名单以 ST 类为主，集中在小市值方向；持仓若命中名单应以减仓优先，避免退市整理期流动性风险。（演示数据）"
+};
+
+export function mockAiInsightOneshot(scene: AiInsightScene): string {
+  return ONESHOT_MOCK_TEXTS[scene];
+}
+
+export function mockAiOptimizeEvents(request: {
+  strategy: StrategyConfig;
+  settings: BacktestSettingsConfig;
+  grid: Record<string, number[]>;
+}): Array<Record<string, unknown> & { type: string }> {
+  const keys = Object.keys(request.grid);
+  const valuesList = keys.map((key) => request.grid[key] ?? []);
+  const combinations: OptimizeCombination[] = [];
+  let index = 0;
+  const events: Array<Record<string, unknown> & { type: string }> = [
+    { type: "phase", phase: "读取本地数据" }
+  ];
+  const product = valuesList.reduce((acc, values) => {
+    const next: number[][] = [];
+    for (const prefix of (acc.length ? acc : [[]]) as number[][]) {
+      for (const value of values) {
+        next.push([...prefix, value]);
+      }
+    }
+    return next;
+  }, [] as number[][]);
+  for (const values of product) {
+    index += 1;
+    const params: Record<string, number> = {};
+    keys.forEach((key, position) => {
+      params[key] = values[position];
+    });
+    const metrics = {
+      total_return_pct: 0.05 + index * 0.012,
+      annualized_return_pct: 0.12 + index * 0.01,
+      max_drawdown_pct: -0.03 - (index % 3) * 0.008,
+      win_rate_pct: 0.48 + index * 0.02,
+      trade_count: 6 + (index % 4),
+      average_trade_return_pct: 0.004 + index * 0.001,
+      average_position_pct: 0.35,
+      max_position_pct: 0.5
+    };
+    const combination: OptimizeCombination = { index, params, metrics };
+    combinations.push(combination);
+    events.push({ type: "combination", ...combination });
+    events.push({ type: "progress", completed: index, total: product.length });
+  }
+  const best = [...combinations].sort(
+    (left, right) => right.metrics.total_return_pct - left.metrics.total_return_pct
+  )[0];
+  events.push({
+    type: "result",
+    result: {
+      combinations,
+      best: best ?? null,
+      failures: [],
+      total: product.length,
+      evaluated: combinations.length,
+      insight: "收益对持仓天数最敏感：持有 3 天的组合整体占优，但组合数量少，注意过拟合。（演示数据）",
+      insight_error: null
+    }
+  });
+  return events;
+}
 
 export function mockAiEventStream(): AiEventStreamEvent[] {
   // 仅含 insight 且只发一次：data_fresh 会触发页面模块即时刷新，破坏预览与测试

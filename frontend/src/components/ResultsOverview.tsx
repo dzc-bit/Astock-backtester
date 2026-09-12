@@ -1,7 +1,9 @@
-import { Play, Sparkles } from "lucide-react";
+import { Download, Play, Sparkles } from "lucide-react";
 import { Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import type { AiTask } from "../aiTypes";
-import type { BacktestResult, DailyStrategyMatches } from "../types";
+import { downloadBacktestReport } from "../reportHtml";
+import type { BacktestResult, BacktestSettingsConfig, DailyStrategyMatches, StrategyConfig } from "../types";
+import { AiOneShotLine } from "./AiOneShotLine";
 
 type Props = {
   result: BacktestResult | null;
@@ -12,6 +14,9 @@ type Props = {
   riskAlertCount?: number;
   onOpenRiskAlerts: () => void;
   onAskAi?: (task: AiTask) => void;
+  aiBaseUrl?: string | null;
+  strategy?: StrategyConfig;
+  settings?: BacktestSettingsConfig;
 };
 
 function buildBacktestContext(result: BacktestResult): Record<string, unknown> {
@@ -122,7 +127,10 @@ export function ResultsOverview({
   onRun,
   riskAlertCount = 0,
   onOpenRiskAlerts,
-  onAskAi
+  onAskAi,
+  aiBaseUrl = null,
+  strategy,
+  settings
 }: Props) {
   const issueCount = result?.preflight_issues.length ?? 0;
   const chartData = normalizedEquityCurve(result);
@@ -154,6 +162,19 @@ export function ResultsOverview({
             >
               <Sparkles size={15} aria-hidden="true" />
               AI 解读
+            </button>
+          ) : null}
+          {result && !isRunning && strategy && settings ? (
+            <button
+              className="secondary-button"
+              type="button"
+              aria-label="导出回测报告"
+              onClick={() => {
+                downloadBacktestReport({ result, strategy, settings });
+              }}
+            >
+              <Download size={15} aria-hidden="true" />
+              导出报告
             </button>
           ) : null}
           <button className="primary-button" type="button" onClick={onRun} disabled={isRunning}>
@@ -194,6 +215,15 @@ export function ResultsOverview({
             <span>平均仓位 {(result.metrics.average_position_pct * 100).toFixed(2)}%</span>
             <span>最大仓位 {(result.metrics.max_position_pct * 100).toFixed(2)}%</span>
           </div>
+          {aiBaseUrl ? (
+            <AiOneShotLine
+              key={`${result.metrics.total_return_pct}-${result.metrics.trade_count}-${result.equity_curve.at(-1)?.trade_date ?? ""}`}
+              baseUrl={aiBaseUrl}
+              scene="results_overview"
+              context={buildBacktestContext(result)}
+              label="AI 回测短评"
+            />
+          ) : null}
           <div className="risk-strip">
             <strong>风险提示</strong>
             <span>
