@@ -156,13 +156,17 @@ export async function runAiOptimizeStream(
       }
       const event = JSON.parse(line) as Record<string, unknown> & { type: string };
       if (event.type === "combination") {
-        handlers.onCombination?.(event as never);
+        const { type: _eventType, ...combination } = event;
+        handlers.onCombination?.(combination as never);
       } else if (event.type === "progress") {
-        handlers.onProgress?.(event as never);
+        handlers.onProgress?.({
+          completed: Number(event.completed ?? 0),
+          total: Number(event.total ?? 0)
+        });
       } else if (event.type === "phase") {
         handlers.onPhase?.(String(event.phase ?? ""));
       } else if (event.type === "result") {
-        handlers.onResult?.(event as never);
+        handlers.onResult?.((event.result ?? {}) as never);
       } else if (event.type === "error") {
         throw new BackendError(
           typeof event.code === "string" ? event.code : "request_failed",
@@ -178,13 +182,17 @@ function dispatchOptimizeEvent(
   handlers: OptimizeStreamHandlers
 ): void {
   if (event.type === "combination") {
-    handlers.onCombination?.(event as never);
+    const { type: _eventType, ...combination } = event;
+    handlers.onCombination?.(combination as never);
   } else if (event.type === "progress") {
-    handlers.onProgress?.(event as never);
+    handlers.onProgress?.({
+      completed: Number(event.completed ?? 0),
+      total: Number(event.total ?? 0)
+    });
   } else if (event.type === "phase") {
     handlers.onPhase?.(String(event.phase ?? ""));
   } else if (event.type === "result") {
-    handlers.onResult?.(event as never);
+    handlers.onResult?.((event.result ?? {}) as never);
   } else if (event.type === "error") {
     throw new BackendError(
       typeof event.code === "string" ? event.code : "request_failed",

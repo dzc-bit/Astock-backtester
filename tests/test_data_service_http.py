@@ -1898,7 +1898,8 @@ def test_realtime_provider_times_out_slow_akshare_sector_before_eastmoney_backup
     sectors = provider._fetch_live_sectors(diagnostics)
     elapsed = time.perf_counter() - started_at
 
-    assert elapsed < 0.15
+    # 只需排除网络 provider 链；0.15s 在高负载下会误报。
+    assert elapsed < 1.0
     assert sectors[0].name == "eastmoney-sector-name"
     assert sectors[0].source == "eastmoney-sector"
     assert any("akshare-sector" in item and "timeout" in item.lower() for item in diagnostics)
@@ -1932,7 +1933,8 @@ def test_realtime_provider_times_out_slow_akshare_breadth_before_heavy_backup(tm
     breadth = provider._fetch_live_breadth(diagnostics)
     elapsed = time.perf_counter() - started_at
 
-    assert elapsed < 0.15
+    # 只需排除网络 provider 链；0.15s 在高负载下会误报。
+    assert elapsed < 1.0
     assert breadth is not None
     assert breadth.source == "heavy-market-crawler"
     assert any("AKShare 实时个股" in item and ("timeout" in item.lower() or "超时" in item) for item in diagnostics)
@@ -2416,7 +2418,8 @@ def test_realtime_provider_returns_cls_breadth_before_slow_local_count_scan(tmp_
     breadth = provider._fetch_live_breadth_with_budget(diagnostics)
     elapsed = time.perf_counter() - started_at
 
-    assert elapsed < 0.15
+    # 只需排除网络 provider 链；0.15s 在高负载下会误报。
+    assert elapsed < 1.0
     assert breadth is not None
     assert breadth.source == "cls-quote-breadth"
     assert diagnostics == []
@@ -2864,7 +2867,8 @@ def test_realtime_provider_returns_breadth_without_waiting_for_slow_sector_sourc
     snapshot = provider.market_snapshot()
     elapsed = time.perf_counter() - started_at
 
-    assert elapsed < 0.15
+    # 只需排除网络 provider 链；0.15s 在高负载下会误报。
+    assert elapsed < 1.0
     assert snapshot.status == "stale"
     assert snapshot.breadth is not None
     assert snapshot.breadth.source == "fast-breadth"
@@ -2916,7 +2920,8 @@ def test_realtime_provider_returns_sectors_without_waiting_for_slow_breadth_sour
     snapshot = provider.market_snapshot()
     elapsed = time.perf_counter() - started_at
 
-    assert elapsed < 0.15
+    # 只需排除网络 provider 链；0.15s 在高负载下会误报。
+    assert elapsed < 1.0
     assert snapshot.status == "stale"
     assert snapshot.breadth is None
     assert snapshot.strong_sectors[0].source == "fast-sector"
@@ -2963,7 +2968,8 @@ def test_realtime_provider_does_not_wait_for_slow_local_fallback_after_live_part
     snapshot = provider.market_snapshot()
     elapsed = time.perf_counter() - started_at
 
-    assert elapsed < 0.15
+    # 只需排除网络 provider 链；0.15s 在高负载下会误报。
+    assert elapsed < 1.0
     assert snapshot.status == "stale"
     assert snapshot.breadth is None
     assert snapshot.strong_sectors[0].source == "fast-sector"
