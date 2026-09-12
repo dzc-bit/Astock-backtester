@@ -1,0 +1,152 @@
+import { render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { AiChatHandlers, AiChatRequest, AiResultEvent } from "../aiTypes";
+import { AiAssistantPanel } from "./AiAssistantPanel";
+
+vi.mock("../aiApi", () => ({
+  loadAiStatus: vi.fn(),
+  loadAiConfig: vi.fn(),
+  saveAiConfig: vi.fn(),
+  runAiChatStream: vi.fn(),
+  openAiEventStream: vi.fn()
+}));
+
+import { loadAiStatus, runAiChatStream } from "../aiApi";
+
+const mockedLoadStatus = vi.mocked(loadAiStatus);
+const mockedRunChat = vi.mocked(runAiChatStream);
+
+const configuredStatus = {
+  configured: true,
+  base_url: "https://mock.local/v1",
+  model: "demo-model",
+  insights_enabled: true,
+  tool_names: ["a", "b"],
+  knowledge_documents: 3,
+  knowledge_chunks: 12,
+  knowledge_ready: true
+};
+
+function scriptChatStream(reply: string, resultEvent: Partial<AiResultEvent> = {}) {
+  mockedRunChat.mockImplementation(
+    (_baseUrl: string, _request: AiChatRequest, handlers: AiChatHandlers = {}) => {
+      handlers.onPhase?.("思考中");
+      handlers.onToolCall?.({ type: "tool_call", id: "t1", name: "realtime_market_snapshot", args: {} });
+      handlers.onToolResult?.({
+        type: "tool_result",
+        id: "t1",
+        name: "realtime_market_snapshot",
+        ok: true,
+        summary: "上证指数 3100",
+        duration_ms: 320
+      });
+      handlers.onToken?.(reply.slice(0, 4));
+      handlers.onToken?.(reply.slice(4));
+      handlers.onResult?.({
+        type: "result",
+        session_id: "s1",
+        display: [
+          { role: "user", content: "行情如何" },
+          {
+            role: "assistant",
+            content: reply,
+            tool_steps: [{ id: "t1", name: "realtime_market_snapshot", ok: true, summary: "上证指数 3100", duration_ms: 320 }]
+          }
+        ],
+        ...resultEvent
+      });
+      return Promise.resolve();
+    }
+  );
+}
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  mockedLoadStatus.mockResolvedValue(configuredStatus);
+});
+
+describe("AiAssistantPanel", () => {
+  it("renders nothing when closed", () => {
+    const { container } = render(
+      <AiAssistantPanel open={false} baseUrl="http://x" insights={[]} task={null} onTaskConsumed={() => undefined} onClose={() => undefined} />
+    );
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it("shows the unconfigured hint with a settings entry", async () => {
+    mockedLoadStatus.mockResolvedValue({ ...configuredStatus, configured: false });
+    render(
+      <AiAssistantPanel open baseUrl="http://x" insights={[]} task={null} onTaskConsumed={() => undefined} onClose={() => undefined} />
+    );
+    expect(await screen.findByText("AI 服务尚未配置")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "前往设置" })).toBeTruthy();
+  });
+
+  it("streams tool steps and markdown reply into the transcript", async () => {
+    const user = userEvent.setup();
+    scriptChatStream("市场偏暖，红盘占比 62%。仅供辅助观察，不构成投资建议。");
+    render(
+      <AiAssistantPanel open baseUrl="http://x" insights={[]} task={null} onTaskConsumed={() => undefined} onClose={() => undefined} />
+    );
+    const composer = await screen.findByPlaceholderText(/帮我看看 600519/);
+    await user.type(composer, "行情如何");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+
+    await waitFor(() => {
+      expect(screen.getByText(/市场偏暖，红盘占比 62%/)).toBeTruthy();
+    });
+    expect(screen.getByText(/已调用 1 个工具/)).toBeTruthy();
+    expect(mockedRunChat).toHaveBeenCalledWith(
+      "http://x",
+      expect.objectContaining({ message: "行情如何" }),
+      expect.anything(),
+      expect.objectContaining({ signal: expect.anything() })
+    );
+  });
+
+  it("offers strategy application when the result carries a strategy artifact", async () => {
+    const user = userEvent.setup();
+    const onApplyStrategy = vi.fn();
+    const onClose = vi.fn();
+    scriptChatStream("策略已生成。", {
+      strategy: {
+        name: "AI 生成策略",
+        market_filters: [],
+        entry_groups: [],
+        exit_rules: [],
+        score_threshold: null
+      }
+    });
+    render(
+      <AiAssistantPanel
+        open
+        baseUrl="http://x"
+        insights={[]}
+        task={null}
+        onTaskConsumed={() => undefined}
+        onClose={onClose}
+        onApplyStrategy={onApplyStrategy}
+      />
+    );
+    const composer = await screen.findByPlaceholderText(/帮我看看 600519/);
+    await user.type(composer, "生成策略");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+    const applyButton = await screen.findByRole("button", { name: "应用到策略工作台" });
+    await user.click(applyButton);
+    expect(onApplyStrategy).toHaveBeenCalledWith(expect.objectContaining({ name: "AI 生成策略" }));
+    expect(onClose).toHaveBeenCalled();
+  });
+
+  it("maps stream failures to a friendly error banner", async () => {
+    const user = userEvent.setup();
+    mockedRunChat.mockRejectedValue(new Error("模型服务调用失败（APIConnectionError）：boom"));
+    render(
+      <AiAssistantPanel open baseUrl="http://x" insights={[]} task={null} onTaskConsumed={() => undefined} onClose={() => undefined} />
+    );
+    const composer = await screen.findByPlaceholderText(/帮我看看 600519/);
+    await user.type(composer, "行情如何");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("模型服务调用失败");
+  });
+});

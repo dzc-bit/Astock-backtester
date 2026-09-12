@@ -1,16 +1,13 @@
 import { lazy, Suspense, useCallback, useEffect, useState } from "react";
-import { Activity, Database, Flame, Gauge, ShieldAlert } from "lucide-react";
+import { Activity, Database, Flame, Gauge, ShieldAlert, Sparkles } from "lucide-react";
+import { AiAssistantPanel } from "./components/AiAssistantPanel";
+import { useAiEventStream } from "./hooks/useAiEventStream";
+import { useMarketModules } from "./hooks/useMarketModules";
+import type { AiInsight, AiTask } from "./aiTypes";
+import "./ai-panel.css";
 import { useMarketPolling } from "./hooks/useMarketPolling";
 import {
   BackendError,
-  loadClsFinance,
-  loadMarketBriefing,
-  loadMarketNews,
-  loadNewsSummary,
-  loadRealtimeMarketSnapshot,
-  loadRealtimeMarketSnapshotStream,
-  loadRecommendedStrategies,
-  loadRiskAlerts,
   runBacktestStreamWithDataService,
   runConfiguredBacktest,
   validateConditionExpression,
@@ -35,20 +32,15 @@ import { TonghuashunBriefingPanel } from "./components/TonghuashunBriefingPanel"
 import { UpdatePanel } from "./components/UpdatePanel";
 import { initialMarketRefreshMeta } from "./marketRefresh";
 import { defaultSettings, defaultStrategy } from "./strategyDefaults";
+import { formatLocalDate, recentAShareTradingDateRangeEnding } from "./tradingCalendar";
 import type {
   BacktestResult,
   BacktestSettingsConfig,
   DataServiceStatus,
   DatasetCoverage,
   ConditionValidationResult,
-  ClsFinanceResponse,
-  MarketBriefingResponse,
   MarketRefreshMeta,
-  MarketNewsResponse,
-  NewsSummaryResponse,
   RealtimeMarketSnapshot,
-  RecommendedStrategy,
-  RiskAlertsResponse,
   SavedStrategyPreset,
   StockSymbolValidationResult,
   StrategyConfig
@@ -62,110 +54,6 @@ type PendingStrategySave = {
 const ResultsOverview = lazy(() => import("./components/ResultsOverview").then((module) => ({
   default: module.ResultsOverview
 })));
-
-const A_SHARE_HOLIDAY_RANGES: Record<number, Array<[string, string]>> = {
-  2024: [
-    ["2024-01-01", "2024-01-01"],
-    ["2024-02-09", "2024-02-17"],
-    ["2024-04-04", "2024-04-06"],
-    ["2024-05-01", "2024-05-05"],
-    ["2024-06-10", "2024-06-10"],
-    ["2024-09-15", "2024-09-17"],
-    ["2024-10-01", "2024-10-07"]
-  ],
-  2025: [
-    ["2025-01-01", "2025-01-01"],
-    ["2025-01-28", "2025-02-04"],
-    ["2025-04-04", "2025-04-06"],
-    ["2025-05-01", "2025-05-05"],
-    ["2025-05-31", "2025-06-02"],
-    ["2025-10-01", "2025-10-08"]
-  ],
-  2026: [
-    ["2026-01-01", "2026-01-03"],
-    ["2026-02-15", "2026-02-23"],
-    ["2026-04-04", "2026-04-06"],
-    ["2026-05-01", "2026-05-05"],
-    ["2026-06-19", "2026-06-21"],
-    ["2026-09-25", "2026-09-27"],
-    ["2026-10-01", "2026-10-07"]
-  ]
-};
-
-function formatLocalDate(date: Date): string {
-  const year = date.getFullYear();
-  const month = `${date.getMonth() + 1}`.padStart(2, "0");
-  const day = `${date.getDate()}`.padStart(2, "0");
-  return `${year}-${month}-${day}`;
-}
-
-function isAShareTradingDay(date: Date): boolean {
-  if (date.getDay() === 0 || date.getDay() === 6) {
-    return false;
-  }
-  const text = formatLocalDate(date);
-  return !(A_SHARE_HOLIDAY_RANGES[date.getFullYear()] ?? []).some(
-    ([start, end]) => start <= text && text <= end
-  );
-}
-
-function recentTradingDateRangeEnding(endDate: string, days = 5): { startDate: string; endDate: string } {
-  const end = new Date(`${endDate}T00:00:00`);
-  const start = new Date(end);
-  let counted = 1;
-  while (counted < days) {
-    start.setDate(start.getDate() - 1);
-    if (isAShareTradingDay(start)) {
-      counted += 1;
-    }
-  }
-  return { startDate: formatLocalDate(start), endDate };
-}
-
-const INDEPENDENT_MODULE_REFRESH_MS = 120_000;
-const INDEPENDENT_MODULE_RETRY_MS = 3_000;
-
-type IndependentModuleLoader = (isCancelled: () => boolean) => Promise<boolean>;
-
-function useIndependentModuleRefresh(enabled: boolean, loader: IndependentModuleLoader): void {
-  useEffect(() => {
-    if (!enabled) {
-      return;
-    }
-    let cancelled = false;
-    let inFlight = false;
-    let timer: number | undefined;
-
-    const refresh = async () => {
-      if (cancelled || inFlight) {
-        return;
-      }
-      inFlight = true;
-      let succeeded = false;
-      try {
-        succeeded = await loader(() => cancelled);
-      } catch {
-        succeeded = false;
-      } finally {
-        inFlight = false;
-        if (!cancelled) {
-          timer = window.setTimeout(
-            refresh,
-            succeeded ? INDEPENDENT_MODULE_REFRESH_MS : INDEPENDENT_MODULE_RETRY_MS
-          );
-        }
-      }
-    };
-
-    void refresh();
-    return () => {
-      cancelled = true;
-      if (timer !== undefined) {
-        window.clearTimeout(timer);
-      }
-    };
-  }, [enabled, loader]);
-}
 
 function latestDailyCoverage(coverage: DatasetCoverage[]): DatasetCoverage | undefined {
   return coverage.find((item) => item.dataset === "daily_bars");
@@ -315,18 +203,7 @@ export function App() {
   const [marketSnapshot, setMarketSnapshot] = useState<RealtimeMarketSnapshot | null>(null);
   const [marketRefreshMeta, setMarketRefreshMeta] = useState<MarketRefreshMeta>(() => initialMarketRefreshMeta());
   const [isLoadingMarket, setIsLoadingMarket] = useState(false);
-  const [marketNews, setMarketNews] = useState<MarketNewsResponse | null>(null);
-  const [clsFinance, setClsFinance] = useState<ClsFinanceResponse | null>(null);
-  const [newsSummary, setNewsSummary] = useState<NewsSummaryResponse | null>(null);
-  const [fupanBriefing, setFupanBriefing] = useState<MarketBriefingResponse | null>(null);
-  const [zaopanBriefing, setZaopanBriefing] = useState<MarketBriefingResponse | null>(null);
-  const [isLoadingNews, setIsLoadingNews] = useState(false);
-  const [isLoadingClsFinance, setIsLoadingClsFinance] = useState(false);
-  const [isLoadingNewsSummary, setIsLoadingNewsSummary] = useState(false);
-  const [riskAlerts, setRiskAlerts] = useState<RiskAlertsResponse | null>(null);
-  const [isLoadingRiskAlerts, setIsLoadingRiskAlerts] = useState(false);
   const [riskModalOpen, setRiskModalOpen] = useState(false);
-  const [recommendedStrategies, setRecommendedStrategies] = useState<RecommendedStrategy[]>([]);
   // Persistence lifecycle (loading/ready/failed), single initial load, serialized
   // mutations and out-of-order-load protection are all owned by the store.
   const {
@@ -344,6 +221,10 @@ export function App() {
   const [strategySaveMessage, setStrategySaveMessage] = useState<string | null>(null);
   const [pendingStrategySave, setPendingStrategySave] = useState<PendingStrategySave>(null);
   const [settingsDateTouched, setSettingsDateTouched] = useState(false);
+  const [aiOpen, setAiOpen] = useState(false);
+  const [aiTask, setAiTask] = useState<AiTask | null>(null);
+  const [aiInsights, setAiInsights] = useState<AiInsight[]>([]);
+  const [aiUnseenInsights, setAiUnseenInsights] = useState(0);
 
   useEffect(() => {
     if (strategyLoadStatus === "failed" && strategyLoadError) {
@@ -428,7 +309,7 @@ export function App() {
     }
     const today = formatLocalDate(new Date());
     const effectiveEndDate = daily.end_date < today ? daily.end_date : today;
-    const range = recentTradingDateRangeEnding(effectiveEndDate);
+    const range = recentAShareTradingDateRangeEnding(effectiveEndDate);
     setSettings((current) => {
       if (current.start_date === range.startDate && current.end_date === range.endDate) {
         return current;
@@ -504,145 +385,38 @@ export function App() {
     setMarketRefreshMeta
   });
 
-  const loadNews = useCallback(async (isCancelled: () => boolean): Promise<boolean> => {
-    if (!dataService) {
-      return false;
-    }
-    setIsLoadingNews(true);
-    try {
-      const response = await loadMarketNews(dataService.base_url);
-      if (!isCancelled()) {
-        setMarketNews(response);
-      }
-      return true;
-    } catch {
-      // Keep the last successful news list visible while this module retries.
-      return false;
-    } finally {
-      if (!isCancelled()) {
-        setIsLoadingNews(false);
-      }
-    }
-  }, [dataService]);
+  const {
+    marketNews,
+    isLoadingNews,
+    clsFinance,
+    isLoadingClsFinance,
+    newsSummary,
+    isLoadingNewsSummary,
+    fupanBriefing,
+    zaopanBriefing,
+    riskAlerts,
+    isLoadingRiskAlerts,
+    recommendedStrategies,
+    refreshNews,
+    refreshRiskAlerts
+  } = useMarketModules(dataService, coverage);
 
-  const refreshNews = () => {
-    void loadNews(() => false);
-  };
-
-  const loadFupan = useCallback(async (isCancelled: () => boolean): Promise<boolean> => {
-    if (!dataService) {
-      return false;
-    }
-    try {
-      const response = await loadMarketBriefing(dataService.base_url, "fupan");
-      if (!isCancelled() && response) {
-        setFupanBriefing(response);
-      }
-      return Boolean(response);
-    } catch {
-      // Fupan keeps its latest independent result.
-      return false;
-    }
-  }, [dataService]);
-
-  const loadZaopan = useCallback(async (isCancelled: () => boolean): Promise<boolean> => {
-    if (!dataService) {
-      return false;
-    }
-    try {
-      const response = await loadMarketBriefing(dataService.base_url, "zaopan");
-      if (!isCancelled() && response) {
-        setZaopanBriefing(response);
-      }
-      return Boolean(response);
-    } catch {
-      // Zaopan keeps its latest independent result.
-      return false;
-    }
-  }, [dataService]);
-
-  const loadFinance = useCallback(async (isCancelled: () => boolean): Promise<boolean> => {
-    if (!dataService) {
-      return false;
-    }
-    setIsLoadingClsFinance(true);
-    try {
-      const response = await loadClsFinance(dataService.base_url);
-      if (!isCancelled()) {
-        setClsFinance(response);
-      }
-      return true;
-    } catch {
-      // Finance data is independent from news and retains its last response.
-      return false;
-    } finally {
-      if (!isCancelled()) {
-        setIsLoadingClsFinance(false);
+  useAiEventStream({
+    baseUrl: dataService?.base_url ?? null,
+    enabled: Boolean(dataService),
+    onInsight: (insight) => {
+      setAiInsights((current) => [insight, ...current.filter((item) => item.id !== insight.id)].slice(0, 20));
+      setAiUnseenInsights((count) => count + 1);
+    },
+    onDataFresh: (module) => {
+      // 推拉结合：后端提示有新数据时立即刷新对应模块，而不是死等轮询周期。
+      if (module === "news") {
+        refreshNews();
+      } else if (module === "risk") {
+        refreshRiskAlerts();
       }
     }
-  }, [dataService]);
-
-  const loadSummary = useCallback(async (isCancelled: () => boolean): Promise<boolean> => {
-    if (!dataService) {
-      return false;
-    }
-    setIsLoadingNewsSummary(true);
-    try {
-      const response = await loadNewsSummary(dataService.base_url);
-      if (!isCancelled()) {
-        setNewsSummary(response);
-      }
-      return true;
-    } catch {
-      // The summary is allowed to lag independently of the source news list.
-      return false;
-    } finally {
-      if (!isCancelled()) {
-        setIsLoadingNewsSummary(false);
-      }
-    }
-  }, [dataService]);
-
-  const loadRiskAlertData = useCallback(async (isCancelled: () => boolean): Promise<boolean> => {
-    if (!dataService) {
-      return false;
-    }
-    setIsLoadingRiskAlerts(true);
-    try {
-      const response = await loadRiskAlerts(dataService.base_url);
-      if (!isCancelled()) {
-        setRiskAlerts(response);
-      }
-      return true;
-    } catch {
-      // Preserve the last risk result when only this endpoint fails.
-      return false;
-    } finally {
-      if (!isCancelled()) {
-        setIsLoadingRiskAlerts(false);
-      }
-    }
-  }, [dataService]);
-
-  const loadRecommendations = useCallback(async (isCancelled: () => boolean): Promise<boolean> => {
-    if (!dataService) {
-      return false;
-    }
-    try {
-      const response = await loadRecommendedStrategies(dataService.base_url);
-      if (!isCancelled() && response) {
-        setRecommendedStrategies(response.items);
-      }
-      return Boolean(response);
-    } catch {
-      // Recommendations remain independent when the cached coverage snapshot is refreshing.
-      return false;
-    }
-  }, [coverage, dataService]);
-
-  const refreshRiskAlerts = () => {
-    void loadRiskAlertData(() => false);
-  };
+  });
 
   const validateConditionText = async (text: string, mode: "entry" | "exit" = "entry"): Promise<ConditionValidationResult> => {
     if (!dataService) {
@@ -718,14 +492,6 @@ export function App() {
     }
   };
 
-  useIndependentModuleRefresh(Boolean(dataService), loadNews);
-  useIndependentModuleRefresh(Boolean(dataService), loadFupan);
-  useIndependentModuleRefresh(Boolean(dataService), loadZaopan);
-  useIndependentModuleRefresh(Boolean(dataService), loadFinance);
-  useIndependentModuleRefresh(Boolean(dataService), loadSummary);
-  useIndependentModuleRefresh(Boolean(dataService), loadRiskAlertData);
-  useIndependentModuleRefresh(Boolean(dataService), loadRecommendations);
-
   const coverageSymbols = coverage.reduce((sum, item) => sum + item.symbols, 0);
   const liveHeatRatio = marketSnapshot?.breadth && marketSnapshot.breadth.total > 0
     ? marketSnapshot.breadth.up / marketSnapshot.breadth.total
@@ -786,6 +552,19 @@ export function App() {
         </div>
         <div className="topbar-actions" aria-label="运行状态">
           <UpdatePanel />
+          <button
+            className="status-pill ai-entry-button"
+            type="button"
+            aria-label={`打开 AI 投研助手${aiUnseenInsights > 0 ? `，${aiUnseenInsights} 条未读快讯` : ""}`}
+            onClick={() => {
+              setAiOpen(true);
+              setAiUnseenInsights(0);
+            }}
+          >
+            <Sparkles size={16} aria-hidden="true" />
+            AI 助手
+            {aiUnseenInsights > 0 ? <span className="ai-badge">{aiUnseenInsights}</span> : null}
+          </button>
           <span className="status-pill"><Activity size={16} aria-hidden="true" /> 保守日线撮合</span>
           <span className="status-pill"><Database size={16} aria-hidden="true" /> 本地缓存</span>
         </div>
@@ -880,6 +659,11 @@ export function App() {
               onRun={runBacktest}
               riskAlertCount={riskAlertCount}
               onOpenRiskAlerts={() => setRiskModalOpen(true)}
+              onAskAi={(task) => {
+                setAiTask(task);
+                setAiOpen(true);
+                setAiUnseenInsights(0);
+              }}
             />
           </Suspense>
           <TradesTable trades={isRunningBacktest ? streamedTrades : visibleTrades} />
@@ -897,6 +681,19 @@ export function App() {
         isLoading={isLoadingRiskAlerts}
         onClose={() => setRiskModalOpen(false)}
         onRefresh={refreshRiskAlerts}
+      />
+      <AiAssistantPanel
+        open={aiOpen}
+        baseUrl={dataService?.base_url ?? null}
+        insights={aiInsights}
+        task={aiTask}
+        onTaskConsumed={() => setAiTask(null)}
+        onClose={() => setAiOpen(false)}
+        onInsightsShown={() => setAiUnseenInsights(0)}
+        onApplyStrategy={(strategy) => {
+          setStrategy(cloneStrategyConfig(strategy));
+          setStrategySaveMessage("已套用 AI 生成的策略，可在策略工作台继续调整。");
+        }}
       />
     </main>
   );

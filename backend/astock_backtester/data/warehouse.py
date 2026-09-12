@@ -77,6 +77,16 @@ class Warehouse:
             if start_year <= int(path.parent.name.split("year=", 1)[1]) <= end_year
         ]
 
+    def daily_bars_parquet_glob(self) -> str | None:
+        """Hive-style glob for the daily-bars parquet partitions.
+
+        Public read-only helper for the AI module's DuckDB query tool; returns
+        ``None`` when no partition exists yet.
+        """
+        if not self._partition_paths_for_range(None, None):
+            return None
+        return str(self.daily_bars_root / "year=*" / "daily_bars.parquet")
+
     def write_daily_bars(self, frame: pd.DataFrame) -> None:
         normalized = normalize_daily_bars(frame)
         if normalized.empty:

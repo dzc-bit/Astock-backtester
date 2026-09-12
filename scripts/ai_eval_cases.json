@@ -1,0 +1,22 @@
+[
+  { "id": "ma20-breakout", "instruction": "收盘价站上20日均线的策略", "expected_entry": ["收盘价站上20日均线"], "expected_exit": [] },
+  { "id": "ma5-exit", "instruction": "站上5日线买入，跌破5日线卖出", "expected_entry": ["收盘价站上5日均线"], "expected_exit": ["收盘价跌破5日均线"] },
+  { "id": "volume-ratio", "instruction": "量比在1.5到3之间的票", "expected_entry": ["量比1日介于1.5到3"], "expected_exit": [] },
+  { "id": "market-cap-mid", "instruction": "流通市值50亿到300亿的中盘股", "expected_entry": ["流通市值50亿到300亿"], "expected_exit": [] },
+  { "id": "turnover-active", "instruction": "换手率3%到10%的活跃股", "expected_entry": ["换手率3%到10%"], "expected_exit": [] },
+  { "id": "mild-momentum", "instruction": "近5日涨幅介于0到12个点的票", "expected_entry": ["近5日涨幅介于0%到12%"], "expected_exit": [] },
+  { "id": "weak-momentum-exit", "instruction": "近5日涨幅小于3%就离场", "expected_entry": [], "expected_exit": ["近5日涨幅小于3%"] },
+  { "id": "capital-inflow", "instruction": "近3日主力净流入大于500万", "expected_entry": ["近3日主力净流入大于500万"], "expected_exit": [] },
+  { "id": "capital-outflow-exit", "instruction": "近3日主力净流出大于200万时卖出", "expected_entry": [], "expected_exit": ["近3日主力净流出大于200万"] },
+  { "id": "breakout-high", "instruction": "突破20日新高", "expected_entry": ["突破20日新高"], "expected_exit": [] },
+  { "id": "macd-positive", "instruction": "MACD柱线大于0", "expected_entry": ["MACD柱线大于0"], "expected_exit": [] },
+  { "id": "macd-exit", "instruction": "MACD死叉离场", "expected_entry": [], "expected_exit": ["MACD死叉"] },
+  { "id": "outflow-today-exit", "instruction": "当日主力净流出就卖", "expected_entry": [], "expected_exit": ["资金流出"] },
+  { "id": "breakdown-exit", "instruction": "跌破10日低点离场", "expected_entry": [], "expected_exit": ["跌破10日低点"] },
+  { "id": "new-low-exit", "instruction": "创20日新低就清仓", "expected_entry": [], "expected_exit": ["创20日新低"] },
+  { "id": "hot-market", "instruction": "市场上涨家数占比大于55%时进场", "expected_entry": ["市场上涨家数占比大于55%"], "expected_exit": [] },
+  { "id": "combo-trend", "instruction": "站上20日线且近3日主力净流入大于300万", "expected_entry": ["收盘价站上20日均线", "近3日主力净流入大于300万"], "expected_exit": [] },
+  { "id": "combo-breakout-volume", "instruction": "突破20日新高，量比2日介于1.2到2.5，跌破10日线走人", "expected_entry": ["突破20日新高", "量比2日介于1.2到2.5"], "expected_exit": ["收盘价跌破10日均线"] },
+  { "id": "combo-full", "instruction": "做一个趋势策略：收盘价站上20日均线、流通市值10亿到300亿、换手率2%到8%，MACD死叉离场", "expected_entry": ["收盘价站上20日均线", "流通市值10亿到300亿", "换手率2%到8%"], "expected_exit": ["MACD死叉"] },
+  { "id": "combo-swing", "instruction": "近5日涨幅介于0%到12%，近5日主力净流入大于100万，近5日涨幅小于3%或创10日新低离场", "expected_entry": ["近5日涨幅介于0%到12%", "近5日主力净流入大于100万"], "expected_exit": ["近5日涨幅小于3%", "创10日新低"] }
+]

@@ -1,5 +1,6 @@
-import { Play } from "lucide-react";
+import { Play, Sparkles } from "lucide-react";
 import { Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import type { AiTask } from "../aiTypes";
 import type { BacktestResult, DailyStrategyMatches } from "../types";
 
 type Props = {
@@ -10,7 +11,19 @@ type Props = {
   onRun: () => void;
   riskAlertCount?: number;
   onOpenRiskAlerts: () => void;
+  onAskAi?: (task: AiTask) => void;
 };
+
+function buildBacktestContext(result: BacktestResult): Record<string, unknown> {
+  return {
+    metrics: result.metrics,
+    preflight_issues: result.preflight_issues,
+    trade_count: result.trades.length,
+    recent_trades: result.trades.slice(-5),
+    latest_strategy_matches: result.latest_strategy_matches?.matches.slice(0, 5) ?? [],
+    equity_curve_tail: result.equity_curve.slice(-10)
+  };
+}
 
 function translateMatchReason(reason: string): string {
   return reason
@@ -108,7 +121,8 @@ export function ResultsOverview({
   progressMessage = null,
   onRun,
   riskAlertCount = 0,
-  onOpenRiskAlerts
+  onOpenRiskAlerts,
+  onAskAi
 }: Props) {
   const issueCount = result?.preflight_issues.length ?? 0;
   const chartData = normalizedEquityCurve(result);
@@ -125,10 +139,28 @@ export function ResultsOverview({
           <span className="section-kicker">策略收益与风险</span>
           <h2>收益概览</h2>
         </div>
-        <button className="primary-button" type="button" onClick={onRun} disabled={isRunning}>
-          <Play size={16} aria-hidden="true" />
-          {isRunning ? "回测运行中" : "运行历史回测"}
-        </button>
+        <div className="section-title-actions">
+          {result && !isRunning && onAskAi ? (
+            <button
+              className="secondary-button"
+              type="button"
+              aria-label="让 AI 解读本次回测结果"
+              onClick={() =>
+                onAskAi({
+                  message: "请解读上面这次回测结果：收益与回撤的主要来源、交易行为特征、参数上值得尝试的调整方向，并指出数据预检提示的含义。",
+                  context: { kind: "backtest_result", payload: buildBacktestContext(result) }
+                })
+              }
+            >
+              <Sparkles size={15} aria-hidden="true" />
+              AI 解读
+            </button>
+          ) : null}
+          <button className="primary-button" type="button" onClick={onRun} disabled={isRunning}>
+            <Play size={16} aria-hidden="true" />
+            {isRunning ? "回测运行中" : "运行历史回测"}
+          </button>
+        </div>
       </div>
       {isRunning || phases.length > 0 ? (
         <div className="run-progress" role="status" aria-label="回测运行进度">

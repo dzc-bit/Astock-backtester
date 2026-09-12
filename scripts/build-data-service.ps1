@@ -29,6 +29,7 @@ $bundledNode = Join-Path $repoRoot ".tools\node-v20.18.1-win-x64\node.exe"
 $esbuildBin = Join-Path $repoRoot "node_modules\esbuild\bin\esbuild"
 $jsdomXhrSyncWorker = Join-Path $repoRoot "node_modules\jsdom\lib\jsdom\living\xhr\xhr-sync-worker.js"
 $watchlistCsv = Join-Path $repoRoot "backend\astock_backtester\data\potential_risk_watchlist.csv"
+$aiCorpusDir = Join-Path $repoRoot "backend\astock_backtester\ai\rag\corpus"
 
 New-Item -ItemType Directory -Force $distDir | Out-Null
 New-Item -ItemType Directory -Force $workDir | Out-Null
@@ -57,12 +58,16 @@ try {
     --specpath $specDir `
     --paths backend `
     --add-data "${watchlistCsv};astock_backtester\data" `
+    --add-data "${aiCorpusDir};astock_backtester\ai\rag\corpus" `
     --collect-all adata `
     --collect-all akshare `
     --collect-all curl_cffi `
     --hidden-import curl_cffi.requests `
     --hidden-import requests `
     --hidden-import bs4 `
+    --hidden-import openai `
+    --hidden-import langchain_text_splitters `
+    --hidden-import duckdb `
     backend\astock_backtester\service.py
   if ($LASTEXITCODE -ne 0) {
     throw "PyInstaller failed with exit code $LASTEXITCODE"

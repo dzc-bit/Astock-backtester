@@ -17,6 +17,9 @@ from uuid import uuid4
 import pandas as pd
 import requests
 
+from astock_backtester.ai import AiService
+from astock_backtester.ai.errors import AiError
+from astock_backtester.ai.models import AiChatRequest, AiConfigUpdate
 from astock_backtester.backtest_runner import run_configured_backtest
 from astock_backtester.condition_parser import validate_condition_text, validate_exit_condition_text
 from astock_backtester.data.briefing import MarketBriefingProvider
@@ -106,6 +109,8 @@ class DataServiceState:
             briefing_provider=self.briefing_provider,
         )
         self.risk_provider = RiskAlertProvider(self.warehouse)
+        self._ai_service: AiService | None = None
+        self._ai_lock = Lock()
         self.port = port
         self.started_at = datetime.now(UTC)
         self.instance_id = str(uuid4())
@@ -127,6 +132,13 @@ class DataServiceState:
                 "timestamp": datetime.now(UTC).isoformat(),
             }
         )
+
+    def ai_service(self) -> AiService:
+        """Lazy AI subsystem: nothing is constructed until an /ai/* route runs."""
+        with self._ai_lock:
+            if self._ai_service is None:
+                self._ai_service = AiService(cache_dir=self.cache.root, backend=self, log=self.log)
+            return self._ai_service
 
     def _fetch_capital_flow(
         self,
@@ -442,6 +454,46 @@ class DataServiceHandler(BaseHTTPRequestHandler):
             except ClientDisconnected:
                 return
 
+    def _run_ai_chat_stream(self, payload: dict[str, Any]) -> None:
+        try:
+            request = AiChatRequest.model_validate(payload)
+        except ValueError as exc:
+            self.server.state.log("error", f"ai chat payload invalid: {exc}")
+            self._send_json({"code": "validation_error", "message": f"AI 请求参数不合法：{exc}"}, HTTPStatus.BAD_REQUEST)
+            return
+        generator = self.server.state.ai_service().chat_stream(request)
+        try:
+            self._send_ndjson_headers()
+            for event in generator:
+                self._write_ndjson(event)
+        except ClientDisconnected:
+            return
+        except AiError as exc:
+            self.server.state.log("error", f"ai chat failed: {exc}")
+            self._write_ai_error_event(generator, exc.code, str(exc))
+        except Exception as exc:
+            self.server.state.log("error", f"ai chat failed: {exc}")
+            self._write_ai_error_event(generator, "request_failed", str(exc))
+
+    def _write_ai_error_event(self, generator: Any, code: str, message: str) -> None:
+        generator.close()
+        try:
+            self._write_ndjson({"type": "error", "code": code, "message": message})
+        except ClientDisconnected:
+            return
+
+    def _run_ai_events_stream(self) -> None:
+        generator = self.server.state.ai_service().events_stream()
+        try:
+            self._send_ndjson_headers()
+            for event in generator:
+                self._write_ndjson(event)
+        except ClientDisconnected:
+            return
+        except Exception as exc:
+            self.server.state.log("error", f"ai events stream failed: {exc}")
+            generator.close()
+
     def do_OPTIONS(self) -> None:
         self._send_json({"ok": True})
 
@@ -518,6 +570,19 @@ class DataServiceHandler(BaseHTTPRequestHandler):
             return
         if self.path == "/strategy/recommended":
             self._send_json(recommended_strategies(self.server.state.coverage_snapshot()).model_dump(mode="json"))
+            return
+        if self.path == "/ai/status":
+            self._send_json(self.server.state.ai_service().status().model_dump(mode="json"))
+            return
+        if self.path == "/ai/config":
+            self._send_json(self.server.state.ai_service().config_view())
+            return
+        if self.path == "/ai/config/reveal":
+            # Local-only endpoint: the desktop app may display the user's own key.
+            self._send_json({"api_key": self.server.state.ai_service().reveal_api_key()})
+            return
+        if self.path == "/ai/events/stream":
+            self._run_ai_events_stream()
             return
         if self.path.startswith("/sync/jobs/"):
             job_id = self.path.rsplit("/", 1)[-1]
@@ -687,10 +752,20 @@ class DataServiceHandler(BaseHTTPRequestHandler):
                 result = self.server.state.validate_stock_symbols([str(symbol) for symbol in symbols])
                 self._send_json(result.model_dump(mode="json"))
                 return
+            if self.path == "/ai/config":
+                request = AiConfigUpdate.model_validate(payload)
+                self._send_json(self.server.state.ai_service().save_config(request.model_dump()))
+                return
+            if self.path == "/ai/chat/stream":
+                self._run_ai_chat_stream(payload)
+                return
             self._send_json({"code": "not_found", "message": self.path}, HTTPStatus.NOT_FOUND)
         except LocalDataUnavailable as exc:
             self.server.state.log("error", str(exc))
             self._send_json({"code": "no_local_data", "message": str(exc)}, HTTPStatus.BAD_REQUEST)
+        except AiError as exc:
+            self.server.state.log("error", f"ai request failed: {exc}")
+            self._send_json({"code": exc.code, "message": str(exc)}, HTTPStatus.BAD_REQUEST)
         except ValueError as exc:
             self.server.state.log("error", str(exc))
             self._send_json({"code": "validation_error", "message": str(exc)}, HTTPStatus.BAD_REQUEST)

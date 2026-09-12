@@ -88,7 +88,7 @@ export type StreamRequestOptions = {
   idleTimeoutMs?: number;
 };
 
-async function consumeNdjsonStream(
+export async function consumeNdjsonStream(
   url: string,
   init: RequestInit,
   options: StreamRequestOptions,

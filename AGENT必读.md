@@ -29,7 +29,7 @@ git branch --show-current
 https://github.com/dzc-bit/Astock-backtester.git
 ```
 
-保护已有未提交修改。不要覆盖无关文件，不要清理、删除、迁移 `D:\New project 6\运行产物`。版本号统一跟随桌面端当前版本，当前为 `1.3.6`，除非用户明确要求改版本。
+保护已有未提交修改。不要覆盖无关文件，不要清理、删除、迁移 `D:\New project 6\运行产物`。版本号统一跟随桌面端当前版本，当前为 `1.4.0`，除非用户明确要求改版本。
 
 ## 2. 绝对不要碰错边界
 
@@ -431,5 +431,15 @@ python -m ruff check backend tests scripts
 3. **禁止跨模块私有访问**：service/operations/sync 只能用公共接口——`RealtimeMarketProvider.retained_successful_snapshot()`、`DataServiceState.start_coverage_refresh()`、`Warehouse.read_capital_flow_missing_symbols()`、`SyncJobManager.start_full_market()/cancel_job()`。不允许再出现 `getattr(obj, "私有名", None)` 式的测试兼容 shim。
 4. **依赖方向单向**：`data/*` 只允许依赖 `models` 与 data 内共享模块（symbols/parsing/http_transport/importer/trading_calendar/cls），禁止反向 import 根包（service/engine/cli）。当前全仓 0 个 import 环。
 5. **回测条件必须双注册**：`conditions.py` 里每个 condition_id 必须同时有行级 `EVALUATORS` 和向量化 `MASK_BUILDERS`；`tests/test_core.py::test_condition_registry_stays_in_sync` 是守卫，新增条件只改 conditions.py 一个文件。
-6. **错误响应必须带稳定 code**：后端错误码 `no_local_data / validation_error / payload_error / request_failed`（`service.py::_stream_error_code`），数据缺失类失败抛 `LocalDataUnavailable`；前端经 `api.ts` 的 `BackendError` 消费，`App.tsx::translateError` 按码翻译、子串匹配只是兜底。新增错误路径必须带码。
-7. **回环测试不走代理**：`tests/test_data_service_http.py` 用 `ProxyHandler({})` 的 opener 发起全部回环请求；开发机开着 Clash 等系统代理时测试也必须绿。
+6. **错误响应必须带稳定 code**：后端错误码 `no_local_data / validation_error / payload_error / request_failed`（`service.py::_stream_error_code`），数据缺失类失败抛 `LocalDataUnavailable`；AI 模块额外有 `ai_not_configured / ai_upstream_error`（`ai/errors.py`）。前端经 `api.ts` 的 `BackendError` 消费，AI 抽屉经 `aiTypes.ts::translateAiError` 按码翻译。新增错误路径必须带码。
+7. **回环测试不走代理**：`tests/test_data_service_http.py` 用 `ProxyHandler({})` 的 opener 发起全部回环请求；开发机开着 Clash 等系统代理时测试也必须绿。AI 回环测试（`tests/test_ai_service_http.py`）沿用同一模式，且 cache_dir 必须指向 tmp 子目录（`tmp_path/"本地数据仓"`），否则 AI 配置会落在 pytest 共享根目录造成跨测试泄漏。
+8. **AI 子系统边界（违反即回退）**：
+   - `backend/astock_backtester/ai/` 是独立子包，只依赖 `models`、data 公共接口与根包的 backtest_runner/condition_parser/indicators；任何 data/* 或 engine 不得反向 import ai。
+   - AI 对数据仓默认只读：`query_warehouse_sql` 只允许 SELECT/WITH（DuckDB 内存连接 + 语句黑名单 + 自动 LIMIT 500）；**唯一写路径**是 `update_stock_data` → `operations.fetch_daily_bars_into_cache`，不得出现第二个写工具或裸 SQL 写。
+   - 分层记忆：短期窗口 10 条协议消息（`agent.SHORT_TERM_WINDOW`），溢出先进 `pending_archive` 再压缩为 `rolling_summary`；长期记忆提取是哨兵之后的独立 daemon 线程，**绝不允许阻塞 /ai/chat/stream 的事件流**。
+   - 爬取内容（新闻/复盘/研报）进入模型上下文前必须经 `ai/context.py::wrap_untrusted` 分隔；工具结果只以摘要进上下文，全量留在 `ToolResultStore`。
+   - LLM 配置只存 `运行产物/AI配置/ai-config.json`；`GET /ai/config` 只回掩码，`GET /ai/config/reveal` 仅用于桌面端展示用户自己的 Key；会话落盘 `运行产物/AI对话/`、记忆落盘 `运行产物/AI记忆/`；三者在 .gitignore 覆盖范围内，不得提交。
+   - AI 快讯（insight）必须带 `source="ai-insight"` 与免责声明；`data_fresh` 信号只触发刷新，不得替代任何行情模块的 live 判定。
+   - LLM 客户端复用 `openai` SDK（`ai/llm_client.py` 只做错误码映射与事件规范化）；测试用 FakeModel/注入 client_factory，禁止网络。
+   - a-stock-data 裁剪端点（`ai/tools/astock_data_tools.py`）统一走 `data/symbols.py` + `data/http_transport.py`，东财系请求必须过 `_em_get` 限流。
+   - 提示词模板含字面 JSON 时必须用 `{{ }}` 转义（`str.format` 会把 `{"content": ...}` 当占位符，曾踩坑）。
