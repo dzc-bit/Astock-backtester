@@ -20,6 +20,12 @@ import requests
 from astock_backtester.ai import AiService
 from astock_backtester.ai.errors import AiError
 from astock_backtester.ai.models import AiChatRequest, AiConfigUpdate
+from astock_backtester.ai.optimizer import (
+    GridTooLargeError,
+    build_optimize_insight_context,
+    normalize_grid,
+    run_optimization,
+)
 from astock_backtester.backtest_runner import run_configured_backtest
 from astock_backtester.condition_parser import validate_condition_text, validate_exit_condition_text
 from astock_backtester.data.briefing import MarketBriefingProvider
@@ -38,6 +44,7 @@ from astock_backtester.data.operations import (
     fetch_capital_flow_into_cache,
     fetch_daily_bars_into_cache,
     import_daily_bars_into_cache,
+    refresh_symbol_lifecycle,
 )
 from astock_backtester.data.providers import (
     ADataProvider,
@@ -194,6 +201,55 @@ class DataServiceState:
             coverage_refreshing=coverage_refreshing,
         )
 
+    def diagnostics_payload(self) -> dict[str, Any]:
+        """Aggregate the last known success/failure state of the upstream sources.
+
+        Only providers that keep persistent state are reported (realtime /
+        news / finance); reading this endpoint never triggers a network fetch.
+        """
+        sources: list[dict[str, Any]] = []
+
+        realtime: dict[str, Any] = {
+            "source": "realtime",
+            "ok": False,
+            "seconds_since_success": None,
+            "diagnostics": ["尚未有成功快照。"],
+        }
+        try:
+            retained = self.realtime_provider.retained_successful_snapshot()
+        except Exception as exc:
+            retained = None
+            realtime["diagnostics"] = [f"实时行情状态读取失败：{exc}"]
+        if retained is not None:
+            age = (datetime.now(UTC) - retained.updated_at).total_seconds()
+            realtime.update(
+                {
+                    "ok": retained.status != "unavailable",
+                    "status": retained.status,
+                    "snapshot_source": retained.source,
+                    "updated_at": retained.updated_at.isoformat(),
+                    "seconds_since_success": max(0.0, age),
+                    "diagnostics": list(retained.diagnostics),
+                }
+            )
+        sources.append(realtime)
+
+        for name, provider in (("news", self.news_provider), ("finance", self.finance_provider)):
+            entry: dict[str, Any] = {"source": name, "ok": False, "diagnostics": ["尚未有成功拉取记录。"]}
+            reader = getattr(provider, "recent_success", None)
+            if callable(reader):
+                try:
+                    entry.update(reader())
+                except Exception as exc:
+                    entry["diagnostics"] = [f"状态读取失败：{exc}"]
+            sources.append(entry)
+
+        return {
+            "ok": True,
+            "generated_at": datetime.now(UTC).isoformat(),
+            "sources": sources,
+        }
+
     def _has_fresh_coverage_snapshot(self) -> bool:
         if not any(item.symbols > 0 for item in self._coverage_snapshot):
             return False
@@ -249,13 +305,54 @@ class DataServiceState:
         try:
             symbols = self.warehouse.read_daily_symbols(require_ohlc=True)
             if symbols:
-                return symbols
+                return self._exclude_delisted_symbols(symbols)
         except Exception as exc:
             self.log(
                 "warning",
                 f"warehouse symbol read failed; falling back to provider: {exc}",
             )
         return self.provider.list_symbols()
+
+    def _exclude_delisted_symbols(self, symbols: list[str]) -> list[str]:
+        """Drop symbols whose lifecycle record marks them delisted; failures
+        never block the sync (a missing lifecycle table just means no filter)."""
+        try:
+            delisted = self.warehouse.read_delisted_symbols()
+        except Exception as exc:
+            self.log("warning", f"symbol lifecycle read failed; keeping all warehouse symbols: {exc}")
+            return symbols
+        if not delisted:
+            return symbols
+        kept = [symbol for symbol in symbols if symbol not in delisted]
+        self.log(
+            "info",
+            f"symbol lifecycle: excluding {len(symbols) - len(kept)} delisted symbols from the sync pool",
+        )
+        return kept
+
+    def refresh_symbol_lifecycle_best_effort(self) -> dict[str, Any] | None:
+        """Refresh ``symbol_lifecycle`` from the current-market source list.
+
+        Runs right before a full-market sync so new listings get listing dates
+        and confirmed delistings stop being re-fetched. Never raises: a flaky
+        upstream only costs us the refresh, not the sync itself.
+        """
+        try:
+            listings = self.provider.list_symbol_listings()
+        except Exception as exc:
+            self.log("warning", f"symbol lifecycle refresh skipped; source list unavailable: {exc}")
+            return None
+        try:
+            summary = refresh_symbol_lifecycle(self.warehouse, listings)
+        except Exception as exc:
+            self.log("warning", f"symbol lifecycle refresh failed: {exc}")
+            return None
+        self.log(
+            "info",
+            "symbol lifecycle refreshed: "
+            f"{summary.get('listed_upserts', 0)} listed / {summary.get('delisted_upserts', 0)} delisted",
+        )
+        return summary
 
     def validate_stock_symbols(self, symbols: list[str]) -> StockSymbolValidationResult:
         normalized_symbols = [normalize_symbol(symbol) for symbol in symbols]
@@ -482,6 +579,58 @@ class DataServiceHandler(BaseHTTPRequestHandler):
         except ClientDisconnected:
             return
 
+    def _run_ai_optimize_stream(self, payload: dict[str, Any]) -> None:
+        """Grid-search the strategy's numeric knobs, then one AI commentary."""
+        try:
+            strategy = StrategyConfig.model_validate(payload["strategy"])
+            settings = BacktestSettings.model_validate(payload["settings"])
+            grid = normalize_grid(payload.get("grid") or {})
+        except KeyError as exc:
+            self._send_json({"code": "payload_error", "message": f"missing request field: {exc}"}, HTTPStatus.BAD_REQUEST)
+            return
+        except (ValueError, GridTooLargeError) as exc:
+            code = "grid_too_large" if isinstance(exc, GridTooLargeError) else "validation_error"
+            self._send_json({"code": code, "message": str(exc)}, HTTPStatus.BAD_REQUEST)
+            return
+        try:
+            self._send_ndjson_headers()
+            self._write_ndjson({"type": "phase", "phase": "读取本地数据"})
+            frame = self._read_backtest_frame(settings)
+            if frame.empty:
+                raise LocalDataUnavailable("No cached daily bars found for the optimization range.")
+
+            def write_event(event: dict[str, Any]) -> None:
+                self._write_ndjson(event)
+
+            summary = run_optimization(frame, strategy, settings, grid, write_event)
+            self._write_ndjson({"type": "phase", "phase": "生成 AI 解读"})
+            insight: str | None = None
+            insight_error: str | None = None
+            try:
+                ai_service = self.server.state.ai_service()
+                response = ai_service.insight_oneshot(
+                    "results_overview",
+                    build_optimize_insight_context(summary),
+                )
+                insight = response.get("text")
+            except Exception as exc:  # noqa: BLE001 - grid result stays useful without AI
+                self.server.state.log("warning", f"ai optimize insight failed: {exc}")
+                insight_error = str(exc)
+            self._write_ndjson(
+                {
+                    "type": "result",
+                    "result": {**summary, "insight": insight, "insight_error": insight_error},
+                }
+            )
+        except ClientDisconnected:
+            return
+        except Exception as exc:
+            self.server.state.log("error", f"ai optimize failed: {exc}")
+            try:
+                self._write_ndjson({"type": "error", "message": str(exc), "code": _stream_error_code(exc)})
+            except ClientDisconnected:
+                return
+
     _ALLOWED_REVEAL_ORIGINS = {
         "tauri://localhost",
         "https://tauri.localhost",
@@ -524,6 +673,16 @@ class DataServiceHandler(BaseHTTPRequestHandler):
         if self.path == "/health":
             health = self.server.state.health_payload()
             self._send_json(health.model_dump(mode="json"))
+            return
+        if self.path == "/diagnostics/sources":
+            try:
+                self._send_json(self.server.state.diagnostics_payload())
+            except Exception as exc:
+                self.server.state.log("error", f"diagnostics sources failed: {exc}")
+                self._send_json(
+                    {"ok": False, "code": "request_failed", "message": str(exc), "sources": []},
+                    HTTPStatus.BAD_REQUEST,
+                )
             return
         if self.path == "/logs/recent":
             self._send_json({"items": list(self.server.state.logs)})
@@ -643,6 +802,8 @@ class DataServiceHandler(BaseHTTPRequestHandler):
             if self.path == "/sync/full-market":
                 start_date = payload.get("start_date", "2015-01-01")
                 end_date = payload["end_date"]
+                if not payload.get("symbols"):
+                    self.server.state.refresh_symbol_lifecycle_best_effort()
                 symbols = payload.get("symbols") or self.server.state.sync_symbols(start_date, end_date)
                 if not symbols:
                     raise ValueError("No symbols available for full-market sync.")
@@ -780,6 +941,25 @@ class DataServiceHandler(BaseHTTPRequestHandler):
             if self.path == "/ai/config":
                 request = AiConfigUpdate.model_validate(payload)
                 self._send_json(self.server.state.ai_service().save_config(request.model_dump()))
+                return
+            if self.path == "/ai/conditions/parse":
+                text = str(payload.get("text", "")).strip()
+                if not text:
+                    raise ValueError("自然语言条件不能为空。")
+                if len(text) > 600:
+                    raise ValueError("自然语言条件过长，请拆成多句或精简后重试。")
+                self._send_json(self.server.state.ai_service().parse_conditions(text))
+                return
+            if self.path == "/ai/insight/oneshot":
+                scene = str(payload.get("scene", "")).strip()
+                if not scene:
+                    raise ValueError("缺少点评场景 scene。")
+                self._send_json(
+                    self.server.state.ai_service().insight_oneshot(scene, payload.get("context"))
+                )
+                return
+            if self.path == "/ai/optimize":
+                self._run_ai_optimize_stream(payload)
                 return
             if self.path == "/ai/chat/stream":
                 self._run_ai_chat_stream(payload)

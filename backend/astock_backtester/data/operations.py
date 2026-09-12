@@ -14,6 +14,7 @@ from astock_backtester.data.warehouse import (
     KNOWN_CAPITAL_FLOW_LISTING_LAG_DAYS,
     KNOWN_CAPITAL_FLOW_SOURCE_GAP_DATES,
     Warehouse,
+    lifecycle_bound,
     uses_symbol_capital_flow_source_start,
 )
 from astock_backtester.models import (
@@ -81,6 +82,15 @@ def build_daily_bars_coverage(
         return DailyBarsCoverageResponse(items=[])
 
     items = []
+    lifecycle_records: dict[str, dict[str, str | None]] = {}
+    if warehouse is not None:
+        try:
+            lifecycle_records = warehouse.read_symbol_lifecycle(
+                [str(symbol) for symbol in bars["symbol"].dropna().astype(str).unique()]
+            )
+        except Exception as exc:
+            logger.warning("symbol lifecycle read failed; falling back to unclipped coverage: %s", exc)
+            lifecycle_records = {}
     for symbol, frame in bars.groupby("symbol", sort=True):
         frame = frame.sort_values("trade_date")
         data_start_date = frame["trade_date"].min()
@@ -88,8 +98,23 @@ def build_daily_bars_coverage(
         coverage_start_date = requested_start_date if requested_start_date is not None else data_start_date
         coverage_end_date = requested_end_date if requested_end_date is not None else data_end_date
         present_dates = set(frame["trade_date"])
-        expected_dates = _date_range(coverage_start_date, coverage_end_date)
+        record = lifecycle_records.get(str(symbol))
+        listing_date = lifecycle_bound(record, "listing_date")
+        delisted_date = lifecycle_bound(record, "delisted_date")
+        if listing_date is not None and listing_date > coverage_start_date:
+            coverage_start_date = listing_date
+        if delisted_date is not None and delisted_date < coverage_end_date:
+            coverage_end_date = delisted_date
+        if coverage_start_date <= coverage_end_date:
+            expected_dates = _date_range(coverage_start_date, coverage_end_date)
+        else:
+            expected_dates = set()
         missing_trade_dates = sorted(expected_dates - present_dates)
+        lifecycle_status = "unknown"
+        if record is not None:
+            lifecycle_status = "delisted" if delisted_date is not None else str(record.get("status") or "listed")
+            if lifecycle_status not in ("unknown", "listed", "delisted"):
+                lifecycle_status = "listed"
         items.append(
             DailyBarsCoverageItem(
                 symbol=str(symbol),
@@ -105,6 +130,9 @@ def build_daily_bars_coverage(
                     item.date()
                     for item in frame.loc[frame["float_market_cap"].isna(), "trade_date"].tolist()
                 ],
+                listing_date=listing_date.date() if listing_date is not None else None,
+                delisted_date=delisted_date.date() if delisted_date is not None else None,
+                lifecycle_status=lifecycle_status,  # type: ignore[arg-type]
             )
         )
     return DailyBarsCoverageResponse(items=items)
@@ -211,6 +239,17 @@ def fetch_daily_bars_into_cache(
         cache.write_daily_bars(frame)
         if warehouse is not None:
             warehouse.write_daily_bars(frame)
+            derived_listings = derive_listing_dates_from_frame(frame)
+            if derived_listings:
+                try:
+                    warehouse.upsert_symbol_lifecycle(
+                        [
+                            {"symbol": symbol, "listing_date": listing_date, "status": "listed"}
+                            for symbol, listing_date in derived_listings.items()
+                        ]
+                    )
+                except Exception as exc:
+                    logger.warning("symbol lifecycle upsert failed after daily-bars fetch: %s", exc)
         fetched_symbols = sorted(frame["symbol"].astype(str).unique().tolist())
     missing_symbols = sorted(
         {
@@ -1042,3 +1081,101 @@ def build_service_health(
         instance_id=instance_id,
         coverage=coverage,
     )
+
+
+def derive_listing_dates_from_frame(frame: pd.DataFrame) -> dict[str, str]:
+    """Derive ``symbol -> listing_date`` (ISO) from fetched daily-bar rows.
+
+    Imported rows carry ``listing_days`` (9999 means unknown), so a single
+    in-memory conversion recovers the listing date without extra network
+    calls. Only rows with a plausible ``listing_days`` are used.
+    """
+    if frame.empty or "listing_days" not in frame.columns:
+        return {}
+    listing_frame = frame[["symbol", "trade_date", "listing_days"]].copy()
+    listing_frame["listing_days"] = pd.to_numeric(listing_frame["listing_days"], errors="coerce")
+    listing_frame = listing_frame.dropna(subset=["listing_days"])
+    listing_frame = listing_frame.loc[(listing_frame["listing_days"] > 0) & (listing_frame["listing_days"] < 9999)]
+    if listing_frame.empty:
+        return {}
+    listing_frame["trade_date"] = pd.to_datetime(listing_frame["trade_date"], errors="coerce")
+    listing_frame = listing_frame.dropna(subset=["trade_date"])
+    listing_frame["listing_date"] = listing_frame["trade_date"] - pd.to_timedelta(
+        listing_frame["listing_days"].astype("int64"), unit="D"
+    )
+    listing_frame = listing_frame.sort_values(["symbol", "trade_date"])
+    listing_frame = listing_frame.drop_duplicates("symbol", keep="last")
+    return {
+        str(row["symbol"]): row["listing_date"].date().isoformat()
+        for _, row in listing_frame.iterrows()
+    }
+
+
+def refresh_symbol_lifecycle(
+    warehouse: Warehouse,
+    current_listings: dict[str, str | None],
+    *,
+    min_current_symbols: int = 1000,
+    stale_delist_days: int = 30,
+) -> dict[str, Any]:
+    """Best-effort ``symbol_lifecycle`` refresh used around full-market syncs.
+
+    ``current_listings`` maps every symbol the source currently reports to its
+    listing date (``None`` when unknown). When the source list looks complete
+    (at least ``min_current_symbols`` entries), warehouse symbols that are
+    absent from it *and* have no recent OHLC rows are marked delisted with
+    their last known trade date. A suspiciously small source list only
+    refreshes listing dates and never delists anything, so a flaky upstream
+    cannot silently freeze the sync universe.
+    """
+    if not current_listings:
+        return {"status": "skipped", "reason": "empty_current_listings"}
+    rows: list[dict[str, str | None]] = [
+        {"symbol": symbol, "listing_date": listing_date, "status": "listed"}
+        for symbol, listing_date in current_listings.items()
+    ]
+    delisted: list[dict[str, str | None]] = []
+    if len(current_listings) >= min_current_symbols:
+        try:
+            warehouse_symbols = warehouse.read_daily_symbols(require_ohlc=True)
+        except Exception:
+            warehouse_symbols = []
+        candidates = sorted(set(warehouse_symbols) - {str(symbol) for symbol in current_listings})
+        if candidates:
+            try:
+                history = warehouse.read_daily_bars(
+                    symbols=candidates,
+                    start_date=(pd.Timestamp.today() - pd.Timedelta(days=stale_delist_days)).date().isoformat(),
+                    require_ohlc=True,
+                )
+            except Exception:
+                history = pd.DataFrame()
+            recent_symbols = set() if history.empty else set(history["symbol"].astype(str).unique())
+            stale_candidates = [symbol for symbol in candidates if symbol not in recent_symbols]
+            if stale_candidates:
+                try:
+                    stale_history = warehouse.read_daily_bars(symbols=stale_candidates, require_ohlc=True)
+                except Exception:
+                    stale_history = pd.DataFrame()
+                if not stale_history.empty:
+                    stale_history = stale_history.copy()
+                    stale_history["trade_date"] = pd.to_datetime(stale_history["trade_date"], errors="coerce")
+                    last_dates = stale_history.groupby(stale_history["symbol"].astype(str))["trade_date"].max()
+                else:
+                    last_dates = pd.Series(dtype="datetime64[ns]")
+                for symbol in stale_candidates:
+                    last_date = last_dates.get(symbol)
+                    delisted.append(
+                        {
+                            "symbol": symbol,
+                            "delisted_date": last_date.date().isoformat() if pd.notna(last_date) else None,
+                            "status": "delisted",
+                        }
+                    )
+    written = warehouse.upsert_symbol_lifecycle([*rows, *delisted])
+    return {
+        "status": "ok",
+        "listed_upserts": len(rows),
+        "delisted_upserts": len(delisted),
+        "written_rows": written,
+    }

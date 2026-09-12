@@ -118,6 +118,54 @@ DIGEST_PROMPT = """你是 A 股资讯编辑。下面是刚刚从多个数据源�
 原始数据：
 {data}"""
 
+CONDITION_PARSE_SYSTEM = """你是 A 股策略条件翻译器。把用户的自然语言规则逐条改写成本地回测引擎可执行的条件 DSL。
+可用入场条件模板（逐字套用，只改数字）：
+- 收盘价站上N日均线 ｜ 收盘价跌破N日均线（N 为数字）
+- 量比N日介于A到B
+- 流通市值X到Y（可带单位万/亿）
+- 换手率A%到B%
+- 近N日涨幅介于A%到B% ｜ 近N日涨幅小于X%
+- 近N日主力净流入大于X（万/亿）｜ 近N日主力净流出大于X（万/亿）
+- 突破N日新高 ｜ MACD柱线大于X
+- 市场上涨家数占比大于N%
+离场条件额外支持：MACD死叉 ｜ 资金流出 ｜ 跌破N日低点 ｜ 创N日新低
+模糊说法按语义最近的模板近似，例如：放量→量比2日介于1.2到2.5；缩量回调→近5日涨幅介于-3%到3%；超跌→近5日涨幅介于-15%到-5%；破位→收盘价跌破20日均线；中小盘→流通市值20亿到200亿。
+只输出 JSON 对象，禁止输出其他文字：
+{{"entry_expressions": ["入场条件1", "入场条件2"], "exit_expressions": ["离场条件1"], "approximations": ["『放量』→量比2日介于1.2到2.5"]}}
+无法覆盖的说法不要编造：直接省略，并在 approximations 里用一句话说明未覆盖部分。"""
+
+CONDITION_PARSE_USER = """用户输入：
+{text}
+
+请输出 JSON。"""
+
+CONDITION_PARSE_RETRY = """你上一轮输出的部分条件没有通过本地校验：
+{failures}
+
+请修正这些条件（或改为语义最近的合法模板），保持已通过条件不变，重新输出完整 JSON 对象：
+{{"entry_expressions": [...], "exit_expressions": [...], "approximations": [...]}}
+
+用户原始输入：
+{text}"""
+
+ONESHOT_PROMPTS = {
+    "results_overview": """你是 A 股回测工作台的点评助手。基于以下一次历史回测的指标摘要，写一段不超过 80 字的中文短评：
+先一句话总结收益/回撤特征，再指出一个最值得注意的风险或改进点。只使用给定数字，禁止编造。结尾不要加免责声明。
+
+指标摘要：
+{context}""",
+    "data_coverage": """你是 A 股数据管家。以下是数据中心覆盖摘要（数据集、股票数、缺失行、逐股缺口）。写一段不超过 120 字的中文诊断：
+指出缺失模式（新上市/退市/资金流缺口/市值缺口），并直接告诉用户该点数据中心哪个按钮补齐。只使用给定事实。
+
+覆盖摘要：
+{context}""",
+    "risk_alerts": """你是 A 股风险解读助手。以下是全市场 ST/退市风险清单摘要。写一段不超过 80 字的中文解读：
+概括风险集中度（数量、板块或特征），并提醒一句应对原则。只使用给定事实。
+
+风险摘要：
+{context}""",
+}
+
 
 def build_system_prompt(knowledge_ready: bool, style: str = "balanced") -> str:
     style_block = STYLE_PROMPTS.get(style, STYLE_PROMPTS["balanced"])
@@ -135,3 +183,22 @@ def build_insight_messages(data_text: str) -> list[dict[str, str]]:
 
 def build_digest_messages(data_text: str) -> list[dict[str, str]]:
     return [{"role": "user", "content": DIGEST_PROMPT.format(data=data_text)}]
+
+
+def build_condition_parse_messages(text: str) -> list[dict[str, str]]:
+    return [
+        {"role": "system", "content": CONDITION_PARSE_SYSTEM},
+        {"role": "user", "content": CONDITION_PARSE_USER.format(text=text)},
+    ]
+
+
+def build_condition_parse_retry_messages(text: str, failures: str) -> list[dict[str, str]]:
+    return [
+        {"role": "system", "content": CONDITION_PARSE_SYSTEM},
+        {"role": "user", "content": CONDITION_PARSE_RETRY.format(text=text, failures=failures)},
+    ]
+
+
+def build_oneshot_messages(scene: str, context_text: str) -> list[dict[str, str]]:
+    template = ONESHOT_PROMPTS[scene]
+    return [{"role": "user", "content": template.format(context=context_text)}]

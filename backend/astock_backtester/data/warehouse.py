@@ -60,6 +60,17 @@ class Warehouse:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS symbol_lifecycle (
+                    symbol TEXT PRIMARY KEY,
+                    listing_date TEXT,
+                    delisted_date TEXT,
+                    status TEXT NOT NULL DEFAULT 'listed',
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
 
     def _partition_path(self, year: int) -> Path:
         return self.daily_bars_root / f"year={year}" / "daily_bars.parquet"
@@ -370,7 +381,15 @@ class Warehouse:
 
         if daily_symbols and daily_end is not None:
             latest_symbols = daily_symbols_by_date.get(pd.Timestamp(daily_end), set())
-            daily_missing_rows = max(0, len(daily_symbols) - len(latest_symbols))
+            lifecycle = self.read_symbol_lifecycle()
+            delisted_before_end = {
+                symbol
+                for symbol, record in lifecycle.items()
+                if _lifecycle_bound(record, "delisted_date") is not None
+                and _lifecycle_bound(record, "delisted_date") < pd.Timestamp(daily_end)
+            }
+            active_symbols = daily_symbols - delisted_before_end
+            daily_missing_rows = max(0, len(active_symbols) - len(latest_symbols - delisted_before_end))
 
         return [
             DatasetCoverage(
@@ -396,9 +415,94 @@ class Warehouse:
             ),
         ]
 
+    def upsert_symbol_lifecycle(self, rows: Sequence[dict[str, str | None]]) -> int:
+        """Insert or update ``symbol_lifecycle`` rows.
+
+        Each row needs ``symbol`` and may carry ``listing_date`` /
+        ``delisted_date`` (ISO strings or ``None``) plus ``status``
+        (``listed`` / ``delisted`` / ``unknown``). Returns the number of rows
+        written; the write is atomic per call.
+        """
+        payload = []
+        for row in rows:
+            symbol = str(row.get("symbol", "")).strip()
+            if not symbol:
+                continue
+            status = str(row.get("status") or "").strip()
+            if not status:
+                status = "delisted" if row.get("delisted_date") else "listed"
+            payload.append(
+                (
+                    symbol,
+                    _clean_lifecycle_date(row.get("listing_date")),
+                    _clean_lifecycle_date(row.get("delisted_date")),
+                    status,
+                )
+            )
+        if not payload:
+            return 0
+        with sqlite3.connect(self.sqlite_path) as conn:
+            conn.executemany(
+                """
+                INSERT INTO symbol_lifecycle (symbol, listing_date, delisted_date, status, updated_at)
+                VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(symbol) DO UPDATE SET
+                    listing_date = COALESCE(excluded.listing_date, symbol_lifecycle.listing_date),
+                    delisted_date = COALESCE(excluded.delisted_date, symbol_lifecycle.delisted_date),
+                    status = excluded.status,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                payload,
+            )
+        return len(payload)
+
+    def read_symbol_lifecycle(self, symbols: Sequence[str] | None = None) -> dict[str, dict[str, str | None]]:
+        """Return ``{symbol: {listing_date, delisted_date, status}}`` records.
+
+        ``listing_date`` / ``delisted_date`` are ISO strings or ``None``;
+        symbols without a lifecycle record are absent from the mapping, and the
+        caller is expected to fall back to the conservative (unclipped) window.
+        """
+        selected = None
+        if symbols is not None:
+            selected = {str(symbol).strip() for symbol in symbols if str(symbol).strip()}
+            if not selected:
+                return {}
+        with sqlite3.connect(self.sqlite_path) as conn:
+            conn.row_factory = sqlite3.Row
+            if selected is None:
+                rows = conn.execute("SELECT symbol, listing_date, delisted_date, status FROM symbol_lifecycle").fetchall()
+            else:
+                marks = ",".join("?" for _ in selected)
+                rows = conn.execute(
+                    f"SELECT symbol, listing_date, delisted_date, status FROM symbol_lifecycle WHERE symbol IN ({marks})",
+                    tuple(sorted(selected)),
+                ).fetchall()
+        return {
+            str(row["symbol"]): {
+                "listing_date": row["listing_date"],
+                "delisted_date": row["delisted_date"],
+                "status": row["status"],
+            }
+            for row in rows
+        }
+
+    def read_delisted_symbols(self) -> set[str]:
+        """Symbols whose lifecycle record marks them delisted (delisted_date set)."""
+        with sqlite3.connect(self.sqlite_path) as conn:
+            rows = conn.execute(
+                "SELECT symbol FROM symbol_lifecycle WHERE delisted_date IS NOT NULL OR status = 'delisted'"
+            ).fetchall()
+        return {str(row[0]) for row in rows}
+
     def read_capital_flow_missing_symbols(self, start_date: str, end_date: str) -> set[str]:
         """Return symbols whose rows in the latest daily-bars partition have no
         ``main_net_inflow`` value within ``[start_date, end_date]``.
+
+        Rows outside a symbol's ``symbol_lifecycle`` window (before listing /
+        after delisting) are ignored, so a delisted stock no longer reports its
+        post-delisting dates as missing. Symbols without a lifecycle record
+        keep the conservative legacy behaviour.
 
         Encapsulates the parquet layout so HTTP/service layers do not need to
         know how daily bars are stored.
@@ -424,6 +528,23 @@ class Warehouse:
         frame = frame[frame["trade_date"] <= pd.Timestamp(end_date)]
         if frame.empty:
             return set()
+        lifecycle = self.read_symbol_lifecycle(
+            [str(symbol) for symbol in frame["symbol"].dropna().astype(str).unique()]
+        )
+        if lifecycle:
+            listing_by_symbol = frame["symbol"].astype(str).map(
+                lambda symbol: _lifecycle_bound(lifecycle.get(symbol), "listing_date")
+            )
+            delisted_by_symbol = frame["symbol"].astype(str).map(
+                lambda symbol: _lifecycle_bound(lifecycle.get(symbol), "delisted_date")
+            )
+            in_window = (
+                (listing_by_symbol.isna() | (frame["trade_date"] >= listing_by_symbol))
+                & (delisted_by_symbol.isna() | (frame["trade_date"] <= delisted_by_symbol))
+            )
+            frame = frame.loc[in_window]
+        if frame.empty:
+            return set()
         has_any_flow = frame.groupby(frame["symbol"].astype(str))["main_net_inflow"].any()
         return set(has_any_flow[~has_any_flow].index)
 
@@ -440,6 +561,32 @@ def _require_ohlc_rows(frame: pd.DataFrame) -> pd.DataFrame:
     if not all(column in frame for column in OHLC_COLUMNS):
         return pd.DataFrame()
     return frame.dropna(subset=OHLC_COLUMNS)
+
+
+def _clean_lifecycle_date(value: str | None) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text or text.lower() in ("nan", "none", "nat"):
+        return None
+    return text[:10]
+
+
+def lifecycle_bound(record: dict[str, str | None] | None, key: str) -> pd.Timestamp | None:
+    """Parse a lifecycle date field (``listing_date``/``delisted_date``) into a
+    ``pd.Timestamp``; returns ``None`` for missing records or values."""
+    if not record:
+        return None
+    raw = record.get(key)
+    if not raw:
+        return None
+    try:
+        return pd.Timestamp(str(raw)[:10])
+    except ValueError:
+        return None
+
+
+_lifecycle_bound = lifecycle_bound
 
 
 def uses_symbol_capital_flow_source_start(

@@ -135,6 +135,9 @@ class DailyBarsCoverageItem(BaseModel):
     missing_trade_dates: list[date] = Field(default_factory=list)
     missing_capital_flow_dates: list[date] = Field(default_factory=list)
     missing_market_cap_dates: list[date] = Field(default_factory=list)
+    listing_date: date | None = None
+    delisted_date: date | None = None
+    lifecycle_status: Literal["unknown", "listed", "delisted"] = "unknown"
 
 
 class DailyBarsCoverageResponse(BaseModel):

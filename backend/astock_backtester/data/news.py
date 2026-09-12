@@ -151,6 +151,19 @@ class MarketNewsProvider:
             self._cached_until = cache_until
             return self._response_for_limit(response, limit)
 
+    def recent_success(self) -> dict[str, object]:
+        """Public health snapshot for ``/diagnostics/sources``; never fetches."""
+        response = self._last_successful_response
+        if response is None or self._last_successful_at <= 0.0:
+            return {"ok": False, "seconds_since_success": None, "diagnostics": ["尚未有成功拉取记录。"]}
+        return {
+            "ok": True,
+            "seconds_since_success": max(0.0, monotonic() - self._last_successful_at),
+            "source": response.source,
+            "item_count": len(response.items),
+            "diagnostics": list(response.diagnostics),
+        }
+
     def _fresh_cached_response(self, limit: int) -> MarketNewsResponse | None:
         if self._cached_response is None or self.cache_ttl <= 0:
             return None

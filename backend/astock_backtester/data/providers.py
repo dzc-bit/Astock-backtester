@@ -97,6 +97,32 @@ class ADataProvider:
         )
         return _unique_symbols([str(item) for item in frame[code_column].dropna().tolist()])
 
+    def list_symbol_listings(self) -> dict[str, str | None]:
+        """Current-market symbol -> listing date (ISO string, possibly ``None``).
+
+        Backed by adata's ``all_code()`` which carries a ``list_date`` column.
+        Raises whatever the underlying source raises so callers can fall back.
+        """
+        adata = self._adata()
+        frame = adata.stock.info.all_code()
+        if frame is None or frame.empty:
+            return {}
+        code_column = next(
+            (column for column in ["stock_code", "code", "symbol"] if column in frame.columns),
+            frame.columns[0],
+        )
+        listings: dict[str, str | None] = {}
+        for _, row in frame.iterrows():
+            code = normalize_symbol(str(row[code_column]))
+            if not code or code in listings:
+                continue
+            raw_date = row.get("list_date")
+            if raw_date is None or pd.isna(raw_date):
+                listings[code] = None
+                continue
+            listings[code] = str(raw_date)[:10]
+        return listings
+
     def fetch_daily_bars(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
         adata = self._adata()
         code = normalize_symbol(symbol)
@@ -249,6 +275,23 @@ class CompositeProvider:
         if errors:
             raise ProviderError("; ".join(errors))
         return []
+
+    def list_symbol_listings(self) -> dict[str, str | None]:
+        errors: list[str] = []
+        for provider in self.providers:
+            listing_reader = getattr(provider, "list_symbol_listings", None)
+            if listing_reader is None:
+                continue
+            try:
+                listings = listing_reader()
+            except Exception as exc:
+                errors.append(f"{provider.name}: {exc}")
+                continue
+            if listings:
+                return listings
+        if errors:
+            raise ProviderError("; ".join(errors))
+        return {}
 
     def fetch_daily_bars(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
         errors: list[str] = []

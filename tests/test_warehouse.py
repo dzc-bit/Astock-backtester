@@ -392,3 +392,86 @@ def test_warehouse_does_not_overwrite_corrupt_partition_when_new_rows_arrive(tmp
         )
 
     assert corrupt_path.read_bytes() == b"not a parquet file"
+
+
+def test_warehouse_symbol_lifecycle_roundtrip_and_delisted_lookup(tmp_path):
+    warehouse = Warehouse(tmp_path)
+
+    assert warehouse.read_symbol_lifecycle() == {}
+    assert warehouse.read_delisted_symbols() == set()
+
+    written = warehouse.upsert_symbol_lifecycle(
+        [
+            {"symbol": "600519", "listing_date": "2001-08-27", "status": "listed"},
+            {"symbol": "000002", "listing_date": "1991-01-29", "delisted_date": "2026-05-30", "status": "delisted"},
+            {"symbol": "600001", "listing_date": "2026-06-01", "status": "listed"},
+        ]
+    )
+    assert written == 3
+
+    lifecycle = warehouse.read_symbol_lifecycle()
+    assert lifecycle["600519"] == {"listing_date": "2001-08-27", "delisted_date": None, "status": "listed"}
+    assert lifecycle["000002"]["delisted_date"] == "2026-05-30"
+    # A later upsert without a listing date keeps the existing one via COALESCE.
+    warehouse.upsert_symbol_lifecycle([{"symbol": "600001", "delisted_date": "2026-06-10", "status": "delisted"}])
+    lifecycle = warehouse.read_symbol_lifecycle(symbols=["600001"])
+    assert lifecycle["600001"]["listing_date"] == "2026-06-01"
+    assert lifecycle["600001"]["delisted_date"] == "2026-06-10"
+
+    assert warehouse.read_delisted_symbols() == {"000002", "600001"}
+
+
+def test_warehouse_capital_flow_missing_symbols_ignores_rows_outside_lifecycle_window(tmp_path):
+    warehouse = Warehouse(tmp_path)
+    warehouse.write_daily_bars(
+        pd.DataFrame(
+            {
+                "symbol": ["600001", "600001", "600002", "600003"],
+                "trade_date": ["2026-06-01", "2026-06-02", "2026-06-02", "2026-06-02"],
+                "open": [10.0, 10.0, 20.0, 30.0],
+                "high": [10.5, 10.5, 20.5, 30.5],
+                "low": [9.8, 9.8, 19.8, 29.8],
+                "close": [10.2, 10.2, 20.2, 30.2],
+                "volume": [1000, 1000, 2000, 3000],
+                "main_net_inflow": [100.0, float("nan"), float("nan"), float("nan")],
+            }
+        )
+    )
+    warehouse.upsert_symbol_lifecycle(
+        [
+            # 600001 traded on 06-01 (with flow) and shows a stray 06-02 row
+            # after its delisting date; the stray row must not mark it missing.
+            {"symbol": "600001", "delisted_date": "2026-06-01", "status": "delisted"},
+            # 600002 has no lifecycle record: legacy conservative behaviour.
+            # 600003 was delisted before the window entirely.
+            {"symbol": "600003", "delisted_date": "2026-05-30", "status": "delisted"},
+        ]
+    )
+
+    missing = warehouse.read_capital_flow_missing_symbols("2026-06-01", "2026-06-02")
+
+    assert missing == {"600002"}
+
+
+def test_warehouse_coverage_daily_missing_rows_excludes_delisted_symbols(tmp_path):
+    warehouse = Warehouse(tmp_path)
+    warehouse.write_daily_bars(
+        pd.DataFrame(
+            {
+                "symbol": ["000001", "000002", "000003", "000001"],
+                "trade_date": ["2026-06-05", "2026-06-05", "2026-06-05", "2026-06-08"],
+                "open": [10.0, 10.0, 10.0, 10.2],
+                "high": [10.5, 10.5, 10.5, 10.4],
+                "low": [9.8, 9.8, 9.8, 10.0],
+                "close": [10.2, 10.2, 10.2, 10.3],
+                "volume": [1000, 1000, 1000, 1200],
+            }
+        )
+    )
+    warehouse.upsert_symbol_lifecycle(
+        [{"symbol": "000002", "delisted_date": "2026-06-05", "status": "delisted"}]
+    )
+
+    coverage = {item.dataset: item for item in warehouse.coverage()}
+
+    assert coverage["daily_bars"].missing_rows == 1

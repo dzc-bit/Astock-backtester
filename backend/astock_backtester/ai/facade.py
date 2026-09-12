@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from astock_backtester.ai.agent import AgentRunner
+from astock_backtester.ai.condition_dsl import parse_conditions_with_llm
 from astock_backtester.ai.config import AiConfig, AiConfigStore, ai_base_dir_from_cache_dir
 from astock_backtester.ai.context import ContextBudget, ToolResultStore
 from astock_backtester.ai.digest import DigestEngine, DigestStore
@@ -23,6 +24,7 @@ from astock_backtester.ai.insights import HEARTBEAT_INTERVAL_SECONDS, EventBroke
 from astock_backtester.ai.llm_client import OpenAiCompatibleClient
 from astock_backtester.ai.memory import MemoryStore, plan_memory_ops
 from astock_backtester.ai.models import AiChatRequest, AiStatusResponse
+from astock_backtester.ai.oneshot import ONESHOT_SCENES, insight_oneshot
 from astock_backtester.ai.prompts import build_system_prompt
 from astock_backtester.ai.rag.retriever import KnowledgeIndex, build_knowledge_tool
 from astock_backtester.ai.sessions import SessionStore
@@ -146,6 +148,26 @@ class AiService:
         )
         saved = self._config_store.save(merged)
         return {"ok": True, "configured": saved.is_configured(), **self._config_store.masked_view()}
+
+    # ------------------------------------------------------------ one-shot AI
+    def _require_model(self) -> Any:
+        config = self._config_store.load()
+        if not config.is_configured():
+            raise AiNotConfigured("AI 服务尚未配置，请先在设置中填写 base_url、API Key 和模型名。")
+        return self._model
+
+    def parse_conditions(self, text: str) -> dict[str, Any]:
+        """Natural-language rules → validated entry/exit DSL (self-healing)."""
+        model = self._require_model()
+        return parse_conditions_with_llm(model, text)
+
+    def insight_oneshot(self, scene: str, context: Any) -> dict[str, Any]:
+        """Single-paragraph AI commentary for a named UI scene."""
+        if scene not in ONESHOT_SCENES:
+            raise ValueError(f"未知点评场景：{scene}（可选：{', '.join(ONESHOT_SCENES)}）")
+        model = self._require_model()
+        text = insight_oneshot(model, scene, context)
+        return {"ok": True, "scene": scene, "text": text, "generated_at": datetime.now(UTC).isoformat()}
 
     # ------------------------------------------------------------------ chat
     def chat_stream(self, request: AiChatRequest) -> Iterator[dict[str, Any]]:

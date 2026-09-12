@@ -17,10 +17,38 @@ from astock_backtester.data.operations import (
     fetch_capital_flow_into_cache,
 )
 from astock_backtester.data.trading_calendar import a_share_trade_dates
-from astock_backtester.data.warehouse import Warehouse
+from astock_backtester.data.warehouse import Warehouse, lifecycle_bound
 from astock_backtester.models import SyncJobStatus
 
 OHLC_COLUMNS = ["open", "high", "low", "close"]
+
+
+def _lifecycle_clipped_required_dates(
+    required_dates: set[pd.Timestamp],
+    record: dict[str, str | None] | None,
+    range_start: str,
+    range_end: str,
+) -> set[pd.Timestamp] | None:
+    """Clip the sync window's required trading dates to a symbol's lifecycle.
+
+    Returns ``None`` when the symbol's lifecycle window does not intersect the
+    sync window at all (nothing is required, nothing can be complete), or when
+    no lifecycle record exists — in which case the caller should use the full
+    ``required_dates`` set.
+    """
+    listing = lifecycle_bound(record, "listing_date")
+    delisted = lifecycle_bound(record, "delisted_date")
+    if record is None or (listing is None and delisted is None):
+        return required_dates
+    window_start = pd.Timestamp(range_start)
+    window_end = pd.Timestamp(range_end)
+    clipped_start = max(window_start, listing) if listing is not None else window_start
+    clipped_end = min(window_end, delisted) if delisted is not None else window_end
+    if clipped_start > clipped_end:
+        return set()
+    if clipped_start <= window_start and clipped_end >= window_end:
+        return required_dates
+    return {date for date in required_dates if clipped_start <= date <= clipped_end}
 
 
 @dataclass
@@ -319,12 +347,21 @@ class SyncJobManager:
         deduped = normalized.drop_duplicates(["symbol", "_td_norm"], keep="last")
         existing_df = deduped.set_index(["symbol", "_td_norm"]).sort_index()
 
+        lifecycle: dict[str, dict[str, str | None]] = {}
+        try:
+            lifecycle = self.warehouse.read_symbol_lifecycle()
+        except Exception:
+            lifecycle = {}
+
         complete: set[str] = set()
         if "float_market_cap" in normalized.columns:
             cap_complete = normalized.dropna(subset=["float_market_cap"])
             actual_by_sym = cap_complete.groupby("symbol")["_td_norm"].apply(set)
             for symbol, actual_dates in actual_by_sym.items():
-                if required_dates.issubset(actual_dates):
+                symbol_required = _lifecycle_clipped_required_dates(
+                    required_dates, lifecycle.get(str(symbol)), expected_dates[0], expected_dates[1]
+                )
+                if symbol_required is not None and symbol_required.issubset(actual_dates):
                     complete.add(str(symbol))
         return DailyCompletenessSnapshot(complete_symbols=complete, existing_by_pair=existing_df)
 

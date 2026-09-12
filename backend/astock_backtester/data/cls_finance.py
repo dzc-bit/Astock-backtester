@@ -158,6 +158,18 @@ class ClsFinanceProvider:
                 self._cached_until = 0.0
             return response.model_copy(deep=True)
 
+    def recent_success(self) -> dict[str, object]:
+        """Public health snapshot for ``/diagnostics/sources``; never fetches."""
+        response = self._last_successful_response
+        if response is None or self._last_successful_at <= 0.0:
+            return {"ok": False, "seconds_since_success": None, "diagnostics": ["尚未有成功拉取记录。"]}
+        return {
+            "ok": True,
+            "seconds_since_success": max(0.0, monotonic() - self._last_successful_at),
+            "source": response.source,
+            "diagnostics": list(response.diagnostics),
+        }
+
     def _merge_recent_success(
         self,
         response: ClsFinanceResponse,
