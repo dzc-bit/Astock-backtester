@@ -28,6 +28,7 @@ export function mockAiConfig(): AiConfigView {
     model: "demo-model",
     embedding_model: "demo-embedding",
     api_style: "chat-completions",
+    research_style: "balanced",
     api_key_masked: "sk-****demo",
     temperature: 0.3,
     max_steps: 8,
@@ -44,6 +45,7 @@ export function mockAiSaveConfig(payload: AiConfigUpdatePayload): AiConfigView {
     model: payload.model,
     embedding_model: payload.embedding_model,
     api_style: payload.api_style,
+    research_style: payload.research_style,
     configured: Boolean(payload.base_url && payload.model)
   };
 }

@@ -21,7 +21,7 @@ from astock_backtester.ai.digest import DigestEngine, DigestStore
 from astock_backtester.ai.errors import AiNotConfigured, ai_error_code
 from astock_backtester.ai.insights import HEARTBEAT_INTERVAL_SECONDS, EventBroker, InsightEngine
 from astock_backtester.ai.llm_client import OpenAiCompatibleClient
-from astock_backtester.ai.memory import MemoryStore, extract_memories
+from astock_backtester.ai.memory import MemoryStore, plan_memory_ops
 from astock_backtester.ai.models import AiChatRequest, AiStatusResponse
 from astock_backtester.ai.prompts import build_system_prompt
 from astock_backtester.ai.rag.retriever import KnowledgeIndex, build_knowledge_tool
@@ -138,6 +138,7 @@ class AiService:
             model=str(payload.get("model", current.model)),
             embedding_model=str(payload.get("embedding_model", current.embedding_model)),
             api_style=str(payload.get("api_style", current.api_style)),
+            research_style=str(payload.get("research_style", current.research_style)),
             temperature=float(payload.get("temperature", current.temperature)),
             max_steps=int(payload.get("max_steps", current.max_steps)),
             insights_enabled=bool(payload.get("insights_enabled", current.insights_enabled)),
@@ -157,10 +158,13 @@ class AiService:
         session_id = str(session.get("session_id"))
         yield {"type": "session", "session_id": session_id, "title": session.get("title")}
 
-        system_prompt = build_system_prompt(self._knowledge.is_ready())
-        memory_context = self._memory.recall_context()
-        if memory_context:
-            system_prompt += f"\n\n## 用户长期记忆（个性化参考）\n{memory_context}"
+        system_prompt = build_system_prompt(self._knowledge.is_ready(), config.research_style)
+        profile = self._memory.profile_context()
+        if profile:
+            system_prompt += f"\n\n## 用户画像（长期记忆，越用越准）\n{profile}"
+        facts = self._memory.facts_context()
+        if facts:
+            system_prompt += f"\n\n## 已知用户事实（长期记忆）\n{facts}"
 
         events: queue.Queue[dict[str, Any] | None] = queue.Queue()
         error_holder: list[dict[str, Any]] = []
@@ -214,14 +218,24 @@ class AiService:
             yield error_holder[0]
 
     def _remember_from(self, session: dict[str, Any]) -> None:
-        """Best-effort long-term memory extraction after a completed turn."""
+        """Best-effort long-term memory consolidation after a completed turn.
+
+        One LLM call plans add/update/delete operations against the existing
+        store, so memories consolidate (mem0-style) instead of piling up.
+        """
         try:
             if not self._config_store.load().is_configured():
                 return
             turns = session.get("display", [])[-4:]
             dialogue = "\n".join(f"{turn.get('role')}: {str(turn.get('content'))[:400]}" for turn in turns)
-            for content, category in extract_memories(self._model, dialogue):
-                self._memory.remember(content, category)
+            ops = plan_memory_ops(self._model, dialogue, self._memory.load())
+            if ops:
+                applied = self._memory.apply_ops(ops)
+                if applied:
+                    try:
+                        self._log("info", f"AI 长期记忆已更新：{applied} 条操作")
+                    except Exception:  # noqa: BLE001
+                        pass
         except Exception:  # noqa: BLE001 - memory must never break a chat turn
             pass
 

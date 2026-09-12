@@ -16,6 +16,7 @@ CONFIG_FILE_NAME = "ai-config.json"
 
 
 SUPPORTED_API_STYLES = ("chat-completions", "responses", "anthropic")
+SUPPORTED_RESEARCH_STYLES = ("conservative", "balanced", "aggressive")
 
 
 @dataclass
@@ -27,6 +28,9 @@ class AiConfig:
     - ``chat-completions``: POST {base}/chat/completions（OpenAI 兼容，默认）;
     - ``responses``: OpenAI Responses API（GPT-5 系等新接口）;
     - ``anthropic``: Anthropic Messages API（{base}/v1/messages）。
+
+    ``research_style`` selects the analyst persona: conservative / balanced /
+    aggressive（对应保守/均衡/激进三种研究风格，注入 system prompt）。
     """
 
     base_url: str = ""
@@ -34,6 +38,7 @@ class AiConfig:
     model: str = ""
     embedding_model: str = ""
     api_style: str = "chat-completions"
+    research_style: str = "balanced"
     temperature: float = 0.3
     max_steps: int = 8
     insights_enabled: bool = True
@@ -50,6 +55,8 @@ class AiConfig:
         cfg.embedding_model = cfg.embedding_model.strip()
         if cfg.api_style not in SUPPORTED_API_STYLES:
             cfg.api_style = "chat-completions"
+        if cfg.research_style not in SUPPORTED_RESEARCH_STYLES:
+            cfg.research_style = "balanced"
         cfg.temperature = min(max(cfg.temperature, 0.0), 2.0)
         cfg.max_steps = max(1, min(int(cfg.max_steps), 16))
         cfg.insight_max_per_hour = max(0, min(int(cfg.insight_max_per_hour), 60))
@@ -117,6 +124,7 @@ class AiConfigStore:
             "model": config.model,
             "embedding_model": config.embedding_model,
             "api_style": config.api_style,
+            "research_style": config.research_style,
             "api_key_masked": masked_key(config.api_key),
             "temperature": config.temperature,
             "max_steps": config.max_steps,

@@ -69,12 +69,31 @@ export type AiChatHandlers = {
 };
 
 export type AiApiStyle = "chat-completions" | "responses" | "anthropic";
+export type AiResearchStyle = "conservative" | "balanced" | "aggressive";
 
 export const AI_API_STYLE_LABELS: Record<AiApiStyle, string> = {
   "chat-completions": "Chat Completions（OpenAI 兼容 · 默认）",
   responses: "Responses（OpenAI 新接口）",
   anthropic: "Anthropic Messages"
 };
+
+export const AI_RESEARCH_STYLES: Array<{ value: AiResearchStyle; label: string; description: string }> = [
+  {
+    value: "conservative",
+    label: "保守 · 防御型",
+    description: "低波动、高股息、低估值为先，强调回撤控制与流动性，警惕题材连板。"
+  },
+  {
+    value: "balanced",
+    label: "均衡 · 默认",
+    description: "基本面/资金面/技术面三线均衡，右侧交易为主，守正出奇。"
+  },
+  {
+    value: "aggressive",
+    label: "激进 · 进攻型",
+    description: "情绪周期与龙头战法视角，聚焦主线题材与连板梯队（高风险，附纪律提示）。"
+  }
+];
 
 export type AiStatus = {
   configured: boolean;
@@ -93,6 +112,7 @@ export type AiConfigView = {
   model: string;
   embedding_model: string;
   api_style: AiApiStyle;
+  research_style: AiResearchStyle;
   api_key_masked: string;
   temperature: number;
   max_steps: number;
@@ -107,6 +127,7 @@ export type AiConfigUpdatePayload = {
   embedding_model: string;
   api_key: string;
   api_style: AiApiStyle;
+  research_style: AiResearchStyle;
   temperature: number;
   max_steps: number;
   insights_enabled: boolean;

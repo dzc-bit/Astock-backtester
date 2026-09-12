@@ -1,24 +1,24 @@
-"""Long-term memory for the AI assistant.
+"""Long-term memory for the AI assistant — "the more you use it, the better it knows you".
 
-Layered memory design, inspired by MemGPT/Letta (tiered core vs archival
-memory) and mem0 (extraction + consolidation), scaled down to a local-first
-desktop app:
+Layered design (MemGPT/Letta tiering + mem0-style consolidation), fully local:
 
 - Short term: the agent's protocol-message window is capped (10 messages);
-  everything older is folded into the session's rolling summary
-  (see ``agent.AgentRunner``).
-- Long term: durable user facts (preferences, watchlist symbols, recurring
-  parameters) are extracted by the LLM after each turn, consolidated into a
-  JSON store under ``运行产物/AI记忆`` (dedupe by content, LRU-ish eviction by
-  update time), and the top records are injected into the system prompt.
+  overflow is folded into the session rolling summary (see ``AgentRunner``).
+- Long term: after each turn a single LLM call plans **operations** against the
+  existing memory store (add / update / delete), so memories are consolidated
+  instead of blindly appended.  Records carry a category and a weight; recall
+  ranks by ``weight × hit-boost × recency-decay`` so important, recently
+  confirmed facts surface first and stale ones sink.
+- Recall splits into a **user profile** (risk preference / style / holdings —
+  the "knows you" part) and ranked facts, both injected into the system prompt.
 
-Extraction failures are always non-fatal: memory enriches the assistant but
-must never break a chat turn.
+Memory failures are always non-fatal.
 """
 
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import threading
@@ -32,17 +32,31 @@ MEMORY_DIR_NAME = "AI记忆"
 MEMORY_FILE_NAME = "memory.json"
 MAX_RECORDS = 200
 MAX_CONTENT_CHARS = 160
-RECALL_LIMIT = 12
-RECALL_BUDGET_CHARS = 1_600
+PROFILE_LIMIT = 5
+FACTS_LIMIT = 10
+FACTS_BUDGET_CHARS = 1_400
 
-MEMORY_EXTRACT_PROMPT = """从这段最新对话里提取应当长期记住的"用户事实"。
-只提取持久信息：关注/持仓的股票代码、策略偏好、参数习惯、明确的操作指令结果（例如"已把 600519 数据补齐到 2026-09"）。
-不要提取：一次性行情数字、你的回答正文、临时上下文。
-每条不超过 60 字；最多 3 条；没有值得记的就输出 []。
-只输出 JSON 数组，格式：[{{"content": "...", "category": "watchlist|preference|fact|strategy"}}]
+CATEGORIES = ("risk_preference", "watchlist", "holding", "style", "strategy", "fact")
+PROFILE_CATEGORIES = ("risk_preference", "style", "holding")
+VALID_OPS = ("add", "update", "delete")
 
-对话：
-{dialogue}"""
+MEMORY_OPS_PROMPT = """你是用户记忆管理员。根据“最新对话”维护用户的长期记忆（记忆只关于用户本人的持久事实，不存行情数字）。
+现有记忆：
+{existing}
+
+最新对话：
+{dialogue}
+
+规则：
+- 只产出 ≤4 条操作；与现有记忆重复或矛盾时用 update（带上原 id）修正，过时/作废的用 delete。
+- add/update 的 content ≤60 字；category 从 risk_preference(风险偏好)/watchlist(关注标的)/holding(持仓)\
+/style(交易风格)/strategy(常用策略参数)/fact(其他事实) 中选。
+- weight 1-3：3=用户明确强调（如“我只做低估值”），2=明确陈述，1=顺带提及。
+- 用户表明风险偏好、交易风格、加减仓习惯的变化时必须更新。
+- 没有值得记忆的变化就输出 []。
+- 只输出 JSON 数组，格式：\
+[{{"op": "add", "content": "...", "category": "watchlist", "weight": 2}}, \
+{{"op": "update", "id": "...", "content": "..."}}, {{"op": "delete", "id": "..."}}]"""
 
 
 @dataclass
@@ -53,6 +67,27 @@ class MemoryRecord:
     created_at: str
     updated_at: str
     hits: int = 0
+    weight: float = 1.0
+
+
+def _now_iso() -> str:
+    return datetime.now(UTC).isoformat()
+
+
+def _normalize(content: str) -> str:
+    return re.sub(r"\s+", "", content)[:MAX_CONTENT_CHARS]
+
+
+def recall_score(record: MemoryRecord, now: datetime | None = None) -> float:
+    """weight × hit-boost × recency-decay (14 天半衰期)."""
+    now = now or datetime.now(UTC)
+    try:
+        updated = datetime.fromisoformat(record.updated_at)
+    except ValueError:
+        updated = now
+    age_days = max(0.0, (now - updated).total_seconds() / 86_400)
+    decay = math.exp(-age_days / 14.0)
+    return float(record.weight) * (1.0 + 0.15 * record.hits) * (0.2 + 0.8 * decay)
 
 
 class MemoryStore:
@@ -87,62 +122,99 @@ class MemoryStore:
         )
         os.replace(tmp_path, self._path)
 
-    def remember(self, content: str, category: str = "fact") -> MemoryRecord | None:
-        """Add or consolidate a memory (same normalized content refreshes it)."""
-        normalized = re.sub(r"\s+", "", content)[:MAX_CONTENT_CHARS]
-        if not normalized:
-            return None
+    # ------------------------------------------------------------------ ops
+    def apply_ops(self, ops: list[dict[str, Any]]) -> int:
+        """Apply add/update/delete operations; returns applied count."""
+        applied = 0
         with self._lock:
             records = self.load()
-            now = datetime.now(UTC).isoformat()
-            for record in records:
-                if re.sub(r"\s+", "", record.content) == normalized:
-                    record.updated_at = now
-                    record.hits += 1
-                    self.save(records)
-                    return record
-            record = MemoryRecord(
-                id=uuid4().hex[:12], content=content[:MAX_CONTENT_CHARS], category=category, created_at=now, updated_at=now
-            )
-            records.append(record)
+            for op in ops[:4]:
+                kind = str(op.get("op", "")).lower()
+                content = str(op.get("content", "")).strip()[:MAX_CONTENT_CHARS]
+                if kind == "add" and content:
+                    normalized = _normalize(content)
+                    if any(_normalize(record.content) == normalized for record in records):
+                        continue
+                    category = str(op.get("category", "fact"))
+                    if category not in CATEGORIES:
+                        category = "fact"
+                    try:
+                        weight = min(3.0, max(1.0, float(op.get("weight", 1.0))))
+                    except (TypeError, ValueError):
+                        weight = 1.0
+                    now = _now_iso()
+                    records.append(
+                        MemoryRecord(
+                            id=uuid4().hex[:12],
+                            content=content,
+                            category=category,
+                            created_at=now,
+                            updated_at=now,
+                            weight=weight,
+                        )
+                    )
+                    applied += 1
+                elif kind == "update" and content:
+                    target = next((record for record in records if record.id == str(op.get("id", ""))), None)
+                    if target is None:
+                        continue
+                    target.content = content
+                    if str(op.get("category", "")) in CATEGORIES:
+                        target.category = str(op["category"])
+                    if op.get("weight") is not None:
+                        try:
+                            target.weight = min(3.0, max(1.0, float(op["weight"])))
+                        except (TypeError, ValueError):
+                            pass
+                    target.updated_at = _now_iso()
+                    applied += 1
+                elif kind == "delete":
+                    before = len(records)
+                    records = [record for record in records if record.id != str(op.get("id", ""))]
+                    if len(records) < before:
+                        applied += 1
             records.sort(key=lambda item: item.updated_at, reverse=True)
-            if len(records) > MAX_RECORDS:
-                records = records[:MAX_RECORDS]
-            self.save(records)
-            return record
+            self.save(records[:MAX_RECORDS])
+        return applied
 
-    def forget(self, memory_id: str) -> bool:
-        with self._lock:
-            records = self.load()
-            remaining = [record for record in records if record.id != memory_id]
-            if len(remaining) == len(records):
-                return False
-            self.save(remaining)
-            return True
+    # --------------------------------------------------------------- recall
+    def _ranked(self) -> list[MemoryRecord]:
+        return sorted(self.load(), key=lambda record: recall_score(record), reverse=True)
 
-    def recall_context(self) -> str:
-        records = sorted(self.load(), key=lambda item: item.updated_at, reverse=True)[:RECALL_LIMIT]
-        if not records:
-            return ""
+    def profile_context(self) -> str:
+        """用户画像：风险偏好 / 交易风格 / 持仓——最"懂你"的部分。"""
+        records = [record for record in self._ranked() if record.category in PROFILE_CATEGORIES]
         lines = []
-        for record in records:
-            content = record.content[:MAX_CONTENT_CHARS]
-            lines.append(f"- [{record.category}] {content}")
-        return "\n".join(lines)[:RECALL_BUDGET_CHARS]
+        labels = {"risk_preference": "风险偏好", "style": "交易风格", "holding": "持仓/关注"}
+        for record in records[:PROFILE_LIMIT]:
+            lines.append(f"- {labels.get(record.category, record.category)}：{record.content[:MAX_CONTENT_CHARS]}")
+        return "\n".join(lines)
+
+    def facts_context(self) -> str:
+        facts = [record for record in self._ranked() if record.category not in PROFILE_CATEGORIES]
+        lines = []
+        for record in facts[:FACTS_LIMIT]:
+            lines.append(f"- [{record.category}] {record.content[:MAX_CONTENT_CHARS]}")
+        return "\n".join(lines)[:FACTS_BUDGET_CHARS]
 
     def count(self) -> int:
         return len(self.load())
 
 
-def extract_memories(model: Any, dialogue_text: str) -> list[tuple[str, str]]:
-    """Best-effort extraction; returns (content, category) pairs.
-
-    ``model`` only needs ``chat(messages, tools=None)`` yielding ("final", ...).
-    """
+def plan_memory_ops(model: Any, dialogue_text: str, existing: list[MemoryRecord] | None = None) -> list[dict[str, Any]]:
+    """One LLM call decides how the memory store should change (mem0-style)."""
     if not dialogue_text.strip():
         return []
+    existing_lines = [
+        f"id={record.id} [{record.category}] {record.content[:MAX_CONTENT_CHARS]}"
+        for record in (existing or [])[:20]
+    ]
+    prompt = MEMORY_OPS_PROMPT.format(
+        existing="\n".join(existing_lines) if existing_lines else "（空）",
+        dialogue=dialogue_text[:3_000],
+    )
     final_content = ""
-    for event in model.chat([{"role": "user", "content": MEMORY_EXTRACT_PROMPT.format(dialogue=dialogue_text)}], tools=None):
+    for event in model.chat([{"role": "user", "content": prompt}], tools=None):
         if event[0] == "final":
             final_content = str(event[1].get("content") or "")
     start = final_content.find("[")
@@ -153,13 +225,19 @@ def extract_memories(model: Any, dialogue_text: str) -> list[tuple[str, str]]:
         payload = json.loads(final_content[start : end + 1])
     except json.JSONDecodeError:
         return []
-    extracted: list[tuple[str, str]] = []
     if not isinstance(payload, list):
         return []
-    for item in payload[:3]:
-        if isinstance(item, dict) and str(item.get("content", "")).strip():
-            category = str(item.get("category", "fact"))
-            if category not in ("watchlist", "preference", "fact", "strategy"):
-                category = "fact"
-            extracted.append((str(item["content"])[:MAX_CONTENT_CHARS], category))
-    return extracted
+    ops: list[dict[str, Any]] = []
+    for item in payload[:4]:
+        if not isinstance(item, dict) or str(item.get("op", "")).lower() not in VALID_OPS:
+            continue
+        op: dict[str, Any] = {
+            "op": str(item["op"]).lower(),
+            "id": str(item.get("id", "")),
+            "content": str(item.get("content", ""))[:MAX_CONTENT_CHARS],
+            "category": str(item.get("category", "fact")),
+            "weight": item.get("weight", 1.0),
+        }
+        if op["content"].strip() or op["op"] == "delete":
+            ops.append(op)
+    return ops

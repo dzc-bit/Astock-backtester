@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Eye, EyeOff, Settings, X } from "lucide-react";
-import { AI_API_STYLE_LABELS } from "../aiTypes";
-import type { AiApiStyle, AiConfigUpdatePayload, AiConfigView } from "../aiTypes";
+import { AI_API_STYLE_LABELS, AI_RESEARCH_STYLES } from "../aiTypes";
+import type { AiApiStyle, AiConfigUpdatePayload, AiConfigView, AiResearchStyle } from "../aiTypes";
 
 type Props = {
   open: boolean;
@@ -20,6 +20,7 @@ export function AiSettingsModal({ open, config, isSaving = false, errorMessage, 
   const [apiKey, setApiKey] = useState("");
   const [keyVisible, setKeyVisible] = useState(false);
   const [apiStyle, setApiStyle] = useState<AiApiStyle>("chat-completions");
+  const [researchStyle, setResearchStyle] = useState<AiResearchStyle>("balanced");
   const [temperature, setTemperature] = useState(0.3);
   const [maxSteps, setMaxSteps] = useState(8);
   const [insightsEnabled, setInsightsEnabled] = useState(true);
@@ -35,6 +36,7 @@ export function AiSettingsModal({ open, config, isSaving = false, errorMessage, 
     setApiKey("");
     setKeyVisible(false);
     setApiStyle(config.api_style);
+    setResearchStyle(config.research_style);
     setTemperature(config.temperature);
     setMaxSteps(config.max_steps);
     setInsightsEnabled(config.insights_enabled);
@@ -67,6 +69,7 @@ export function AiSettingsModal({ open, config, isSaving = false, errorMessage, 
       embedding_model: embeddingModel.trim(),
       api_key: apiKey.trim(),
       api_style: apiStyle,
+      research_style: researchStyle,
       temperature: Number.isFinite(temperature) ? temperature : 0.3,
       max_steps: Number.isFinite(maxSteps) ? maxSteps : 8,
       insights_enabled: insightsEnabled,
@@ -110,6 +113,24 @@ export function AiSettingsModal({ open, config, isSaving = false, errorMessage, 
               ))}
             </select>
           </label>
+          <div className="ai-field">
+            <span>研究风格（分析师人格）</span>
+            <div className="ai-style-options" role="radiogroup" aria-label="研究风格">
+              {AI_RESEARCH_STYLES.map((style) => (
+                <button
+                  key={style.value}
+                  type="button"
+                  role="radio"
+                  aria-checked={researchStyle === style.value}
+                  className={`ai-style-option ${researchStyle === style.value ? "active" : ""}`}
+                  onClick={() => setResearchStyle(style.value)}
+                >
+                  <strong>{style.label}</strong>
+                  <span>{style.description}</span>
+                </button>
+              ))}
+            </div>
+          </div>
           <div className="ai-field">
             <span className="ai-field-label-row">
               API Key {config?.api_key_masked ? `（已配置 ${config.api_key_masked}，留空保持不变）` : ""}
