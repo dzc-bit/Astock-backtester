@@ -26,3 +26,7 @@ cargo test --manifest-path src-tauri\Cargo.toml   # 需设 CARGO_HOME/RUSTUP_HOM
 - **本机可能开着 Clash 等系统代理**：回环测试必须走 `ProxyHandler({})` 的 opener（见 `tests/test_ai_service_http.py` 顶部）。
 - 仓库工作目录是 `D:\New project 6`（`C:\Users\…\Documents\New project 6` 是 Junction，不要在那边操作）。
 - 分域测试子集命令见 `AGENT必读.md` §13 与 `.zcode/skills/astock-dev/SKILL.md`。
+
+## 关于 pre-commit hook 的取舍（任务书要求的评估结论）
+
+不加 `.zcode/hooks` 提交前自动跑 ruff + eslint：本仓的门禁是"提交前人工跑 `/gates` 全量六项"，hook 只能覆盖 ruff/eslint 两项、却会拖慢每次小提交并在分语义化多次提交时重复执行；且 hook 依赖本地工具链路径（`.tools`），换机/CI 不可移植。真正的兜底是 `.github/workflows/ci.yml`（push/PR 三 job）。若未来要加，建议只挂 ruff（秒级）且提供 `--no-verify` 逃生口。
