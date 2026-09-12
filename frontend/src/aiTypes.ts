@@ -41,11 +41,26 @@ export type AiToolResultEvent = {
   duration_ms: number;
   diagnostics?: string[];
 };
+export type AiEquityPoint = {
+  trade_date: string;
+  equity: number;
+  cash: number;
+  market_value: number;
+  drawdown_pct: number;
+};
+
+export type AiChartArtifact = {
+  type: "equity_curve";
+  title: string;
+  points: AiEquityPoint[];
+};
+
 export type AiResultEvent = {
   type: "result";
   session_id: string;
   display: AiDisplayTurn[];
   strategy?: StrategyConfig | null;
+  chart?: AiChartArtifact | null;
   updated_at?: string;
 };
 export type AiErrorEvent = { type: "error"; code?: string; message?: string };

@@ -135,8 +135,16 @@ class AgentRunner:
                     summary=execution.summary,
                 )
             )
-            if name == "run_strategy_backtest" and execution.ok and isinstance(execution.payload.get("strategy"), dict):
-                self._artifacts["strategy"] = execution.payload["strategy"]
+            if name == "run_strategy_backtest" and execution.ok:
+                if isinstance(execution.payload.get("strategy"), dict):
+                    self._artifacts["strategy"] = execution.payload["strategy"]
+                curve = execution.payload.get("equity_curve_downsampled")
+                if curve:
+                    self._artifacts["chart"] = {
+                        "type": "equity_curve",
+                        "title": "回测权益曲线",
+                        "points": curve,
+                    }
             on_event(
                 {
                     "type": "tool_result",

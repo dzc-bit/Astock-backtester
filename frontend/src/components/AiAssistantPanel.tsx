@@ -6,6 +6,7 @@ import { AlertTriangle, Bot, Send, Settings2, Sparkles, Square, X } from "lucide
 import { loadAiConfig, loadAiStatus, revealAiKey, runAiChatStream, saveAiConfig } from "../aiApi";
 import { translateAiError } from "../aiTypes";
 import type {
+  AiChartArtifact,
   AiChatContext,
   AiConfigUpdatePayload,
   AiConfigView,
@@ -16,6 +17,7 @@ import type {
   AiToolStep
 } from "../aiTypes";
 import type { StrategyConfig } from "../types";
+import { AiEquityChart } from "./AiEquityChart";
 import { AiSettingsModal } from "./AiSettingsModal";
 
 type Props = {
@@ -63,6 +65,7 @@ export function AiAssistantPanel({
   const [configSaving, setConfigSaving] = useState(false);
   const [configError, setConfigError] = useState<string | null>(null);
   const [lastStrategy, setLastStrategy] = useState<StrategyConfig | null>(null);
+  const [lastChart, setLastChart] = useState<AiChartArtifact | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const streamingRef = useRef(false);
@@ -160,6 +163,7 @@ export function AiAssistantPanel({
           onResult: (event) => {
             setTurns(event.display ?? []);
             setSessionId(event.session_id);
+            setLastChart(event.chart ?? null);
             if (event.strategy) {
               // 策略工件保持 sticky：后续普通问答不会把已生成策略“冲掉”。
               setLastStrategy(event.strategy);
@@ -326,6 +330,9 @@ export function AiAssistantPanel({
                   ))}
                 </ul>
               </details>
+            ) : null}
+            {turn.role === "assistant" && lastChart && index === turns.length - 1 ? (
+              <AiEquityChart title={lastChart.title} points={lastChart.points} />
             ) : null}
             {turn.role === "assistant" && lastStrategy && index === turns.length - 1 && onApplyStrategy ? (
               <button

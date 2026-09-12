@@ -143,6 +143,50 @@ def test_agent_window_stays_at_ten_without_archived_turns():
     assert len(request_messages) == 11  # 1 system + 10 窗口消息
 
 
+def test_agent_backtest_tool_yields_strategy_and_chart():
+    registry = ToolRegistry()
+    registry.register(
+        AiTool(
+            name="run_strategy_backtest",
+            description="backtest",
+            parameters={"type": "object", "properties": {}},
+            executor=lambda args: {
+                "ok": True,
+                "strategy": {"name": "AI 生成策略"},
+                "equity_curve_downsampled": [
+                    {"trade_date": "2026-01-05", "equity": 1_000_000, "cash": 400_000, "market_value": 600_000, "drawdown_pct": -0.01}
+                ],
+            },
+            summarizer=lambda payload: "回测完成",
+        )
+    )
+    model = FakeModel(
+        [
+            [_final(tool_calls=[_tool_call("t1", "run_strategy_backtest", "{}")])],
+            [_final(content="结论：策略正收益。")],
+        ]
+    )
+    runner = AgentRunner(model, registry, ToolResultStore(), ContextBudget())
+    session = _session()
+    artifacts = runner.run(session=session, user_message="回测一下", system_prompt="SYS", max_steps=3, on_event=lambda event: None)
+    assert artifacts["strategy"]["name"] == "AI 生成策略"
+    assert artifacts["chart"]["type"] == "equity_curve"
+    assert artifacts["chart"]["points"][0]["equity"] == 1_000_000
+    # 普通工具调用不产生工件
+    plain_registry = _registry()
+    plain_model = FakeModel(
+        [
+            [_final(tool_calls=[_tool_call("t1", "echo_tool", '{"x": 1}')])],
+            [_final(content="ok")],
+        ]
+    )
+    plain_runner = AgentRunner(plain_model, plain_registry, ToolResultStore(), ContextBudget())
+    plain_artifacts = plain_runner.run(
+        session=_session(), user_message="q", system_prompt="SYS", max_steps=2, on_event=lambda event: None
+    )
+    assert plain_artifacts == {}
+
+
 def test_agent_budget_digests_long_tool_summaries():
     long_summary = "y" * 5_000
     registry = ToolRegistry()

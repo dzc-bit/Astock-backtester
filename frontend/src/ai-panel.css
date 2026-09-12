@@ -55,88 +55,27 @@
 }
 
 /* AI 聚合要点（资讯面板顶部区块） */
-.ai-digest {
-  margin: 0 0 14px;
-  border: 1px solid #e4dcfb;
-  background: linear-gradient(120deg, rgba(124, 58, 237, 0.06), rgba(37, 99, 235, 0.04)), #fdfdff;
-  border-radius: 12px;
-  padding: 12px 14px;
+/* AI 聚合要点：作为普通资讯卡片合并进资讯列表，仅用紫色系轻量区分 */
+.ai-news-item.ai-news-item {
+  border-left: 3px solid #7c3aed;
+  background: linear-gradient(120deg, rgba(124, 58, 237, 0.05), rgba(255, 255, 255, 0)), #ffffff;
 }
 
-.ai-digest-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  color: #6d28d9;
-  margin-bottom: 8px;
-}
-
-.ai-digest-head small {
-  color: #8b98ab;
-  font-weight: 400;
-  margin-left: auto;
-}
-
-.ai-digest ul {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.ai-digest li {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding: 8px 10px;
-  background: #ffffff;
-  border: 1px solid #ece7fd;
-  border-radius: 10px;
-}
-
-.ai-digest li strong {
-  font-size: 13px;
-  color: #17212f;
-}
-
-.ai-digest li span {
-  font-size: 12.5px;
-  color: #44506b;
-  line-height: 1.6;
-}
-
-.ai-digest-meta {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
-}
-
-.ai-digest-meta small {
-  border: 1px solid #e3e9f1;
-  border-radius: 999px;
-  padding: 1px 8px;
-  font-size: 11px;
-  color: #5c6a80;
-  background: #f8fafc;
-}
-
-.ai-digest-source {
-  font-size: 11px;
-  font-weight: 700;
-  color: #6d28d9;
-  border: 1px solid #ddd6fe;
-  border-radius: 999px;
-  padding: 1px 8px;
+.ai-news-item .news-icon {
+  color: #7c3aed;
   background: #f5f3ff;
 }
 
-.ai-digest-symbol {
-  color: #2563eb !important;
-  border-color: #d4e2ff !important;
-  background: #eef4ff !important;
+.ai-news-item .news-meta span {
+  color: #6d28d9;
+  font-weight: 600;
+}
+
+.ai-news-disclaimer {
+  display: block;
+  margin-top: 2px;
+  font-size: 11px;
+  color: #a78bfa;
 }
 
 .ai-drawer {
@@ -433,6 +372,16 @@
 .ai-markdown td {
   border: 1px solid #d7dee8;
   padding: 4px 8px;
+}
+
+/* Agent 回测结果内嵌 ECharts */
+.ai-chart {
+  width: 100%;
+  height: 240px;
+  margin-top: 10px;
+  border: 1px solid #e3e9f1;
+  border-radius: 10px;
+  background: #ffffff;
 }
 
 .ai-apply-strategy {

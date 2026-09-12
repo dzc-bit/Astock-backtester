@@ -188,6 +188,7 @@ class AiService:
                         "session_id": session_id,
                         "display": session.get("display", []),
                         "strategy": artifacts.get("strategy"),
+                        "chart": artifacts.get("chart"),
                         "updated_at": datetime.now(UTC).isoformat(),
                     }
                 )

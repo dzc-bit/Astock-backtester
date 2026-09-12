@@ -123,6 +123,13 @@ export function mockAiChatEvents(request: AiChatRequest): AiChatEvent[] {
   const reply = request.context?.kind === "backtest_result"
     ? "本次回测总收益 12.4%，最大回撤 5.2%，胜率 58.3%，共 24 笔交易。收益主要由 3 月上旬的量能放大阶段贡献；回撤集中在 4 月中旬的连续止损。建议关注止盈参数的敏感性。以上为 AI 生成内容，仅供辅助观察，不构成投资建议。"
     : "市场当前红盘 3200 / 全市场 5120，上证指数 3100 点（+0.65%）。半导体板块领涨 3.8%。整体情绪偏暖，但宽度尚未过热。以上为 AI 生成内容，仅供辅助观察，不构成投资建议。";
+  const demoCurve = Array.from({ length: 20 }, (_, index) => ({
+    trade_date: `2026-04-${String(index + 1).padStart(2, "0")}`,
+    equity: 1_000_000 * (1 + index * 0.006 + (index % 3) * 0.002),
+    cash: 400_000,
+    market_value: 600_000 * (1 + index * 0.008),
+    drawdown_pct: -0.01 - (index % 4) * 0.004
+  }));
   return [
     { type: "session", session_id: "mock-session", title: "演示会话" },
     { type: "phase", phase: "思考中（第 1/8 步）" },
@@ -147,7 +154,8 @@ export function mockAiChatEvents(request: AiChatRequest): AiChatEvent[] {
           ]
         }
       ],
-      strategy: request.context?.kind === "none" || !request.context ? DEMO_STRATEGY : null
+      strategy: request.context?.kind === "none" || !request.context ? DEMO_STRATEGY : null,
+      chart: { type: "equity_curve", title: "回测权益曲线（演示）", points: demoCurve }
     }
   ];
 }
