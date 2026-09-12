@@ -87,6 +87,10 @@ class Warehouse:
             return None
         return str(self.daily_bars_root / "year=*" / "daily_bars.parquet")
 
+    def daily_bars_parquet_paths(self) -> list[str]:
+        """Explicit partition file paths (no glob) for sandboxed DuckDB views."""
+        return [str(path) for path in self._partition_paths_for_range(None, None)]
+
     def write_daily_bars(self, frame: pd.DataFrame) -> None:
         normalized = normalize_daily_bars(frame)
         if normalized.empty:

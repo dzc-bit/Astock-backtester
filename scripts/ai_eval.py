@@ -59,15 +59,17 @@ def expressions_valid(case: dict) -> list[str]:
     return problems
 
 
-def translate_with_llm(instruction: str) -> dict:
+def translate_with_llm(instruction: str, cache_dir: str) -> dict:
     from astock_backtester.ai.config import AiConfigStore, ai_base_dir_from_cache_dir
     from astock_backtester.ai.llm_client import OpenAiCompatibleClient
 
-    default_cache = Path.home() / ".astock-ai-eval"
-    store = AiConfigStore(ai_base_dir_from_cache_dir(default_cache))
+    store = AiConfigStore(ai_base_dir_from_cache_dir(cache_dir))
     config = store.load()
     if not config.is_configured():
-        raise SystemExit("AI 未配置：请先在桌面端设置中填写 base_url / API Key / 模型名，再使用 --use-llm。")
+        raise SystemExit(
+            "AI 未配置：默认读取 <仓库>/运行产物/AI配置/ai-config.json，"
+            "可用 --cache-dir 指定数据仓目录，或先在桌面端设置里完成配置。"
+        )
     client = OpenAiCompatibleClient(lambda: config)
     content = ""
     for event in client.chat(
@@ -107,6 +109,11 @@ def validate_generated(generated: dict) -> list[str]:
 def main() -> int:
     parser = argparse.ArgumentParser(description="AI 策略生成评测")
     parser.add_argument("--use-llm", action="store_true", help="调用已配置的模型做 NL→DSL 翻译并评分（不进 CI）")
+    parser.add_argument(
+        "--cache-dir",
+        default=str(Path(__file__).resolve().parents[1] / "运行产物" / "本地数据仓"),
+        help="数据仓目录（AI 配置按其父目录解析），默认为仓库内的 运行产物/本地数据仓",
+    )
     args = parser.parse_args()
 
     cases = load_cases()
@@ -122,7 +129,7 @@ def main() -> int:
 
     passed = 0
     for case in cases:
-        generated = translate_with_llm(case["instruction"])
+        generated = translate_with_llm(case["instruction"], args.cache_dir)
         problems = validate_generated(generated)
         if problems:
             print(f"[FAIL] {case['id']}: {problems}")

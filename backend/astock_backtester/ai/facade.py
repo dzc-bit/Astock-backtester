@@ -122,7 +122,6 @@ class AiService:
             events.put(event)
 
         def worker() -> None:
-            failed = False
             try:
                 artifacts = self._agent.run(
                     session=session,
@@ -143,15 +142,16 @@ class AiService:
                 )
             except Exception as exc:  # noqa: BLE001 - converted to a stable error event
                 error_holder.append({"type": "error", "code": ai_error_code(exc), "message": str(exc)})
-                failed = True
-            self._sessions.save(session)
-            events.put(None)
-            if not failed:
-                # Long-term memory extraction must never block or break the stream.
-                extractor = threading.Thread(
-                    target=self._remember_from, args=(session,), name="ai-memory-extract", daemon=True
-                )
-                extractor.start()
+            finally:
+                # 哨兵必须在 finally 里：save/其他异常不能挂死消费端线程
+                self._sessions.save(session)
+                events.put(None)
+            if error_holder:
+                return
+            # 长期记忆提取在哨兵之后的独立 daemon 线程，绝不阻塞事件流
+            threading.Thread(
+                target=self._remember_from, args=(session,), name="ai-memory-extract", daemon=True
+            ).start()
 
         thread = threading.Thread(target=worker, name="ai-agent-run", daemon=True)
         thread.start()

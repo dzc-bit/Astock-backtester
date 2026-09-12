@@ -482,6 +482,23 @@ class DataServiceHandler(BaseHTTPRequestHandler):
         except ClientDisconnected:
             return
 
+    _ALLOWED_REVEAL_ORIGINS = {
+        "tauri://localhost",
+        "https://tauri.localhost",
+        "http://tauri.localhost",
+        "http://127.0.0.1:1420",
+        "http://localhost:1420",
+    }
+
+    def _reveal_request_authorized(self) -> bool:
+        host = (self.headers.get("Host") or "").lower()
+        if not (host.startswith("127.0.0.1") or host.startswith("localhost")):
+            return False
+        origin = self.headers.get("Origin")
+        if origin and origin.lower() not in self._ALLOWED_REVEAL_ORIGINS:
+            return False
+        return True
+
     def _run_ai_events_stream(self) -> None:
         generator = self.server.state.ai_service().events_stream()
         try:
@@ -578,7 +595,12 @@ class DataServiceHandler(BaseHTTPRequestHandler):
             self._send_json(self.server.state.ai_service().config_view())
             return
         if self.path == "/ai/config/reveal":
-            # Local-only endpoint: the desktop app may display the user's own key.
+            # Local-only endpoint so the desktop app can display the user's own key.
+            # DNS-rebinding guard (Host) + webview-origin guard (Origin): a browser
+            # page from a foreign origin is rejected even without PNA support.
+            if not self._reveal_request_authorized():
+                self._send_json({"code": "forbidden", "message": "仅限本机桌面端访问"}, HTTPStatus.FORBIDDEN)
+                return
             self._send_json({"api_key": self.server.state.ai_service().reveal_api_key()})
             return
         if self.path == "/ai/events/stream":

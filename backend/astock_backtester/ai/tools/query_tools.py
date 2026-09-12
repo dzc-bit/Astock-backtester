@@ -33,10 +33,14 @@ _DAILY_BARS_COLUMNS = (
 )
 
 _FORBIDDEN_SQL = re.compile(
-    r"\b(insert|update|delete|drop|alter|create|attach|detach|copy|export|pragma|call|set|reset|"
-    r"vacuum|checkpoint|load|install|execute|prepare|begin|commit|rollback|force)\b",
+    r"\b(insert|update|delete|drop|alter|create|attach|detach|copy|export|import|pragma|call|set|reset|"
+    r"vacuum|checkpoint|load|install|execute|prepare|begin|commit|rollback|force)\b"
+    r"|\bread_\w+\b|\bglob\s*\(|\bsniff_csv\b|\bparquet_scan\b|\biceberg_scan\b|\bdelta_scan\b",
     re.IGNORECASE,
 )
+# 任何含路径特征的字符串字面量（盘符、分隔符、相对跳转）都不放行：用户 SQL 只应引用
+# 工具注入的 daily_bars 视图和纯值字面量（'600519'、'2026-01-01'）。
+_PATH_LIKE_LITERAL = re.compile(r"'[^']*(?:\\|[A-Za-z]:|\.\./|\.\.\\)[^']*'")
 
 
 def _statement_allowed(sql: str) -> bool:
@@ -50,25 +54,23 @@ def build_query_tools(backend: AiBackend) -> list[AiTool]:
         sql = str(args.get("sql", "")).strip().rstrip(";")
         if not sql:
             return {"ok": False, "error": "sql 不能为空"}
-        if not _statement_allowed(sql):
+        if not _statement_allowed(sql) or _PATH_LIKE_LITERAL.search(sql):
             return {
                 "ok": False,
-                "error": "只允许只读 SELECT/WITH 查询（禁止 UPDATE/DELETE/DDL 等写语句）。要补数据请用 update_stock_data 工具。",
+                "error": "只允许只读 SELECT/WITH 查询（禁止写语句与文件读取函数）。要补数据请用 update_stock_data 工具。",
             }
-        glob = backend.warehouse.daily_bars_parquet_glob()
-        if not glob:
+        parquet_paths = backend.warehouse.daily_bars_parquet_paths()
+        if not parquet_paths:
             return {"ok": False, "error": "本地数据仓还没有日线 parquet 分区，请先在数据中心同步数据。"}
         if not re.search(r"\blimit\b", sql, re.IGNORECASE):
             sql = f"SELECT * FROM ({sql}) _guarded LIMIT {SQL_ROW_LIMIT}"
         import duckdb
 
+        path_list = "[" + ", ".join(f"'{path}'" for path in parquet_paths) + "]"
         try:
             connection = duckdb.connect()
             try:
-                connection.execute(
-                    f"CREATE OR REPLACE VIEW daily_bars AS "
-                    f"SELECT * EXCLUDE (year) FROM read_parquet('{glob}', hive_partitioning=true)"
-                )
+                connection.execute(f"CREATE OR REPLACE VIEW daily_bars AS SELECT * FROM read_parquet({path_list})")
                 relation = connection.execute(sql)
                 columns = [item[0] for item in (relation.description or [])]
                 rows = relation.fetchmany(SQL_ROW_LIMIT)

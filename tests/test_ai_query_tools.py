@@ -22,6 +22,34 @@ def _registry(backend: FakeBackend) -> ToolRegistry:
     return registry
 
 
+def test_query_warehouse_sql_blocks_file_primitives(tmp_path):
+    rows = [{"symbol": "600519", "trade_date": pd.Timestamp("2026-01-05"), "close": 1500.0}]
+    _write_parquet_partition(tmp_path, 2026, rows)
+    secret = tmp_path / "secret.txt"
+    secret.write_text("top-secret", encoding="utf-8")
+    backend = FakeBackend()
+    backend.warehouse.parquet_paths = [str(tmp_path / "year=2026" / "daily_bars.parquet")]
+    registry = _registry(backend)
+
+    escaped = str(secret).replace("\\", "\\\\")
+    read_text = registry.execute(
+        "query_warehouse_sql", '{"sql": "SELECT content FROM read_text(\'' + escaped + '\')"}'
+    )
+    assert read_text.ok is False and "只允许" in read_text.summary
+    glob_call = registry.execute("query_warehouse_sql", '{"sql": "SELECT * FROM glob(\'**/*.json\')"}')
+    assert glob_call.ok is False
+    path_literal = registry.execute(
+        "query_warehouse_sql", '{"sql": "SELECT 1 WHERE x = \'' + escaped + '\'"}'
+    )
+    assert path_literal.ok is False
+    # 正常值字面量不受影响
+    normal = registry.execute(
+        "query_warehouse_sql",
+        '{"sql": "SELECT * FROM daily_bars WHERE symbol = \'600519\' AND trade_date >= TIMESTAMP \'2026-01-01\'"}',
+    )
+    assert normal.ok is True
+
+
 def test_query_warehouse_sql_select_and_guard(tmp_path):
     rows = [
         {"symbol": "600519", "stock_name": "贵州茅台", "trade_date": pd.Timestamp("2026-01-05"), "close": 1500.0, "change_pct": 0.01},
@@ -30,7 +58,7 @@ def test_query_warehouse_sql_select_and_guard(tmp_path):
     ]
     _write_parquet_partition(tmp_path, 2026, rows)
     backend = FakeBackend()
-    backend.warehouse.glob = str(tmp_path / "year=*" / "daily_bars.parquet")
+    backend.warehouse.parquet_paths = [str(tmp_path / "year=2026" / "daily_bars.parquet")]
     registry = _registry(backend)
 
     select = registry.execute(
@@ -56,20 +84,20 @@ def test_query_warehouse_sql_auto_limit_and_empty_warehouse(tmp_path):
     rows = [{"symbol": "600519", "trade_date": pd.Timestamp("2026-01-05"), "close": 1500.0}]
     _write_parquet_partition(tmp_path, 2026, rows)
     backend = FakeBackend()
-    backend.warehouse.glob = str(tmp_path / "year=*" / "daily_bars.parquet")
+    backend.warehouse.parquet_paths = [str(tmp_path / "year=2026" / "daily_bars.parquet")]
     registry = _registry(backend)
     execution = registry.execute("query_warehouse_sql", '{"sql": "SELECT * FROM daily_bars"}')
     assert execution.ok is True
     assert execution.payload["row_count"] == 1
 
     empty = FakeBackend()
-    empty.warehouse.glob = None
+    empty.warehouse.parquet_paths = []
     empty_registry = _registry(empty)
     missing = empty_registry.execute("query_warehouse_sql", '{"sql": "SELECT 1"}')
     assert missing.ok is False and "没有" in missing.summary
 
     no_warehouse = FakeBackend()
-    no_warehouse.warehouse.glob = None
+    no_warehouse.warehouse.parquet_paths = [str(tmp_path / "year=2026" / "daily_bars.parquet")]
     broken = _registry(no_warehouse).execute(
         "query_warehouse_sql", '{"sql": "SELECT undefined_table.* FROM daily_bars"}'
     )

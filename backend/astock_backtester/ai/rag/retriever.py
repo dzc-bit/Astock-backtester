@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
 from collections.abc import Callable
 from importlib import resources
 from pathlib import Path
@@ -54,6 +55,7 @@ class KnowledgeIndex:
         self._chunks: list[dict[str, Any]] = []
         self._matrix: np.ndarray | None = None
         self._cache_key = ""
+        self._build_lock = threading.Lock()
 
     # ---------------------------------------------------------------- build
     def _load_documents(self) -> list[dict[str, str]]:
@@ -95,18 +97,21 @@ class KnowledgeIndex:
     def _ensure_built(self) -> None:
         if self._matrix is not None:
             return
-        documents = self._load_documents()
-        if not documents:
-            return
-        self._chunks = []
-        for document in documents:
-            for chunk in self._chunk_document(document["text"]):
-                self._chunks.append({"source": document["source"], **chunk})
-        if not self._chunks:
-            return
-        self._cache_key = self._corpus_signature(documents)
-        vectors = self._load_cached_vectors() or self._embed_vectors()
-        self._matrix = np.asarray(vectors, dtype=np.float32)
+        with self._build_lock:
+            if self._matrix is not None:
+                return
+            documents = self._load_documents()
+            if not documents:
+                return
+            self._chunks = []
+            for document in documents:
+                for chunk in self._chunk_document(document["text"]):
+                    self._chunks.append({"source": document["source"], **chunk})
+            if not self._chunks:
+                return
+            self._cache_key = self._corpus_signature(documents)
+            vectors = self._load_cached_vectors() or self._embed_vectors()
+            self._matrix = np.asarray(vectors, dtype=np.float32)
 
     def _cache_path(self) -> Path:
         return self._cache_dir / f"knowledge-embeddings-{self._cache_key}.json"

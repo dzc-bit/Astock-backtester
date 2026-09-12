@@ -38,6 +38,7 @@ class AiConfig:
         cfg.api_key = cfg.api_key.strip()
         cfg.model = cfg.model.strip()
         cfg.embedding_model = cfg.embedding_model.strip()
+        cfg.temperature = min(max(cfg.temperature, 0.0), 2.0)
         cfg.max_steps = max(1, min(int(cfg.max_steps), 16))
         cfg.insight_max_per_hour = max(0, min(int(cfg.insight_max_per_hour), 60))
         return cfg

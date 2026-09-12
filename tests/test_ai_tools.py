@@ -23,13 +23,13 @@ from astock_backtester.models import (
 class FakeWarehouse:
     def __init__(self, owner: FakeBackend) -> None:
         self._owner = owner
-        self.glob: str | None = None
+        self.parquet_paths: list[str] = []
 
     def read_daily_bars(self, **kwargs: Any) -> pd.DataFrame:
         return self._owner.read_daily_bars(**kwargs)
 
-    def daily_bars_parquet_glob(self) -> str | None:
-        return self.glob
+    def daily_bars_parquet_paths(self) -> list[str]:
+        return self.parquet_paths
 
 
 class FakeBackend:

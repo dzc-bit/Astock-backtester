@@ -100,8 +100,11 @@ class InsightEngine:
         while not self._stop.wait(self._interval):
             try:
                 self.tick()
-            except Exception:  # noqa: BLE001 - the engine must never crash the service
-                pass
+            except Exception as exc:  # noqa: BLE001 - the engine must never crash the service
+                try:
+                    self._backend.log("warning", f"ai insight engine tick failed: {exc}")
+                except Exception:  # noqa: BLE001
+                    pass
 
     # ------------------------------------------------------------------ tick
     def tick(self) -> None:

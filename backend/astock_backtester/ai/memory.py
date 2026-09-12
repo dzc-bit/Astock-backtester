@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -57,6 +58,7 @@ class MemoryRecord:
 class MemoryStore:
     def __init__(self, ai_base_dir: str | Path) -> None:
         self._path = Path(ai_base_dir) / MEMORY_DIR_NAME / MEMORY_FILE_NAME
+        self._lock = threading.Lock()
 
     def load(self) -> list[MemoryRecord]:
         if not self._path.exists():
@@ -90,29 +92,33 @@ class MemoryStore:
         normalized = re.sub(r"\s+", "", content)[:MAX_CONTENT_CHARS]
         if not normalized:
             return None
-        records = self.load()
-        now = datetime.now(UTC).isoformat()
-        for record in records:
-            if re.sub(r"\s+", "", record.content) == normalized:
-                record.updated_at = now
-                record.hits += 1
-                self.save(records)
-                return record
-        record = MemoryRecord(id=uuid4().hex[:12], content=content[:MAX_CONTENT_CHARS], category=category, created_at=now, updated_at=now)
-        records.append(record)
-        records.sort(key=lambda item: item.updated_at, reverse=True)
-        if len(records) > MAX_RECORDS:
-            records = records[:MAX_RECORDS]
-        self.save(records)
-        return record
+        with self._lock:
+            records = self.load()
+            now = datetime.now(UTC).isoformat()
+            for record in records:
+                if re.sub(r"\s+", "", record.content) == normalized:
+                    record.updated_at = now
+                    record.hits += 1
+                    self.save(records)
+                    return record
+            record = MemoryRecord(
+                id=uuid4().hex[:12], content=content[:MAX_CONTENT_CHARS], category=category, created_at=now, updated_at=now
+            )
+            records.append(record)
+            records.sort(key=lambda item: item.updated_at, reverse=True)
+            if len(records) > MAX_RECORDS:
+                records = records[:MAX_RECORDS]
+            self.save(records)
+            return record
 
     def forget(self, memory_id: str) -> bool:
-        records = self.load()
-        remaining = [record for record in records if record.id != memory_id]
-        if len(remaining) == len(records):
-            return False
-        self.save(remaining)
-        return True
+        with self._lock:
+            records = self.load()
+            remaining = [record for record in records if record.id != memory_id]
+            if len(remaining) == len(records):
+                return False
+            self.save(remaining)
+            return True
 
     def recall_context(self) -> str:
         records = sorted(self.load(), key=lambda item: item.updated_at, reverse=True)[:RECALL_LIMIT]

@@ -18,6 +18,7 @@ from astock_backtester.ai.context import (
     ToolResult,
     ToolResultStore,
     compact_context_payload,
+    wrap_untrusted,
 )
 from astock_backtester.ai.llm_client import ChatModel
 from astock_backtester.ai.prompts import build_compaction_messages
@@ -27,6 +28,11 @@ AgentEvent = dict[str, Any]
 EventHandler = Callable[[AgentEvent], None]
 
 SHORT_TERM_WINDOW = 10
+
+# 摘要里含爬取正文的工具：digest 进入上下文前必须套不可信分隔符（AGENT必读 §15-8）
+UNTRUSTED_DIGEST_TOOLS = frozenset(
+    {"market_news", "market_briefing", "stock_research_reports", "dragon_tiger_board", "limit_up_pool"}
+)
 
 
 class AgentRunner:
@@ -154,6 +160,8 @@ class AgentRunner:
             session_tool_content = execution.summary
             if execution.diagnostics:
                 session_tool_content += "\n诊断: " + "；".join(execution.diagnostics[:3])
+            if name in UNTRUSTED_DIGEST_TOOLS:
+                session_tool_content = wrap_untrusted(session_tool_content)
             session_tool_content = self._budget.digest(session_tool_content)
             session_tool = {"role": "tool", "tool_call_id": call_id, "content": session_tool_content}
             self._session_messages_target(session).append(session_tool)
@@ -168,10 +176,18 @@ class AgentRunner:
         return [{"role": "system", "content": system}, *session["messages"]]
 
     def _archive_overflow(self, session: dict[str, Any], on_event: EventHandler) -> None:
-        """Keep at most SHORT_TERM_WINDOW protocol messages in the live window."""
+        """Keep at most SHORT_TERM_WINDOW protocol messages in the live window.
+
+        The cut point is extended to the next user-message boundary so a
+        assistant(tool_calls)/tool pair is never split across the window edge.
+        """
         messages = session["messages"]
         overflow = len(messages) - SHORT_TERM_WINDOW
         if overflow <= 0:
+            return
+        while overflow < len(messages) and messages[overflow].get("role") != "user":
+            overflow += 1
+        if overflow >= len(messages):
             return
         dropped = messages[:overflow]
         session["messages"] = messages[overflow:]
