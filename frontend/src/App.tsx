@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import { Activity, Database, Flame, Gauge, ShieldAlert, Sparkles } from "lucide-react";
 import { AiAssistantPanel } from "./components/AiAssistantPanel";
 import { useAiEventStream } from "./hooks/useAiEventStream";

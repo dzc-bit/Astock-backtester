@@ -103,7 +103,9 @@ export async function runAiChatStream(
 }
 
 function dispatchChatEvent(event: AiChatEvent, handlers: AiChatHandlers): void {
-  if (event.type === "phase") {
+  if (event.type === "session") {
+    handlers.onSession?.(event);
+  } else if (event.type === "phase") {
     handlers.onPhase?.(event.phase);
   } else if (event.type === "token") {
     handlers.onToken?.(event.text);

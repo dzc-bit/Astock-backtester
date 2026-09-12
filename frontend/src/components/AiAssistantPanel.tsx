@@ -66,6 +66,8 @@ export function AiAssistantPanel({
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const streamingRef = useRef(false);
+  const pendingTaskRef = useRef<AiTask | null>(null);
+  const streamingTextRef = useRef("");
 
   useEffect(() => {
     if (!open || !baseUrl) {
@@ -106,10 +108,16 @@ export function AiAssistantPanel({
   }, []);
 
   useEffect(() => {
-    if (open && task && !streamingRef.current) {
-      onTaskConsumed();
-      void sendMessage(task.message, task.context ?? null);
+    if (!open || !task) {
+      return;
     }
+    onTaskConsumed();
+    if (streamingRef.current) {
+      // 流式回答期间到达的场景任务先排队，当前轮结束后自动发送，避免静默丢弃。
+      pendingTaskRef.current = task;
+      return;
+    }
+    void sendMessage(task.message, task.context ?? null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, task]);
 
@@ -124,6 +132,7 @@ export function AiAssistantPanel({
     setTurns((prev) => [...prev, { role: "user", content: trimmed }]);
     setStreaming(true);
     setStreamingText("");
+    streamingTextRef.current = "";
     setPendingSteps([]);
     setPhase("准备请求");
     setError(null);
@@ -132,8 +141,12 @@ export function AiAssistantPanel({
         baseUrl,
         { message: trimmed, session_id: sessionId, context },
         {
+          onSession: (event) => setSessionId(event.session_id),
           onPhase: setPhase,
-          onToken: (text) => setStreamingText((prev) => prev + text),
+          onToken: (text) => {
+            streamingTextRef.current += text;
+            setStreamingText((prev) => prev + text);
+          },
           onToolCall: (event) =>
             setPendingSteps((prev) => [...prev, { id: event.id, name: event.name }]),
           onToolResult: (event) =>
@@ -147,28 +160,43 @@ export function AiAssistantPanel({
           onResult: (event) => {
             setTurns(event.display ?? []);
             setSessionId(event.session_id);
-            setLastStrategy(event.strategy ?? null);
+            if (event.strategy) {
+              // 策略工件保持 sticky：后续普通问答不会把已生成策略“冲掉”。
+              setLastStrategy(event.strategy);
+            }
           }
         },
         { signal: controller.signal }
       );
     } catch (caught) {
-      setError(translateAiError(caught));
+      if (!controller.signal.aborted) {
+        if (streamingTextRef.current) {
+          const partial = streamingTextRef.current;
+          setTurns((prev) => [...prev, { role: "assistant", content: `${partial}\n\n（回答中断，可重试。）` }]);
+        }
+        setError(translateAiError(caught));
+      }
     } finally {
-      streamingRef.current = false;
-      abortRef.current = null;
-      setStreaming(false);
-      setPhase(null);
-      setStreamingText("");
-      setPendingSteps([]);
+      // 只有当前请求仍持有 abort 句柄时才清理 UI 状态，避免“停止后立刻重发”的竞态。
+      if (abortRef.current === controller) {
+        abortRef.current = null;
+        streamingRef.current = false;
+        setStreaming(false);
+        setPhase(null);
+        setStreamingText("");
+        streamingTextRef.current = "";
+        setPendingSteps([]);
+      }
+      const queued = pendingTaskRef.current;
+      pendingTaskRef.current = null;
+      if (queued) {
+        void sendMessage(queued.message, queued.context ?? null);
+      }
     }
   };
 
   const stopStreaming = () => {
     abortRef.current?.abort();
-    streamingRef.current = false;
-    setStreaming(false);
-    setPhase(null);
   };
 
   const openSettings = async () => {

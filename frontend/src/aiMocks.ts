@@ -110,8 +110,15 @@ export function mockAiChatEvents(request: AiChatRequest): AiChatEvent[] {
   ];
 }
 
+let mockEventStreamEmitted = false;
+
 export function mockAiEventStream(): AiEventStreamEvent[] {
-  // 仅含 insight：data_fresh 会触发页面模块即时刷新，破坏预览与测试的确定性。
+  // 仅含 insight 且只发一次：data_fresh 会触发页面模块即时刷新，破坏预览与测试
+  // 的确定性；重复 insight 会虚涨未读徽标。
+  if (mockEventStreamEmitted) {
+    return [];
+  }
+  mockEventStreamEmitted = true;
   return [
     {
       type: "insight",

@@ -18,6 +18,7 @@ export function AiSettingsModal({ open, config, isSaving = false, errorMessage, 
   const [embeddingModel, setEmbeddingModel] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [keyVisible, setKeyVisible] = useState(false);
+  const [temperature, setTemperature] = useState(0.3);
   const [maxSteps, setMaxSteps] = useState(8);
   const [insightsEnabled, setInsightsEnabled] = useState(true);
   const [insightMaxPerHour, setInsightMaxPerHour] = useState(6);
@@ -31,6 +32,7 @@ export function AiSettingsModal({ open, config, isSaving = false, errorMessage, 
     setEmbeddingModel(config.embedding_model);
     setApiKey("");
     setKeyVisible(false);
+    setTemperature(config.temperature);
     setMaxSteps(config.max_steps);
     setInsightsEnabled(config.insights_enabled);
     setInsightMaxPerHour(config.insight_max_per_hour);
@@ -61,7 +63,7 @@ export function AiSettingsModal({ open, config, isSaving = false, errorMessage, 
       model: model.trim(),
       embedding_model: embeddingModel.trim(),
       api_key: apiKey.trim(),
-      temperature: 0.3,
+      temperature: Number.isFinite(temperature) ? temperature : 0.3,
       max_steps: Number.isFinite(maxSteps) ? maxSteps : 8,
       insights_enabled: insightsEnabled,
       insight_max_per_hour: Number.isFinite(insightMaxPerHour) ? insightMaxPerHour : 6

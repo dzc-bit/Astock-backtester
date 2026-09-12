@@ -48,7 +48,8 @@
   background: #ffffff;
   border-left: 1px solid #d7dee8;
   box-shadow: -18px 0 48px rgba(26, 39, 60, 0.16);
-  z-index: 60;
+  /* 低于 .modal-backdrop（z-index 40）：风险清单等模态弹窗可以盖住抽屉 */
+  z-index: 30;
 }
 
 .ai-drawer-head {

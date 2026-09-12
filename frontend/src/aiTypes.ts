@@ -60,6 +60,7 @@ export type AiChatEvent =
   | AiErrorEvent;
 
 export type AiChatHandlers = {
+  onSession?: (event: AiSessionEvent) => void;
   onPhase?: (phase: string) => void;
   onToken?: (text: string) => void;
   onToolCall?: (event: AiToolCallEvent) => void;
