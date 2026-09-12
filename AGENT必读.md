@@ -29,7 +29,7 @@ git branch --show-current
 https://github.com/dzc-bit/Astock-backtester.git
 ```
 
-保护已有未提交修改。不要覆盖无关文件，不要清理、删除、迁移 `D:\New project 6\运行产物`。版本号统一跟随桌面端当前版本，当前为 `1.4.0`，除非用户明确要求改版本。
+保护已有未提交修改。不要覆盖无关文件，不要清理、删除、迁移 `D:\New project 6\运行产物`。版本号统一跟随桌面端当前版本，当前为 `1.5.0`（同步 7 处：`package.json`、`package-lock.json` 根条目×2、`pyproject.toml`、`backend/astock_backtester/__init__.py`、`src-tauri/Cargo.toml`、`src-tauri/Cargo.lock` 的 `a-stock-backtester` 条目、`src-tauri/tauri.conf.json`，外加 `tests/test_scripts.py` 的版本断言），除非用户明确要求改版本。前端视觉系统由仓库根 `design.md` 锁定（token 纪律见 §16.6），决策记录在 `docs/design-notes.md`。
 
 ## 2. 绝对不要碰错边界
 
@@ -72,10 +72,13 @@ https://github.com/dzc-bit/Astock-backtester.git
 | 资讯与事件 | `GET /market/news` |
 | 同花顺复盘 | `GET /market/fupan` |
 | 同花顺早盘 | `GET /market/zaopan` |
+| 数据源健康 | `GET /diagnostics/sources`（聚合 realtime/news/finance 最近成功状态，只读不触发抓取） |
 | user 模式候选 | `/run/backtest/stream` 最终 `result.latest_strategy_matches.matches` |
 | 资金流补齐 | `POST /fetch/daily-bars`、`POST /fetch/capital-flow` |
+| AI 对话/快讯 | `POST /ai/chat/stream`、`GET /ai/events/stream`、`GET /ai/news`、`GET /ai/status`、`GET|POST /ai/config` |
+| AI 轻路由（1.5.0） | `POST /ai/conditions/parse`（NL→条件 DSL，自愈校验）、`POST /ai/insight/oneshot`（场景点评：results_overview / data_coverage / risk_alerts）、`POST /ai/optimize`（参数网格寻优，NDJSON） |
 
-复盘正文不能塞 user 候选；新闻不能替代行情评价；实时行情失败不能拿本地历史数据伪装成 live。
+复盘正文不能塞 user 候选；新闻不能替代行情评价；实时行情失败不能拿本地历史数据伪装成 live；AI 轻路由失败带稳定 code，前端对 oneshot 点评失败静默不显示。
 
 ## 5. 实时行情完整性
 
@@ -178,6 +181,8 @@ docs/capital-flow-crawler-report.md
 
 全市场日线同步的跳过条件必须同时满足 OHLC 完整和 `float_market_cap` 完整。不能因为某只股票 OHLC 已有就跳过它的市值缺口；市值缺口应随 `/sync/full-market` 或指定 `/fetch/daily-bars` 的日线补齐一并修复。后端计算 `filled_missing_rows` 时应复用任务开始时的仓库完整性快照，避免每个写入批次重复扫仓拖慢数据中心。
 
+**symbol_lifecycle 口径（1.5.0 起）**：`Warehouse` 的 metadata.sqlite 有 `symbol_lifecycle(symbol PRIMARY KEY, listing_date, delisted_date, status)` 表。`build_daily_bars_coverage` 的 `expected_dates`、`read_capital_flow_missing_symbols` 的行过滤、全市场同步的完整性与跳过判定都按每只股票 `[listing_date, delisted_date]` 窗口截断；无生命周期记录的股票保持旧的保守口径（算缺失），因此历史行为不回退。全市场同步前 best-effort 刷新该表：adata `all_code()` 提供上市日期与在市名单，仓库里有数据但名单缺席且近期无新行的股票才标 `delisted`（退市日取其最后交易日）；数据源名单行数不足（<1000）时只刷上市日期、绝不标退市，防止上游抖动误杀同步池。`/fetch/daily-bars` 写库后从行内 `listing_days` 反推上市日补写 lifecycle（9999 表示未知，跳过）。
+
 回测设置的默认日期在用户未手动编辑前应跟随 `daily_bars` coverage 的最新日期，并按最近 A 股交易日范围回填；用户一旦手动修改日期或点“套用数据中心日期”，后续不要再自动覆盖用户选择。这样本地仓库已到 2026-06-18 时，回测候选不应仍停在旧的 2026-01-20。
 
 补缺日线 provider 顺序必须以公开 HTTP 爬虫为主：`HttpAStockProvider -> ADataProvider -> AkshareProvider`。`HttpAStockProvider` 的百度日 K 线普通 `requests` 可能被 403，必须保留 `curl_cffi` 浏览器 TLS 指纹传输作为同一 HTTP 主源内的备用，不要因为普通 requests 403 就直接跳到 adata/AKShare。`adata` 数据可能只覆盖到 2025 年底，不能放在近期补缺主路径第一位；AKShare 只能作为最后保底。所有来源都失败或返回空时，错误必须聚合展示每个 provider 的尝试结果，不能只把 AKShare 的断连显示成唯一失败原因。
@@ -226,12 +231,14 @@ POST /run/backtest/stream
 
 - `GET /ping`
 - `GET /health`
+- `GET /diagnostics/sources`
 - `GET /market/finance`
 - `POST /coverage/daily-bars`
 - `GET /realtime/market-snapshot`
 - `GET /market/commentary`
 - `GET /market/fupan`
 - `GET /market/zaopan`
+- `GET /ai/status`
 - `POST /run/backtest/stream`
 
 `/run/backtest/stream` 是 NDJSON，不能用 `Invoke-RestMethod` 当普通 JSON 判断。用 Python/Node 逐行读：
@@ -443,3 +450,59 @@ python -m ruff check backend tests scripts
    - LLM 客户端复用 `openai` SDK（`ai/llm_client.py` 只做错误码映射与事件规范化）；测试用 FakeModel/注入 client_factory，禁止网络。
    - a-stock-data 裁剪端点（`ai/tools/astock_data_tools.py`）统一走 `data/symbols.py` + `data/http_transport.py`，东财系请求必须过 `_em_get` 限流。
    - 提示词模板含字面 JSON 时必须用 `{{ }}` 转义（`str.format` 会把 `{"content": ...}` 当占位符，曾踩坑）。
+9. **symbol_lifecycle 口径（1.5.0 起）**：覆盖/同步/资金流缺口的"缺失"判定必须尊重每只股票的 `[listing_date, delisted_date]` 窗口；无生命周期记录一律走旧保守口径，禁止用"数据源名单缺席"单独判定退市（必须有近 30 天无新行的佐证，且名单行数 <1000 时禁用退市判定）。绿/中性色不得用于表达"最优/成功"（A 股绿=跌），前端样式只允许引用 `design.md` 的 token。
+
+## 16. AI 子系统完整手册（1.5.0）
+
+### 16.1 目录结构
+
+```text
+backend/astock_backtester/ai/
+  facade.py        # AiService：HTTP 服务唯一入口（status/config/chat/events/轻路由）
+  agent.py         # AgentRunner 工具循环（协议消息、上下文预算、UI artifacts）
+  llm_client.py    # OpenAiCompatibleClient：chat-completions / responses / anthropic 三协议
+  prompts.py       # 人设/风格/条件速查/模糊映射/快讯/简报/条件解析/oneshot 模板
+  condition_dsl.py # NL→条件 DSL（LLM 候选→本地校验→带报错自愈重试 ≤2 次）
+  oneshot.py       # 场景化单段点评（results_overview / data_coverage / risk_alerts）
+  optimizer.py     # 参数网格寻优（≤48 组合，确定性循环 + 末尾一次 AI 点评）
+  insights.py      # EventBroker + InsightEngine（data_fresh 信号 + AI 快讯，小时配额）
+  digest.py        # 启动多源资讯聚合（DigestStore 落盘 运行产物/AI简报/）
+  memory.py        # mem0 式长期记忆（plan_memory_ops → apply_ops）
+  sessions.py      # 会话落盘 运行产物/AI对话/
+  config.py        # AiConfigStore（运行产物/AI配置/ai-config.json，GET /ai/config 只回掩码）
+  context.py       # wrap_untrusted 注入防御 + ToolResultStore + ContextBudget
+  errors.py        # AiError/AiNotConfigured/AiUpstreamError 稳定错误码
+  rag/retriever.py # 本地知识检索（三份语料 + embedding 缓存 + 余弦 Top-K）
+  tools/           # registry + local_tools + astock_data_tools + query_tools
+```
+
+### 16.2 事件协议
+
+- `POST /ai/chat/stream`（NDJSON）：`session` → `phase`/`token`/`tool_call`/`tool_result`* → `result`（含 display/strategy/chart）或 `error`（带 code）。错误事件由 `_write_ai_error_event` 统一写出；payload 校验失败在开流前回 JSON 400。
+- `GET /ai/events/stream`（长连接）：`insight` / `data_fresh`（module=news/market/risk/ai_news）/ `heartbeat`（15s）。
+- `POST /ai/optimize`（NDJSON）：`phase` → (`combination` + `progress`)* → `result`（combinations/best/insight/insight_error）。AI 未配置时网格照常完成，`insight=null` + `insight_error` 说明原因。
+
+### 16.3 三种 api_style
+
+`chat-completions`（OpenAI 兼容，默认）、`responses`（OpenAI Responses）、`anthropic`（Messages API，tool_use/tool_result 流式映射）。全部由 `OpenAiCompatibleClient` 归一为 `(type, payload)` 事件流：`text` 增量与 `final`（content/tool_calls）。测试注入点：`client_factory`（单元）或 `monkeypatch.setattr(ai_service, "_model", FakeModel())`（HTTP 级）。
+
+### 16.4 记忆 / 简报 / 快讯引擎
+
+- 短期窗口 `agent.SHORT_TERM_WINDOW = 10`，溢出进 `pending_archive` 压缩为 `rolling_summary`。
+- 长期记忆：每轮结束后独立 daemon 线程跑 `plan_memory_ops`（绝不阻塞事件流），写 `运行产物/AI记忆/memory.json`。
+- 简报：`DigestEngine.run_once` 多源聚合 → LLM 出 3-6 条 JSON 要点（提示词里字面 JSON 必须 `{{ }}` 转义）→ `运行产物/AI简报/digest.json`。
+- 快讯：`InsightEngine` 规则触发（新闻变化/宽度 >75% 或 <25%/风险增加）→ 小时配额内生成，强制 `source="ai-insight"` + 免责声明；`data_fresh` 信号不需要模型。
+
+### 16.5 工具清单（注册即用，id 即名）
+
+本地：`realtime_market_snapshot`、`market_news`、`market_briefing`、`risk_alerts`、`recent_daily_bars`、`validate_strategy_conditions`、`run_strategy_backtest`、`latest_market_digest`。a-stock-data 裁剪端点：估值/研报/龙虎榜/涨停池/多股对比等（`astock_data_tools.py`）。查询：`query_warehouse_sql`（只读 DuckDB）、`compute_stock_stats`、`compare_stocks`、`update_stock_data`（唯一写路径）。知识：`retrieve_knowledge`。1.5.0 新增轻路由不在工具注册表内：`/ai/conditions/parse`、`/ai/insight/oneshot`、`/ai/optimize` 走 `condition_dsl.py` / `oneshot.py` / `optimizer.py`。
+
+### 16.6 前端设计 token 纪律
+
+根目录 `design.md` 是锁：所有色值/字号/圆角经 `styles.css :root` 命名 token 引用（`--paper/--ink/--rule/--accent/--rise/--fall/--warn/--info/--ai/--focus/--text-*/--radius-*/--shadow-*`），token 块之外 0 处硬编码；装饰渐变与左侧实色边条是禁区；`--rise` 红=涨、`--fall` 绿=跌，绿不得表达"最优/成功"。改动前端样式后到 320/375/768 宽度各看一眼。
+
+### 16.7 测试策略
+
+- 零网络零 key：FakeModel 脚本化回放（`tests/test_ai_routes_v150.py::FakeModel`），回环请求走 `ProxyHandler({})` opener，cache_dir 指向 `tmp_path/"本地数据仓"`。
+- 轻路由测试分层：`tests/test_ai_routes_v150.py`（conditions/parse 自愈、oneshot 场景、optimize 网格与流事件、diagnostics/sources）+ `tests/test_ai_service_http.py`（chat/events/config 回归）。
+- 前端：`frontend/src/components/v150Features.test.tsx`（AI 条件面板/寻优/oneshot/报告导出）、`DataCenter.lifecycle.test.tsx`（徽标/诊断/健康卡），AI 函数在 jsdom 走 `aiMocks`。
