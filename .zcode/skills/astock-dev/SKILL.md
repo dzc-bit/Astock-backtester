@@ -30,7 +30,7 @@ description: A股策略回测工作台项目开发技能。改后端数据/回�
 ## 预览 mock 双轨
 
 - 前端所有请求函数第一步判断 `isTauriRuntime()`：非 Tauri（浏览器 `npm run dev`，127.0.0.1:1420）走 `apiMocks.ts` / `aiMocks.ts`，Tauri 桌面端走本地 sidecar HTTP。**新增后端端点必须同步补 mock 函数**，否则预览模式白屏/报错。
-- 预览模式人工过页面：`.\.tools\node-v20.18.1-win-x64\npm.cmd run dev` 后浏览器打开 127.0.0.1:1420，重点 320/375/768 宽度（设计系统见根目录 `design.md`，决策记录在 `docs/design-notes.md`）。
+- 预览模式人工过页面：`.\.tools\node-v20.18.1-win-x64\npm.cmd run dev` 后浏览器打开 127.0.0.1:1420，重点 320/375/768 宽度（设计系统见根目录 `design.md`）。
 - 组件测试里 `vi.mock("./api")` 用"spread 真模块 + 覆盖函数"模式，新增导出自动可用；`aiApi` 同理。
 
 ## 前端约定

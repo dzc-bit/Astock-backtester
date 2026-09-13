@@ -29,7 +29,7 @@ git branch --show-current
 https://github.com/dzc-bit/Astock-backtester.git
 ```
 
-保护已有未提交修改。不要覆盖无关文件，不要清理、删除、迁移 `D:\New project 6\运行产物`。版本号统一跟随桌面端当前版本，当前为 `1.5.0`（同步 7 处：`package.json`、`package-lock.json` 根条目×2、`pyproject.toml`、`backend/astock_backtester/__init__.py`、`src-tauri/Cargo.toml`、`src-tauri/Cargo.lock` 的 `a-stock-backtester` 条目、`src-tauri/tauri.conf.json`，外加 `tests/test_scripts.py` 的版本断言），除非用户明确要求改版本。前端视觉系统由仓库根 `design.md` 锁定（token 纪律见 §16.6），决策记录在 `docs/design-notes.md`。
+保护已有未提交修改。不要覆盖无关文件，不要清理、删除、迁移 `D:\New project 6\运行产物`。版本号统一跟随桌面端当前版本，当前为 `1.5.0`（同步 7 处：`package.json`、`package-lock.json` 根条目×2、`pyproject.toml`、`backend/astock_backtester/__init__.py`、`src-tauri/Cargo.toml`、`src-tauri/Cargo.lock` 的 `a-stock-backtester` 条目、`src-tauri/tauri.conf.json`，外加 `tests/test_scripts.py` 的版本断言），除非用户明确要求改版本。前端视觉系统由仓库根 `design.md` 锁定（token 纪律见 §16.6）。
 
 ## 2. 绝对不要碰错边界
 
