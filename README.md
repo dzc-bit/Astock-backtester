@@ -1,3 +1,4 @@
+![Uploading image.png…]()
 # A 股策略回测工作台
 
 Windows 桌面版 A 股策略回测工具。项目使用 React + TypeScript 构建界面，Tauri 提供桌面容器，Python 负责本地数据服务、行情聚合、数据补齐和回测执行，并内置一个基于 LLM 的 AI 投研助手（工具调用 + 本地知识检索 + 快讯推送）。
