@@ -150,7 +150,10 @@ class DigestEngine:
         self._store = store
         self._interval = interval_seconds
         self._lock = threading.Lock()
-        self._last_run = 0.0
+        # -inf sentinel: time.monotonic() counts from an arbitrary point (boot
+        # on Windows), so 0.0 made a fresh engine believe it had "recently run"
+        # on any machine with less than FRESH_THRESHOLD_SECONDS of uptime.
+        self._last_run = float("-inf")
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 

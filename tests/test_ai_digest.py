@@ -138,3 +138,25 @@ def test_gather_sources_combines_news_market_and_briefing(tmp_path):
     assert "【实时行情】" in data_text
     assert "上证指数" in data_text
     assert "【同花顺复盘】" in data_text
+
+
+def test_fresh_engine_never_treated_as_recent_run_on_low_uptime_machines(tmp_path, monkeypatch):
+    """time.monotonic() counts from an arbitrary point (boot on Windows); a
+    freshly provisioned CI runner can report < FRESH_THRESHOLD_SECONDS. A new
+    engine must therefore never be skipped as ``recent_run`` regardless of the
+    current monotonic reading — it must fall through to the config check."""
+    from astock_backtester.ai import digest as digest_module
+    from astock_backtester.ai.insights import EventBroker
+
+    monkeypatch.setattr(digest_module.time, "monotonic", lambda: 120.0)  # 模拟刚开机的机器
+    backend = FakeBackend()
+    _wire(backend)
+    engine = DigestEngine(
+        broker=EventBroker(),
+        backend=backend,
+        model_provider=lambda: ScriptedModel(DIGEST_JSON),
+        config_provider=lambda: AiConfig(),
+        store=DigestStore(tmp_path),
+    )
+
+    assert engine.run_once()["skipped"] == "not_configured"
