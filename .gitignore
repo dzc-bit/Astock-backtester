@@ -22,6 +22,9 @@ __pycache__/
 backend/astock_backtester.egg-info/
 运行产物/
 
+# 内部文档与截图：仅在本地留存，不入库、不上传
+docs/
+
 # Test coverage artifacts
 .coverage
 coverage.xml

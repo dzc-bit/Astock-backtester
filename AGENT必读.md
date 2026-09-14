@@ -23,13 +23,13 @@ git remote -v
 git branch --show-current
 ```
 
-期望 remote：
+期望 remote（仓库已由 `Astock-backtester` 改名为 `ai-invest-workbench`，旧地址会被 GitHub 301 重定向）：
 
 ```text
-https://github.com/dzc-bit/Astock-backtester.git
+https://github.com/dzc-bit/ai-invest-workbench.git
 ```
 
-保护已有未提交修改。不要覆盖无关文件，不要清理、删除、迁移 `D:\New project 6\运行产物`。版本号统一跟随桌面端当前版本，当前为 `1.5.0`（同步 7 处：`package.json`、`package-lock.json` 根条目×2、`pyproject.toml`、`backend/astock_backtester/__init__.py`、`src-tauri/Cargo.toml`、`src-tauri/Cargo.lock` 的 `a-stock-backtester` 条目、`src-tauri/tauri.conf.json`，外加 `tests/test_scripts.py` 的版本断言），除非用户明确要求改版本。前端视觉系统由仓库根 `design.md` 锁定（token 纪律见 §16.6）。
+保护已有未提交修改。不要覆盖无关文件，不要清理、删除、迁移 `D:\New project 6\运行产物`。版本号统一跟随桌面端当前版本，当前为 `1.5.1`（同步 7 处：`package.json`、`package-lock.json` 根条目×2、`pyproject.toml`、`backend/astock_backtester/__init__.py`、`src-tauri/Cargo.toml`、`src-tauri/Cargo.lock` 的 `a-stock-backtester` 条目、`src-tauri/tauri.conf.json`，外加 `tests/test_scripts.py` 的版本断言），除非用户明确要求改版本。前端视觉系统由仓库根 `design.md` 锁定（token 纪律见 §16.6）。
 
 ## 2. 绝对不要碰错边界
 
