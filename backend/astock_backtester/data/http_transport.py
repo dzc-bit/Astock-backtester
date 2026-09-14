@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from threading import local as thread_local
 from time import monotonic
 from typing import Any
 
@@ -31,6 +32,33 @@ def create_scraping_session() -> requests.Session:
     session = requests.Session()
     session.trust_env = False
     return session
+
+
+_thread_local = thread_local()
+
+
+def scraping_session() -> requests.Session:
+    """Return this thread's proxy-immune scraping session.
+
+    Provider dataclasses must default their ``requester`` to :func:`scraping_get`
+    rather than to ``requests.get``.  ``requests.get`` builds a throw-away
+    session with ``trust_env=True``, so it adopts ``HTTP_PROXY``/``HTTPS_PROXY``
+    from the machine environment; a system proxy such as Clash Verge then
+    terminates TLS to domestic market hosts (``SSL: UNEXPECTED_EOF_WHILE_READING``)
+    and every upstream read on that path fails.  One session per thread keeps the
+    connection reuse without sharing a ``Session`` across the provider thread
+    pools.
+    """
+    session = getattr(_thread_local, "session", None)
+    if session is None:
+        session = create_scraping_session()
+        _thread_local.session = session
+    return session
+
+
+def scraping_get(url: str, **kwargs: Any) -> Any:
+    """``requests.get`` equivalent that never reads proxy environment variables."""
+    return scraping_session().get(url, **kwargs)
 
 
 def _curl_get(url: str, **kwargs: Any) -> Any:
@@ -64,11 +92,12 @@ def should_allow_alternate_transport(
     Previously this logic was duplicated as ``_allow_public_alternate_transport``
     on both ``MarketNewsProvider`` and ``RealtimeMarketProvider``.  Centralising
     it here keeps the policy in one place while leaving the per-provider
-    override knob intact.
+    override knob intact.  :func:`scraping_get` counts as a public requester
+    because it is the ``trust_env=False`` stand-in for ``requests.get``.
     """
     if override is not None:
         return override
-    return requester is requests.get
+    return requester in (requests.get, scraping_get)
 
 
 def resilient_get(

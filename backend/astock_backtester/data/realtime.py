@@ -22,7 +22,7 @@ from astock_backtester.data.cls_finance import (
     THS_MARKET_SCORE_HEADERS,
     read_ths_browser_cookie,
 )
-from astock_backtester.data.http_transport import MINIMAL_USER_AGENT, resilient_get, should_allow_alternate_transport
+from astock_backtester.data.http_transport import MINIMAL_USER_AGENT, resilient_get, scraping_get, should_allow_alternate_transport
 from astock_backtester.data.realtime_parsers import (
     BEIJING_TZ,
     CLS_HOT_PLATE_URL,
@@ -153,7 +153,7 @@ class BrowserMarketProvider:
 
 @dataclass
 class HeavyMarketCrawlerProvider:
-    requester: Callable[..., requests.Response] = requests.get
+    requester: Callable[..., requests.Response] = scraping_get
     timeout: float = 2.5
     browser_provider: BrowserMarketProvider | None = None
     _last_successful_breadth: MarketBreadth | None = field(default=None, init=False, repr=False)
@@ -202,7 +202,7 @@ class _ClsHomeFlight:
 class RealtimeMarketProvider:
     warehouse: Warehouse
     timeout: float = 4.0
-    requester: Callable[..., requests.Response] = requests.get
+    requester: Callable[..., requests.Response] = scraping_get
     alternate_requester: Callable[..., Any] | None = None
     allow_alternate_transport: bool | None = None
     ths_cookie_getter: Callable[[float], str | None] | None = None

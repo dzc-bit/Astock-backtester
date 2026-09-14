@@ -19,7 +19,7 @@ import requests
 from bs4 import BeautifulSoup
 
 from astock_backtester.data.cls import CLS_QUOTE_BASE_URL, CLS_SITE_BASE_URL, cls_request_json
-from astock_backtester.data.http_transport import resilient_get, should_allow_alternate_transport
+from astock_backtester.data.http_transport import resilient_get, scraping_get, should_allow_alternate_transport
 from astock_backtester.data.realtime_parsers import (
     THS_HEADERS,
     THS_MARKET_SUMMARY_URL,
@@ -111,7 +111,7 @@ def _cls_payload_data(payload: Any, diagnostics: list[str], source: str) -> Any 
 
 @dataclass
 class ClsFinanceProvider:
-    requester: Callable[..., requests.Response] = requests.get
+    requester: Callable[..., requests.Response] = scraping_get
     timeout: float = 5.0
     browser_cookie_getter: Callable[[], str | None] | None = None
     alternate_requester: Callable[..., Any] | None = None
