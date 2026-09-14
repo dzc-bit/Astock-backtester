@@ -91,12 +91,26 @@ def build_daily_bars_coverage(
         except Exception as exc:
             logger.warning("symbol lifecycle read failed; falling back to unclipped coverage: %s", exc)
             lifecycle_records = {}
+    # 未显式指定 end_date 时，覆盖窗口的终点应取“仓库全局最新数据日”，而不是该股
+    # 自己的最后一行——否则一只停在 7 月的股票在逐股表里永远显示 missing=0，与
+    # Warehouse.coverage() 的累计缺口口径矛盾（覆盖表说没缺、同步却要补）。
+    derived_window_end = requested_end_date
+    if derived_window_end is None and warehouse is not None and used_warehouse:
+        for item in warehouse.coverage():
+            if item.dataset == "daily_bars" and item.end_date is not None:
+                derived_window_end = pd.Timestamp(item.end_date)
+                break
     for symbol, frame in bars.groupby("symbol", sort=True):
         frame = frame.sort_values("trade_date")
         data_start_date = frame["trade_date"].min()
         data_end_date = frame["trade_date"].max()
         coverage_start_date = requested_start_date if requested_start_date is not None else data_start_date
-        coverage_end_date = requested_end_date if requested_end_date is not None else data_end_date
+        if requested_end_date is not None:
+            coverage_end_date = requested_end_date
+        elif derived_window_end is not None and derived_window_end > data_end_date:
+            coverage_end_date = derived_window_end
+        else:
+            coverage_end_date = data_end_date
         present_dates = set(frame["trade_date"])
         record = lifecycle_records.get(str(symbol))
         listing_date = lifecycle_bound(record, "listing_date")

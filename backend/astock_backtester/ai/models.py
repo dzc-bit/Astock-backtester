@@ -60,6 +60,8 @@ class AiConfigUpdate(BaseModel):
     base_url: str = ""
     model: str = ""
     embedding_model: str = ""
+    embedding_base_url: str = ""
+    embedding_api_key: str = ""
     api_key: str = ""
     api_style: str = "chat-completions"
     research_style: str = "balanced"
@@ -67,3 +69,7 @@ class AiConfigUpdate(BaseModel):
     max_steps: int = 8
     insights_enabled: bool = True
     insight_max_per_hour: int = 6
+    report_enabled: bool = False
+    report_time: str = "15:30"
+    evolution_enabled: bool = False
+    evolution_time: str = "16:00"

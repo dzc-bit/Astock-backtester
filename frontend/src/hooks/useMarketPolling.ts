@@ -64,11 +64,8 @@ export function useMarketPolling({
           }
           setMarketSnapshot((current) => (snapshot.status === "unavailable" && current ? current : snapshot));
           const nextPhase = snapshot.market_phase ?? phase;
-          nextRefreshMs = refreshIntervalForMarketResult(
-            nextPhase,
-            snapshot.diagnostics,
-            snapshot.status === "unavailable"
-          );
+          const missingBreadth = snapshot.breadth == null && snapshot.status !== "unavailable";
+          nextRefreshMs = refreshIntervalForMarketResult(nextPhase, snapshot.diagnostics, snapshot.status === "unavailable", missingBreadth);
           setMarketRefreshMeta((current) => nextMarketRefreshMeta(current, snapshot, phase, isPartial));
         };
         const snapshot = await loadRealtimeMarketSnapshotStream(dataService.base_url, {
@@ -87,11 +84,8 @@ export function useMarketPolling({
             }
             setMarketSnapshot((current) => (snapshot.status === "unavailable" && current ? current : snapshot));
             const nextPhase = snapshot.market_phase ?? phase;
-            nextRefreshMs = refreshIntervalForMarketResult(
-              nextPhase,
-              snapshot.diagnostics,
-              snapshot.status === "unavailable"
-            );
+            const missingBreadth = snapshot.breadth == null && snapshot.status !== "unavailable";
+            nextRefreshMs = refreshIntervalForMarketResult(nextPhase, snapshot.diagnostics, snapshot.status === "unavailable", missingBreadth);
             setMarketRefreshMeta((current) => nextMarketRefreshMeta(current, snapshot, phase));
           }
         } catch (fallbackCaught) {

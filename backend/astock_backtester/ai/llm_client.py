@@ -390,7 +390,15 @@ class OpenAiCompatibleClient:
         config = self._require_config()
         if not config.embedding_model.strip():
             raise AiNotConfigured("未配置 embedding_model，知识检索不可用。")
-        client = self._client_factory(config)
+        # embedding 允许走独立供应商：未单独配置时回退主 base_url/api_key。
+        embed_base_url, embed_api_key = config.embedding_endpoint()
+        embed_config = AiConfig(
+            base_url=embed_base_url,
+            api_key=embed_api_key,
+            model=config.model,
+            embedding_model=config.embedding_model,
+        )
+        client = self._client_factory(embed_config)
         try:
             response = client.embeddings.create(model=config.embedding_model, input=texts)
         except Exception as exc:

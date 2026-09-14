@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 import pytest
+from astock_backtester.data.trading_calendar import a_share_trade_dates
 from astock_backtester.data.warehouse import Warehouse
 from pyarrow.lib import ArrowInvalid
 
@@ -153,7 +154,10 @@ def test_warehouse_coverage_uses_partition_stats_without_full_read(tmp_path, mon
     assert coverage["daily_bars"].symbols == 2
     assert coverage["daily_bars"].start_date.isoformat() == "2015-01-05"
     assert coverage["daily_bars"].end_date.isoformat() == "2016-01-04"
-    assert coverage["daily_bars"].missing_rows == 0
+    # 累计口径：600519 窗口 [2015-01-05, 2016-01-04] 覆盖全区间，实有 2 行；
+    # 000001 窗口 [2016-01-04, 2016-01-04] 实有 1 行 → 缺口 = 区间交易日数 − 2 − 0。
+    span = len(a_share_trade_dates(pd.Timestamp("2015-01-05"), pd.Timestamp("2016-01-04")))
+    assert coverage["daily_bars"].missing_rows == span - 2
     assert coverage["market_cap"].symbols == 2
     assert coverage["market_cap"].missing_rows == 0
     assert coverage["capital_flow"].symbols == 0
@@ -305,14 +309,31 @@ def test_warehouse_coverage_ignores_short_listing_lag_but_counts_later_capital_f
     warehouse.write_daily_bars(
         pd.DataFrame(
             {
-                "symbol": ["603027", "603027", "603027", "000001", "000001"],
-                "trade_date": ["2016-03-07", "2016-03-08", "2016-03-09", "2015-01-05", "2015-01-06"],
-                "open": [10.0, 10.0, 10.0, 9.0, 9.1],
-                "high": [10.5, 10.5, 10.5, 9.5, 9.6],
-                "low": [9.8, 9.8, 9.8, 8.8, 8.9],
-                "close": [10.2, 10.2, 10.2, 9.2, 9.3],
-                "volume": [1000, 1000, 1000, 900, 900],
-                "main_net_inflow": [float("nan"), 1_000_000.0, float("nan"), float("nan"), 500_000.0],
+                # 000001 追两行到全局最新日期，避免被“停更尾部缺口”口径计入缺失。
+                "symbol": ["603027", "603027", "603027", "000001", "000001", "000001", "000001"],
+                "trade_date": [
+                    "2016-03-07",
+                    "2016-03-08",
+                    "2016-03-09",
+                    "2015-01-05",
+                    "2015-01-06",
+                    "2016-03-08",
+                    "2016-03-09",
+                ],
+                "open": [10.0, 10.0, 10.0, 9.0, 9.1, 9.2, 9.3],
+                "high": [10.5, 10.5, 10.5, 9.5, 9.6, 9.7, 9.8],
+                "low": [9.8, 9.8, 9.8, 8.8, 8.9, 9.0, 9.1],
+                "close": [10.2, 10.2, 10.2, 9.2, 9.3, 9.4, 9.5],
+                "volume": [1000, 1000, 1000, 900, 900, 900, 900],
+                "main_net_inflow": [
+                    float("nan"),
+                    1_000_000.0,
+                    float("nan"),
+                    float("nan"),
+                    500_000.0,
+                    300_000.0,
+                    200_000.0,
+                ],
             }
         )
     )
@@ -475,3 +496,158 @@ def test_warehouse_coverage_daily_missing_rows_excludes_delisted_symbols(tmp_pat
     coverage = {item.dataset: item for item in warehouse.coverage()}
 
     assert coverage["daily_bars"].missing_rows == 1
+
+
+def test_data_gap_profile_reports_stale_tails_and_thin_days(tmp_path):
+    warehouse = Warehouse(tmp_path)
+    warehouse.write_daily_bars(
+        pd.DataFrame(
+            {
+                # A 更新到 06-04；B/C 停在 06-03 → 停更尾部 {06-03: 2}
+                "symbol": ["000001"] * 4 + ["000002"] * 3 + ["000003"] * 3,
+                "trade_date": [
+                    "2026-06-01",
+                    "2026-06-02",
+                    "2026-06-03",
+                    "2026-06-04",
+                    "2026-06-01",
+                    "2026-06-02",
+                    "2026-06-03",
+                    "2026-06-01",
+                    "2026-06-02",
+                    "2026-06-03",
+                ],
+                "open": [10.0] * 10,
+                "high": [10.5] * 10,
+                "low": [9.8] * 10,
+                "close": [10.2] * 10,
+                "volume": [1000] * 10,
+                # 资金流：B/C 只在 06-01 有 → 资金流停更尾部 {06-01: 2}
+                "main_net_inflow": [
+                    100.0,
+                    100.0,
+                    100.0,
+                    100.0,
+                    50.0,
+                    float("nan"),
+                    float("nan"),
+                    50.0,
+                    float("nan"),
+                    float("nan"),
+                ],
+            }
+        )
+    )
+
+    profile = warehouse.data_gap_profile()
+
+    assert profile["available"] is True
+    window = profile["window"]
+    assert window["end_date"] == "2026-06-04"
+    daily = profile["daily_bars"]
+    assert daily["symbols"] == 3
+    assert daily["symbols_current"] == 1
+    assert daily["symbols_stale"] == 2
+    assert {"last_date": "2026-06-03", "symbols": 2} in daily["stale_distribution"]
+    # 06-04 只有 1 行（其余交易日 3 行）→ 疑似写入失败日
+    assert {"trade_date": "2026-06-04", "rows": 1} in daily["thin_days"]
+    # 资金流 B/C 停在 06-01
+    assert {"last_date": "2026-06-01", "symbols": 2} in profile["capital_flow"]["stale_distribution"]
+
+
+def test_data_gap_profile_caches_until_invalidated(tmp_path):
+    warehouse = Warehouse(tmp_path)
+    warehouse.write_daily_bars(_bars())
+    first = warehouse.data_gap_profile()
+    assert first["available"] is True
+    # 未写入时命中缓存（10 分钟 TTL）
+    assert warehouse.data_gap_profile() is first
+
+    warehouse.write_daily_bars(_bars().assign(close=[10.3, 11.3, 8.1]))
+
+    # 写入后自动失效，重算出新的画像
+    second = warehouse.data_gap_profile()
+    assert second is not first
+
+
+def test_data_gap_profile_empty_warehouse_reports_unavailable(tmp_path):
+    warehouse = Warehouse(tmp_path)
+    profile = warehouse.data_gap_profile()
+    assert profile["available"] is False
+
+
+def test_build_daily_bars_coverage_sees_tail_gap_without_explicit_end_date(tmp_path):
+    """Summary coverage and per-symbol coverage must agree on tail gaps.
+
+    ``Warehouse.coverage()`` counts the days after a symbol's last row; the
+    per-symbol endpoint used to end its window at that symbol's own last row,
+    so a stalled stock reported ``missing=0`` there while the summary card
+    reported a huge backlog — the "coverage says fine, sync says top-up"
+    contradiction.
+    """
+    from astock_backtester.data.cache import LocalCache
+    from astock_backtester.data.operations import build_daily_bars_coverage
+
+    warehouse = Warehouse(tmp_path)
+    # 600519 一直写到 2016-01-04；000001 停在 2015-01-05（尾部缺口）。
+    frame = pd.DataFrame(
+        {
+            "symbol": ["000001", "600519", "600519"],
+            "trade_date": ["2015-01-05", "2015-01-05", "2016-01-04"],
+            "open": [8.0, 10.0, 11.0],
+            "high": [8.5, 10.5, 11.5],
+            "low": [7.9, 9.8, 10.8],
+            "close": [8.1, 10.2, 11.2],
+            "volume": [900, 1000, 1200],
+            "amount": [7290.0, 10200.0, 13440.0],
+            "float_market_cap": [800000000.0, 1000000000.0, 1100000000.0],
+        }
+    )
+    warehouse.write_daily_bars(frame)
+    cache = LocalCache(tmp_path)
+
+    without_end = build_daily_bars_coverage(cache, warehouse, symbols=["000001"])
+    item = without_end.items[0]
+    # 2015-01-05 之后到仓库最新日（2016-01-04）之间的交易日都应算缺口。
+    assert item.end_date.isoformat() == "2015-01-05"
+    assert len(item.missing_trade_dates) > 0
+
+    explicit_end = build_daily_bars_coverage(cache, warehouse, symbols=["000001"], end_date="2016-01-04")
+    assert len(explicit_end.items[0].missing_trade_dates) == len(item.missing_trade_dates)
+
+
+def test_coverage_capital_flow_counts_symbols_absent_from_flow(tmp_path):
+    """资金流尾部缺口必须覆盖“日线有、资金流完全没有”的股票。
+
+    旧口径只遍历 ``flow_rows_by_symbol``，从未采到资金流的股票不在其中，
+    与 ``market_cap`` 口径不一致：它们不产生任何尾部缺口计数。
+
+    用例设计：600519 资金流字段全空且停在 06-01（两行内部缺口 + 06-02/03
+    两个交易日尾部缺口），000001 资金流完整。修复前 capital_flow 的尾部
+    贡献为 0；修复后它必须严格大于内部缺口（即 2）。
+    """
+    warehouse = Warehouse(tmp_path)
+    frame = pd.DataFrame(
+        {
+            "symbol": ["000001", "000001", "000001", "600519", "600519"],
+            "trade_date": ["2026-06-01", "2026-06-02", "2026-06-03", "2026-06-01", "2026-06-02"],
+            "open": [8.0, 8.1, 8.2, 10.0, 10.2],
+            "high": [8.5, 8.6, 8.6, 10.5, 10.6],
+            "low": [7.9, 8.0, 8.1, 9.8, 10.1],
+            "close": [8.1, 8.2, 8.3, 10.2, 10.4],
+            "volume": [900, 910, 920, 1000, 1100],
+            "amount": [7290.0, 7462.0, 7636.0, 10200.0, 11440.0],
+            "float_market_cap": [8e8, 8.05e8, 8.1e8, 1e9, 1.02e9],
+            # 000001 资金流完整；600519 资金流全空 → 只有它是“从未采到资金流”的股票。
+            "main_net_inflow": [1200.0, 1210.0, 1220.0, None, None],
+        }
+    )
+    warehouse.write_daily_bars(frame)
+
+    coverage = {item.dataset: item for item in warehouse.coverage()}
+
+    # 内部缺口恰好 2 行（600519 的两行空字段）。
+    # 修复前尾部缺口为 0 → missing == 2；修复后必须把 600519 尾部交易日计入。
+    assert coverage["capital_flow"].missing_rows > 2
+    # 日线最新日 06-03，600519 数据停在 06-02 → 至少 1 个尾部交易日。
+    assert coverage["capital_flow"].missing_rows >= 3

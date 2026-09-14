@@ -16,12 +16,21 @@ __pycache__/
 .pytest_cache/
 .tmp-test/
 .tmp/
+.tmp_*
+.tmp-*
 .reference/
 backend/astock_backtester.egg-info/
 运行产物/
+
+# 内部文档与截图：仅在本地留存，不入库、不上传
+docs/
 
 # Test coverage artifacts
 .coverage
 coverage.xml
 htmlcov/
 frontend/coverage/
+
+# Vitest/Vite 在加载 TS 配置时落下的临时转译产物（每跑一次门禁必现）
+frontend/vitest.config.ts.timestamp-*.mjs
+frontend/vite.config.ts.timestamp-*.mjs

@@ -126,6 +126,8 @@ export type AiConfigView = {
   base_url: string;
   model: string;
   embedding_model: string;
+  embedding_base_url: string;
+  embedding_api_key_masked: string;
   api_style: AiApiStyle;
   research_style: AiResearchStyle;
   api_key_masked: string;
@@ -133,6 +135,10 @@ export type AiConfigView = {
   max_steps: number;
   insights_enabled: boolean;
   insight_max_per_hour: number;
+  report_enabled: boolean;
+  report_time: string;
+  evolution_enabled: boolean;
+  evolution_time: string;
   configured: boolean;
 };
 
@@ -140,6 +146,8 @@ export type AiConfigUpdatePayload = {
   base_url: string;
   model: string;
   embedding_model: string;
+  embedding_base_url: string;
+  embedding_api_key: string;
   api_key: string;
   api_style: AiApiStyle;
   research_style: AiResearchStyle;
@@ -147,6 +155,31 @@ export type AiConfigUpdatePayload = {
   max_steps: number;
   insights_enabled: boolean;
   insight_max_per_hour: number;
+  report_enabled: boolean;
+  report_time: string;
+  evolution_enabled: boolean;
+  evolution_time: string;
+};
+
+export type AiReportMeta = {
+  name: string;
+  size: number;
+  created_at: string;
+};
+
+export type AiReportsResponse = {
+  items: AiReportMeta[];
+};
+
+export type AiOverfitFinding = {
+  level: "critical" | "warning" | "info";
+  code: string;
+  message: string;
+};
+
+export type AiOverfitResult = {
+  level: "critical" | "warning" | "info" | "none";
+  findings: AiOverfitFinding[];
 };
 
 export type AiDigestItem = {
@@ -208,6 +241,9 @@ export function translateAiError(error: unknown): string {
   if (error instanceof Error) {
     if (error.message.includes("ai_not_configured") || error.message.includes("尚未配置")) {
       return "AI 服务尚未配置，请点击右上角设置填写 base_url、API Key 和模型名。";
+    }
+    if (error.message.includes("ai_session_busy") || error.message.includes("仍在生成中")) {
+      return "上一轮回答还在生成中，请等它结束（或点击停止）后再发送。";
     }
     if (error.message.includes("ai_upstream_error") || error.message.includes("模型服务调用失败")) {
       return "模型服务调用失败，请检查网络、API Key 与服务商状态后重试。";

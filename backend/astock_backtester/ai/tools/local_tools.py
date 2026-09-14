@@ -139,6 +139,37 @@ def build_local_tools(backend: AiBackend) -> list[AiTool]:
         label = f"共 {len(items)} 项（高 {by_severity['high']} / 中 {by_severity['medium']} / 低 {by_severity['low']}）"
         return f"{label}。示例：{heads or '无'}"
 
+    def data_health_report(_: dict[str, Any]) -> dict[str, Any]:
+        profile = backend.warehouse.data_gap_profile()
+        if not profile.get("available"):
+            return {"ok": False, "error": str(profile.get("reason", "数据仓缺口画像不可用"))}
+        return {"ok": True, "profile": profile}
+
+    def summarize_data_health(payload: dict[str, Any]) -> str:
+        profile = payload.get("profile", {})
+        window = profile.get("window", {})
+        daily = profile.get("daily_bars", {})
+        lines = [
+            f"数据窗口 {window.get('start_date')}~{window.get('end_date')}："
+            f"日线 {daily.get('symbols')} 只，其中 {daily.get('symbols_current')} 只更新到最新，"
+            f"{daily.get('symbols_stale')} 只已停更。"
+        ]
+        stale = daily.get("stale_distribution", [])[:5]
+        if stale:
+            parts = "；".join(f"{entry['symbols']} 只停在 {entry['last_date']}" for entry in stale)
+            lines.append(f"停更分布（top）：{parts}。")
+        thin = daily.get("thin_days", [])[:5]
+        if thin:
+            parts = "、".join(f"{entry['trade_date']}（仅 {entry['rows']} 行）" for entry in thin)
+            lines.append(f"疑似写入失败日：{parts}。")
+        for key, label in (("market_cap", "市值"), ("capital_flow", "资金流")):
+            section = profile.get(key, {})
+            entries = (section.get("stale_distribution") or [])[:3]
+            if entries:
+                parts = "；".join(f"{entry['symbols']} 只停在 {entry['last_date']}" for entry in entries)
+                lines.append(f"{label}停更：{parts}。")
+        return "\n".join(lines)
+
     def recent_daily_bars(args: dict[str, Any]) -> dict[str, Any]:
         symbol = normalize_symbol(str(args.get("symbol", "")))
         if not symbol or not symbol.isdigit():
@@ -332,6 +363,17 @@ def build_local_tools(backend: AiBackend) -> list[AiTool]:
             parameters={"type": "object", "properties": {}, "additionalProperties": False},
             executor=risk_alerts,
             summarizer=summarize_risk,
+        ),
+        AiTool(
+            name="data_health_report",
+            description=(
+                "检查本地数据仓具体缺哪些数据：各数据集停更股票分布（多少只停在哪个日期）、"
+                "疑似写入失败日、市值/资金流尾部缺口。回答“数据为什么缺/哪些股票没更新/"
+                "能不能回测某个区间/数据健康”类问题前先调用本工具。"
+            ),
+            parameters={"type": "object", "properties": {}, "additionalProperties": False},
+            executor=data_health_report,
+            summarizer=summarize_data_health,
         ),
         AiTool(
             name="recent_daily_bars",

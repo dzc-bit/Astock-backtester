@@ -474,6 +474,47 @@ export type DiagnosticsSourcesResponse = {
   sources: DataSourceHealth[];
 };
 
+export type DataGapStaleEntry = {
+  last_date: string;
+  symbols: number;
+};
+
+export type DataGapThinDay = {
+  trade_date: string;
+  rows: number;
+};
+
+export type DataGapProfile = {
+  available: boolean;
+  reason?: string;
+  window?: {
+    start_date: string;
+    end_date: string;
+    partitions: string[];
+  };
+  daily_bars?: {
+    symbols: number;
+    symbols_current: number;
+    symbols_stale: number;
+    stale_distribution: DataGapStaleEntry[];
+    thin_days: DataGapThinDay[];
+  };
+  market_cap?: {
+    symbols: number;
+    stale_distribution: DataGapStaleEntry[];
+  };
+  capital_flow?: {
+    symbols: number;
+    stale_distribution: DataGapStaleEntry[];
+  };
+};
+
+export type DiagnosticsDataGapsResponse = {
+  ok: boolean;
+  generated_at?: string;
+  profile: DataGapProfile;
+};
+
 export type OptimizeGrid = Partial<Record<OptimizeGridKey, number[]>>;
 
 export type OptimizeGridKey =

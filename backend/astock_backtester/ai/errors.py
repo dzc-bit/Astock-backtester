@@ -29,6 +29,14 @@ class AiUpstreamError(AiError):
     code = "ai_upstream_error"
 
 
+class AiSessionBusy(AiError):
+    """Raised when a chat turn is requested while the same session is still
+    generating its previous answer (e.g. after the user pressed 停止 but the
+    worker is still running)."""
+
+    code = "ai_session_busy"
+
+
 def ai_error_code(exc: Exception) -> str:
     if isinstance(exc, AiError):
         return exc.code

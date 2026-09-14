@@ -28,6 +28,9 @@ from astock_backtester.ai.prompts import build_insight_messages
 
 HEARTBEAT_INTERVAL_SECONDS = 15.0
 DEFAULT_ENGINE_INTERVAL_SECONDS = 60.0
+# 同一触发点（同标题/同一状态）的快讯冷却窗口：市场宽度持续极端时，
+# 引擎每分钟 tick 一次，若不去重会连发多条内容雷同的快讯。
+INSIGHT_DEDUP_WINDOW_SECONDS = 2 * 3600.0
 
 
 class EventBroker:
@@ -84,6 +87,8 @@ class InsightEngine:
         self._last_breadth_ratio: float | None = None
         self._last_risk_count: int | None = None
         self._insight_times: deque[float] = deque()
+        # dedup_key -> 上次发布时间（monotonic）；用于同因快讯冷却。
+        self._insight_signatures: dict[str, float] = {}
 
     # ------------------------------------------------------------ lifecycle
     def start(self) -> None:
@@ -138,10 +143,13 @@ class InsightEngine:
         self._last_breadth_ratio = ratio
         extreme = ratio < 0.25 or ratio > 0.75
         if extreme:
+            # 去重键按 5 个百分点分桶：宽度在同一区间内反复震荡时不再连发。
+            bucket = int(round(ratio * 20))
             self._maybe_generate_insight(
                 level="warning",
                 title=f"市场宽度异常：红盘占比 {ratio:.0%}",
                 data=f"红盘 {breadth.up} / 全市场 {breadth.total}（占比 {ratio:.0%}），来源 {breadth.source}，状态 {snapshot.status}",
+                dedup_key=f"breadth-extreme:{'high' if ratio > 0.5 else 'low'}:{bucket}",
             )
 
     def _check_risk(self) -> None:
@@ -161,12 +169,18 @@ class InsightEngine:
             self._insight_times.popleft()
         return len(self._insight_times) >= config.insight_max_per_hour
 
-    def _maybe_generate_insight(self, *, level: str, title: str, data: str) -> None:
+    def _maybe_generate_insight(self, *, level: str, title: str, data: str, dedup_key: str | None = None) -> None:
         config = self._config_provider()
         if not config.is_configured() or not config.insights_enabled or config.insight_max_per_hour <= 0:
             return
         if self._insight_cap_reached(config):
             return
+        now = time.monotonic()
+        if dedup_key:
+            self._prune_insight_signatures(now)
+            last = self._insight_signatures.get(dedup_key)
+            if last is not None and now - last < INSIGHT_DEDUP_WINDOW_SECONDS:
+                return
         model = self._model_provider()
         if model is None:
             return
@@ -178,6 +192,8 @@ class InsightEngine:
         if not content or content == "NO_INSIGHT":
             return
         self._insight_times.append(time.monotonic())
+        if dedup_key:
+            self._insight_signatures[dedup_key] = time.monotonic()
         self._broker.publish(
             {
                 "type": "insight",
@@ -191,3 +207,8 @@ class InsightEngine:
                 "timestamp": datetime.now(UTC).isoformat(),
             }
         )
+
+    def _prune_insight_signatures(self, now: float) -> None:
+        expired = [key for key, at in self._insight_signatures.items() if now - at >= INSIGHT_DEDUP_WINDOW_SECONDS]
+        for key in expired:
+            self._insight_signatures.pop(key, None)

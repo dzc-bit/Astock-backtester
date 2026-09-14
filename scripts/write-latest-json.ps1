@@ -4,6 +4,7 @@ param(
   [Parameter(Mandatory = $true)][string]$Notes,
   [string]$Tag = "",
   [string]$ReleaseAssetName = "",
+  [string]$RepoSlug = "dzc-bit/ai-invest-workbench",
   [string]$OutputPath = "release-assets\latest.json"
 )
 
@@ -31,7 +32,7 @@ $latest = @{
   platforms = @{
     "windows-x86_64" = @{
       signature = $signature
-      url = "https://github.com/dzc-bit/Astock-backtester/releases/download/$Tag/$ReleaseAssetName"
+      url = "https://github.com/$RepoSlug/releases/download/$Tag/$ReleaseAssetName"
     }
   }
 }

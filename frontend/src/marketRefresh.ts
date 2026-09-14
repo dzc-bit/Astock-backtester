@@ -39,11 +39,19 @@ export function refreshIntervalForPhase(phase: MarketSessionPhase, hasError = fa
   return phase === "trading" ? TRADING_INTERVAL_MS : CLOSED_INTERVAL_MS;
 }
 
+// 部分成功的降级重试：快照缺红绿家数（或板块）时不再等满整个正常周期，
+// 45 秒后重试一次，避免冷启动遇上首源抖动后长时间停在空白宽度。
+export const DEGRADED_RETRY_MS = 45_000;
+
 export function refreshIntervalForMarketResult(
   phase: MarketSessionPhase,
   _diagnostics: string[] | undefined,
-  hasError = false
+  hasError = false,
+  missingBreadth = false
 ): number {
+  if (!hasError && missingBreadth) {
+    return DEGRADED_RETRY_MS;
+  }
   return refreshIntervalForPhase(phase, hasError);
 }
 
@@ -77,7 +85,8 @@ export function nextMarketRefreshMeta(
   const nextInterval = refreshIntervalForMarketResult(
     nextPhase,
     snapshot.diagnostics,
-    snapshot.status === "unavailable"
+    snapshot.status === "unavailable",
+    snapshot.breadth == null && snapshot.status !== "unavailable"
   );
   const usingLastSuccess = snapshot.status === "unavailable" && Boolean(current.last_success_at);
   return {

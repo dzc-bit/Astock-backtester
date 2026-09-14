@@ -3596,3 +3596,62 @@ table,
   outline: 2px solid var(--focus);
   outline-offset: 2px;
 }
+
+
+/* 回测过拟合检测卡（ResultsOverview）：warning 沿用风险黄，critical 升级为涨色系红 */
+.overfit-strip.overfit-warning {
+  grid-template-columns: auto minmax(0, 1fr);
+  border-color: var(--warn-tint);
+  background: var(--warn-wash);
+}
+
+.overfit-strip.overfit-warning strong {
+  color: var(--warn-ink);
+}
+
+.overfit-strip.overfit-critical {
+  grid-template-columns: auto minmax(0, 1fr);
+  border-color: var(--rise-tint);
+  background: var(--rise-wash);
+}
+
+.overfit-strip.overfit-critical strong {
+  color: var(--rise-deep);
+}
+
+.overfit-strip.overfit-info {
+  grid-template-columns: auto minmax(0, 1fr);
+}
+
+.overfit-strip strong {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+
+/* 缺失数据监控明细（DataCenter）：停更分布与疑似写入失败日 */
+.data-gap-panel {
+  display: grid;
+  gap: 8px;
+  margin: 10px 0;
+}
+
+.data-gap-section {
+  display: grid;
+  gap: 4px;
+}
+
+.data-gap-section strong {
+  color: var(--ink);
+  font-size: var(--text-sm);
+}
+
+.data-gap-section ul {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--ink-2);
+  font-size: var(--text-xs);
+  display: grid;
+  gap: 2px;
+}

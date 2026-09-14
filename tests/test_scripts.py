@@ -912,7 +912,8 @@ def test_write_latest_json_supports_distinct_release_asset_name():
     assert "[string]$ReleaseAssetName = \"\"" in script
     assert "if (-not $ReleaseAssetName)" in script
     assert "$ReleaseAssetName = $AssetName" in script
-    assert "url = \"https://github.com/dzc-bit/Astock-backtester/releases/download/$Tag/$ReleaseAssetName\"" in script
+    assert "[string]$RepoSlug = \"dzc-bit/ai-invest-workbench\"" in script
+    assert "url = \"https://github.com/$RepoSlug/releases/download/$Tag/$ReleaseAssetName\"" in script
 
 
 def test_service_manager_defines_and_uses_packaged_sidecar_relative_helper():
@@ -962,7 +963,7 @@ def test_release_manifests_use_one_version():
         tauri_version,
         init_version,
     }
-    assert all_versions == {"1.5.0"}
+    assert all_versions == {"1.5.1"}
 
 
 def test_deprecated_full_array_strategy_mutation_is_removed():

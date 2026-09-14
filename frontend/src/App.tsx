@@ -1,5 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useState } from "react";
-import { Activity, Database, Flame, Gauge, ShieldAlert, Sparkles, X } from "lucide-react";
+import { Activity, Database, Flame, Gauge, ShieldAlert, Sparkles } from "lucide-react";
 import { AiAssistantPanel } from "./components/AiAssistantPanel";
 import { aiParseConditions, loadAiNewsDigest, loadAiStatus, revealAiKey } from "./aiApi";
 import { useAiEventStream } from "./hooks/useAiEventStream";
@@ -754,18 +754,22 @@ export function App() {
           setStrategySaveMessage("已套用 AI 生成的策略，可在策略工作台继续调整。");
         }}
       />
-      <button
-        className={`ai-fab ${aiOpen ? "open" : ""}`}
-        type="button"
-        aria-label={aiOpen ? "关闭 AI 投研助手" : `打开 AI 投研助手${aiUnseenInsights > 0 ? `，${aiUnseenInsights} 条未读快讯` : ""}`}
-        onClick={() => {
-          setAiOpen((open) => !open);
-          setAiUnseenInsights(0);
-        }}
-      >
-        {aiOpen ? <X size={22} aria-hidden="true" /> : <Sparkles size={22} aria-hidden="true" />}
-        {!aiOpen && aiUnseenInsights > 0 ? <span className="ai-fab-badge">{aiUnseenInsights}</span> : null}
-      </button>
+      {/* 抽屉打开时悬浮球隐藏：它的位置正好压住抽屉输入区的发送按钮，
+          且抽屉头部已有关闭按钮，双重关闭入口反而互相遮挡。 */}
+      {!aiOpen && (
+        <button
+          className="ai-fab"
+          type="button"
+          aria-label={`打开 AI 投研助手${aiUnseenInsights > 0 ? `，${aiUnseenInsights} 条未读快讯` : ""}`}
+          onClick={() => {
+            setAiOpen(true);
+            setAiUnseenInsights(0);
+          }}
+        >
+          <Sparkles size={22} aria-hidden="true" />
+          {aiUnseenInsights > 0 ? <span className="ai-fab-badge">{aiUnseenInsights}</span> : null}
+        </button>
+      )}
     </main>
   );
 }

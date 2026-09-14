@@ -206,8 +206,12 @@ class RealtimeMarketProvider:
     alternate_requester: Callable[..., Any] | None = None
     allow_alternate_transport: bool | None = None
     ths_cookie_getter: Callable[[float], str | None] | None = None
-    breadth_time_budget: float = 3.0
-    breadth_source_timeout: float = 2.5
+    # 红绿家数预算：单源 2.2 秒（主源财联社签名 XHR 冷连接需要 ~2s，不能压得更低）、
+    # 总预算 8 秒——首源偶发失败时，同花顺/Sina/腾讯等备选源仍能在预算内依次
+    # 跑起来，而不是旧版 3 秒总预算一到整体放弃、只留下空白宽度。
+    # 流式接口会先返回指数与板块，等待增加对用户不可感。
+    breadth_time_budget: float = 8.0
+    breadth_source_timeout: float = 2.2
     sector_time_budget: float = 3.0
     sector_source_timeout: float = 0.8
     local_snapshot_time_budget: float = 2.0

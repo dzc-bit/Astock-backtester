@@ -9,6 +9,7 @@ testable with a scripted fake model and zero network.
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
@@ -21,13 +22,24 @@ from astock_backtester.ai.context import (
     wrap_untrusted,
 )
 from astock_backtester.ai.llm_client import ChatModel
-from astock_backtester.ai.prompts import build_compaction_messages
+from astock_backtester.ai.prompts import build_compaction_messages, build_final_answer_messages
 from astock_backtester.ai.tools.registry import ToolRegistry
+
+logger = logging.getLogger(__name__)
 
 AgentEvent = dict[str, Any]
 EventHandler = Callable[[AgentEvent], None]
 
-SHORT_TERM_WINDOW = 10
+# 短期窗口按“条数”与“字符数”双阈值控制：只有两者都未超限时才不压缩，
+# 避免每轮工具对话（assistant+tool 消息膨胀很快）都在新问题开始时触发压缩。
+SHORT_TERM_WINDOW = 24
+SHORT_TERM_MAX_CHARS = 36_000
+# 归档攒批：攒够足够多的待压缩内容才调用一次纪要模型，避免频繁压缩。
+CONSOLIDATE_MIN_ENTRIES = 12
+CONSOLIDATE_MIN_CHARS = 6_000
+# 归档条目上限：压缩持续失败（模型不可用等）时 pending_archive 只增不减，
+# 这是长久的内存/落盘膨胀风险，按条数兜底裁剪。
+ARCHIVE_MAX_ENTRIES = 400
 
 # 摘要里含爬取正文的工具：digest 进入上下文前必须套不可信分隔符（AGENT必读 §15-8）
 UNTRUSTED_DIGEST_TOOLS = frozenset(
@@ -58,6 +70,9 @@ class AgentRunner:
         runnable strategy JSON produced by a successful backtest tool call)."""
         self._artifacts = {}
         now = datetime.now(UTC).isoformat()
+        # 上一次运行可能被中断（客户端断开/进程退出/模型异常），先修复悬空的
+        # tool_calls——否则下次请求会被上游 API 以协议错误拒绝，表现为“失忆”。
+        self._repair_interrupted_turn(session)
         content = user_message
         if context and context.get("kind") not in (None, "none"):
             content = f"{user_message}\n\n{compact_context_payload(str(context.get('kind')), context.get('payload') or {}, self._budget)}"
@@ -104,7 +119,11 @@ class AgentRunner:
                 }
             )
 
-        note = "（已达到单次问题的工具调用上限，回答中止；请拆小问题后重试。）"
+        # 步数耗尽时绝不“空手中断”：强制做一次不带工具的收尾回答，
+        # 把已收集的工具结果整理成结论交给用户。
+        if self._forced_final_answer(session, system_prompt, on_event):
+            return dict(self._artifacts)
+        note = "（已达到单次问题的工具调用上限，且收尾回答生成失败；请拆小问题后重试。）"
         session["messages"].append({"role": "assistant", "content": note})
         session["display"].append({"role": "assistant", "content": note, "tool_steps": [], "ts": datetime.now(UTC).isoformat()})
         on_event({"type": "phase", "phase": "已达工具调用上限"})
@@ -183,18 +202,100 @@ class AgentRunner:
             system += f"\n\n## 会话纪要（更早的对话已压缩）\n{rolling}"
         return [{"role": "system", "content": system}, *session["messages"]]
 
-    def _archive_overflow(self, session: dict[str, Any], on_event: EventHandler) -> None:
-        """Keep at most SHORT_TERM_WINDOW protocol messages in the live window.
+    def _repair_interrupted_turn(self, session: dict[str, Any]) -> None:
+        """Heal a session interrupted mid-tool-call.
 
-        The cut point is extended to the next user-message boundary so a
+        If the previous run died between an assistant ``tool_calls`` message and
+        its tool results, the OpenAI-protocol history is invalid and every
+        following request in this session would be rejected upstream — the user
+        experiences this as the session "losing its memory".  Insert synthetic
+        tool results for unanswered call ids so the next turn can proceed with
+        the full history intact.
+        """
+        messages = session.get("messages") or []
+        repaired: list[dict[str, Any]] = []
+        index = 0
+        changed = False
+        while index < len(messages):
+            message = messages[index]
+            repaired.append(message)
+            index += 1
+            calls = message.get("tool_calls") or []
+            if not calls:
+                continue
+            # 吃掉紧随其后的既有 tool 结果。
+            while index < len(messages) and messages[index].get("role") == "tool":
+                repaired.append(messages[index])
+                index += 1
+            answered = {
+                str(item.get("tool_call_id")) for item in repaired if item.get("role") == "tool"
+            }
+            for call in calls:
+                call_id = str(call.get("id", ""))
+                if call_id in answered:
+                    continue
+                name = str(call.get("function", {}).get("name", ""))
+                repaired.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": call_id,
+                        "content": f"（上一次运行在调用 {name or '工具'} 时被中断，没有返回结果；如需该数据请重新调用。）",
+                    }
+                )
+                changed = True
+        if changed:
+            session["messages"] = repaired
+
+    def _forced_final_answer(self, session: dict[str, Any], system_prompt: str, on_event: EventHandler) -> bool:
+        """One no-tools closing call after the step budget is exhausted."""
+        on_event({"type": "phase", "phase": "工具步数已达上限，正在整理已有结果作答"})
+        messages = self._build_request_messages(session, system_prompt)
+        try:
+            content_parts: list[str] = []
+            for event in self._model.chat(build_final_answer_messages(messages), tools=None):
+                if event[0] == "text":
+                    content_parts.append(event[1])
+                    on_event({"type": "token", "text": event[1]})
+                elif event[0] == "final":
+                    content_parts.append(str((event[1] or {}).get("content") or ""))
+            answer = "".join(content_parts).strip()
+        except Exception:  # noqa: BLE001 - 收尾失败时回退到提示文案
+            return False
+        if not answer:
+            return False
+        session["messages"].append({"role": "assistant", "content": answer})
+        session["display"].append(
+            {"role": "assistant", "content": answer, "tool_steps": [], "ts": datetime.now(UTC).isoformat()}
+        )
+        session["updated_at"] = datetime.now(UTC).isoformat()
+        return True
+
+    def _archive_overflow(self, session: dict[str, Any], on_event: EventHandler) -> None:
+        """Keep the live window within both the message-count and char budget.
+
+        The cut point is extended to the next user-message boundary so an
         assistant(tool_calls)/tool pair is never split across the window edge.
         """
         messages = session["messages"]
-        overflow = len(messages) - SHORT_TERM_WINDOW
+        overflow = max(len(messages) - SHORT_TERM_WINDOW, 0)
+        total_chars = sum(len(str(message.get("content") or "")) for message in messages)
+        if total_chars > SHORT_TERM_MAX_CHARS:
+            # 字符超限：从最旧处开始归档，直到剩余字符回到阈值内。
+            dropped_chars = 0
+            for index in range(len(messages)):
+                if total_chars - dropped_chars <= SHORT_TERM_MAX_CHARS:
+                    break
+                dropped_chars += len(str(messages[index].get("content") or ""))
+                overflow = max(overflow, index + 1)
         if overflow <= 0:
             return
-        while overflow < len(messages) and messages[overflow].get("role") != "user":
-            overflow += 1
+        # 把裁剪点推到下一个 user 边界，避免 assistant(tool_calls)/tool 配对被切断。
+        # 但若后面**没有** user 消息（例如窗口里全是 assistant/tool），推到末尾会
+        # 让整段字符预算静默失效（窗口仍严重超预算却不归档）。此时退回字符裁剪点。
+        boundary = overflow
+        while boundary < len(messages) and messages[boundary].get("role") != "user":
+            boundary += 1
+        overflow = boundary if boundary < len(messages) else overflow
         if overflow >= len(messages):
             return
         dropped = messages[:overflow]
@@ -206,21 +307,42 @@ class AgentRunner:
             if calls:
                 text += " " + ", ".join(call.get("function", {}).get("name", "") for call in calls)
             archive.append(f"{message.get('role')}: {text}")
+        # 压缩持续失败时归档只增不减，必须按条数兜底裁剪，否则会话文件会无限膨胀。
+        if len(archive) > ARCHIVE_MAX_ENTRIES:
+            # 丢最旧的条目，但保留一条“已丢弃 N 条”的占位说明，避免静默失忆。
+            # 说明本身占 1 条，所以保留 ARCHIVE_MAX_ENTRIES - 1 条正文。
+            excess = len(archive) - (ARCHIVE_MAX_ENTRIES - 1)
+            archive[:] = [f"（更早的 {excess} 条对话因压缩失败已丢弃）", *archive[excess:]]
         on_event({"type": "phase", "phase": "归档短期窗口之外的对话"})
 
     def _consolidate_archive(self, session: dict[str, Any], on_event: EventHandler) -> None:
-        """Fold archived dialogue into the rolling summary (one model call)."""
+        """Fold archived dialogue into the rolling summary (one model call).
+
+        Compression is deliberately batched: small archives stay in
+        ``pending_archive`` (persisted with the session, so nothing is lost)
+        until they are large enough to be worth a summarization call.
+        """
         archive = session.get("pending_archive") or []
         if not archive:
             return
-        session["pending_archive"] = []
+        archive_chars = sum(len(item) for item in archive)
+        if len(archive) < CONSOLIDATE_MIN_ENTRIES and archive_chars < CONSOLIDATE_MIN_CHARS:
+            return
         on_event({"type": "phase", "phase": "压缩进长期会话纪要"})
         existing = str(session.get("rolling_summary") or "")
         lines = [f"（既有纪要）{existing}"] if existing else []
         lines.extend(archive)
-        summary = self._summarize_history_text("\n".join(lines))
-        if summary:
-            session["rolling_summary"] = summary[:4000]
+        try:
+            summary = self._summarize_history_text("\n".join(lines))
+        except Exception:  # noqa: BLE001 - 压缩失败不能丢归档，也不能中断本轮
+            logger.warning("会话归档压缩失败；保留 pending_archive 待下次重试", exc_info=True)
+            return
+        if not summary:
+            # 模型返回空：保留归档内容，下次达到阈值再试。
+            return
+        # 只有压缩成功才清空，避免上游异常时归档内容被永久丢弃。
+        session["pending_archive"] = []
+        session["rolling_summary"] = summary[:4000]
 
     def _summarize_history_text(self, history_text: str) -> str:
         final_content = ""

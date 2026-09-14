@@ -4,23 +4,25 @@
 
 面向 A 股的本地优先 AI 投研终端：本地数据仓 + 实时行情 + 财联社资讯聚合 + 风险清单监控 + LLM AI 投研 Agent（评股对话 / 本地知识检索 / 参数寻优 / 资讯摘要）+ 策略回测。前端 React + TypeScript，桌面容器 Tauri，本地数据服务与回测执行由 Python 承担。
 
-## 界面预览
+当前版本：`1.5.1`
 
-**今日实时行情 · 首页**
+## 1.5.1 当前发布内容
 
-![今日实时行情首页](docs/screenshots/home.png)
+本轮聚焦"数据仓在多进程下不再写坏、缺口能说清楚、AI 能定时出报告"：
 
-**财联社看盘 · 资讯与复盘**
+- **数据仓跨进程写锁**：新增 `data/filelock.py`（`CrossProcessFileLock`），桌面端 sidecar 与外部补齐脚本同时写同一数据仓时串行化写入，修复并发写入导致的 parquet 分区损坏。
+- **批量写入从 O(n²) 降到线性**：日线/市值/资金流批量写入不再每个批次重扫已写分区，全市场同步的写入耗时随批次数线性增长。
+- **损坏分区不再静默**：读取失败的分区被记录并通过 `Warehouse.corrupt_partitions()` 暴露，数据中心可见，不再表现为"数据凭空缺失"。
+- **覆盖缺口改为累计真实缺口口径**：日线缺失 = 每只股票 `[首行日期, min(最新数据日, 退市日)]` 窗口内的期望交易日数 − 实有行数（内部空洞与停更尾部都计入）；市值/资金流在"已有行但字段为空"的统计之外再叠加停更尾部。多日未同步时缺失行数会到数十万级，这是真实缺口而不是异常，唯一补齐手段仍是全市场同步。
+- **缺口画像与"缺失数据监控"**：`GET /diagnostics/data-gaps` 与 `Warehouse.data_gap_profile()` 给出停更分布、疑似写入失败日、市值与资金流停更尾部；数据中心折叠区按缺口降序列逐股明细，AI 助手的 `data_health_report` 工具消费同一份明细，保证 UI 与 AI 看到一致的"具体缺什么"。
+- **AI 定时报告**：`ai/reports.py` 用单一调度线程按本地时间运行——收盘复盘报告（无模型时退化为数据摘要版）与策略库自动体检（重跑已存策略近 180 天 + 4 变体小网格 + 过拟合检测 + 与上次体检的漂移，不改写用户保存的策略）；报告落盘 `运行产物/AI报告/`，AI 助手面板内可列出并下载（`GET /ai/reports`、`GET /ai/report/file?name=`）。
+- **回测过拟合检测**：`POST /ai/overfit/check` 对交易数、胜率、收益结构、网格离散度做确定性检测（无需模型）；回测完成后收益概览出现过拟合卡，分"轻微提示 / 存在疑点 / 高"三档。
+- **实时行情降级重试**：快照缺红绿家数（或强势板块）时不再等满整个正常周期，短暂等待后重试一次；本轮确实缺红绿家数时沿用最近一次有数据的宽度并明确标注"沿用"，不伪装成已返回。
+- **AI 助手交互修正**：抽屉打开时隐藏悬浮球（原先正好压住输入区发送按钮）；上一轮回答仍在生成时明确提示"等待或先停止"，不再静默吞掉输入。
+- **embedding 独立供应商**：可为向量检索单独配置 Base URL 与 API Key，留空则跟随上方主配置。
+- **知识库**：RAG 语料新增异动/监管/量能一篇。
 
-![财联社看盘与资讯](docs/screenshots/market.png)
-
-**数据中心 · 本地数据仓与 AI 子系统**
-
-![数据中心与 AI 子系统](docs/screenshots/datacenter.png)
-
-当前版本：`1.5.0`
-
-## 1.5.0 当前发布内容
+## 1.5.0 发布内容（历史）
 
 本轮以"有专业投研深度、UI 有设计品质、数据模型正确"为目标，包含七块内容（设计决策见 [`design.md`](design.md)）：
 
@@ -61,7 +63,7 @@ LLM 客户端复用官方 `openai` SDK（任何 OpenAI 兼容服务商均可，�
 - 候选股票：回测结果通过 `latest_strategy_matches.matches` 展示符合当前策略的个股。
 - 桌面更新：通过 GitHub Releases 发布 Windows 安装包，并由应用内更新入口检查新版本。
 
-最新安装包见 [GitHub Releases](https://github.com/dzc-bit/Astock-backtester/releases)。
+最新安装包见 [GitHub Releases](https://github.com/dzc-bit/ai-invest-workbench/releases)。
 
 ## 数据源概览
 
@@ -105,7 +107,7 @@ cargo test --manifest-path src-tauri/Cargo.toml
 
 | 能力 | 接口 |
 | --- | --- |
-| 健康检查 | `GET /ping`、`GET /health`、`GET /logs/recent`、`GET /diagnostics/sources` |
+| 健康检查 | `GET /ping`、`GET /health`、`GET /logs/recent`、`GET /diagnostics/sources`、`GET /diagnostics/data-gaps` |
 | 覆盖查询 | `POST /coverage/daily-bars` |
 | 数据同步 | `POST /sync/full-market`、`GET /sync/jobs/{job_id}` |
 | 数据导入与补齐 | `POST /import/daily-bars`、`POST /fetch/daily-bars`、`POST /fetch/capital-flow` |
@@ -115,6 +117,7 @@ cargo test --manifest-path src-tauri/Cargo.toml
 | 回测 | `POST /run/backtest/stream` |
 | AI 助手 | `GET /ai/status`、`GET /ai/news`、`GET /ai/config`、`POST /ai/config`、`GET /ai/config/reveal`（仅限本机桌面端，带 Host/Origin 校验）、`POST /ai/chat/stream`、`GET /ai/events/stream` |
 | AI 轻路由（v1.5.0） | `POST /ai/conditions/parse`（自然语言→条件 DSL，自愈校验）、`POST /ai/insight/oneshot`（场景化单段点评）、`POST /ai/optimize`（参数网格寻优，NDJSON 流式） |
+| AI 报告与过拟合（v1.5.1） | `GET /ai/reports`、`GET /ai/report/file?name=`、`POST /ai/overfit/check` |
 
 `/run/backtest/stream` 与 `/ai/chat/stream` 返回 NDJSON，需要逐行解析；`/ai/chat/stream` 的最后一个事件为 `{"type":"result", ...}`（错误时为 `error`）。`/ai/events/stream` 为长连接（insight / data_fresh / heartbeat）。
 
@@ -159,6 +162,6 @@ npm run tauri -- dev
 npm run tauri -- build --ci
 ```
 
-Windows 发布使用项目内固定的 Node、Python、Rust、MSVC 和 NSIS 工具，完整的签名、覆盖安装、sidecar 哈希和 HTTP 探针流程见 [`docs/release.md`](docs/release.md)。
+Windows 发布使用项目内固定的 Node、Python、Rust、MSVC 和 NSIS 工具，完成签名、覆盖安装、sidecar 哈希与 HTTP 探针流程后再上传安装包。
 
 发布前请确认生成的安装包、签名文件、临时更新清单、日志和运行数据没有提交到 Git 仓库。

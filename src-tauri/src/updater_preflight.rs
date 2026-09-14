@@ -95,7 +95,7 @@ mod tests {
 
         assert_eq!(
             endpoint.as_str(),
-            "https://github.com/dzc-bit/Astock-backtester/releases/latest/download/latest.json"
+            "https://github.com/dzc-bit/ai-invest-workbench/releases/latest/download/latest.json"
         );
     }
 

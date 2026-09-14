@@ -1,6 +1,7 @@
+import { useRef } from "react";
 import { Activity, Radio, TrendingDown, TrendingUp } from "lucide-react";
 import { marketPhaseLabel } from "../marketRefresh";
-import type { MarketRefreshMeta, RealtimeMarketSnapshot } from "../types";
+import type { MarketBreadth, MarketRefreshMeta, RealtimeMarketSnapshot } from "../types";
 
 type Props = {
   snapshot: RealtimeMarketSnapshot | null;
@@ -141,7 +142,15 @@ function isYesterdaySectorTracking(snapshot: RealtimeMarketSnapshot | null): boo
 }
 
 export function MarketDashboard({ snapshot, isLoading = false, refreshMeta }: Props) {
-  const breadth = snapshot?.breadth;
+  // 本轮快照缺红绿家数时沿用最近一次有数据的宽度并明确标注“沿用”，
+  // 避免部分成功场景下长时间显示 "--"（AGENT必读 §5：缓存只能以 stale 标注使用）。
+  const lastBreadthRef = useRef<{ breadth: MarketBreadth; at: string } | null>(null);
+  if (snapshot?.breadth) {
+    lastBreadthRef.current = { breadth: snapshot.breadth, at: snapshot.updated_at };
+  }
+  const carriedBreadth = snapshot && !snapshot.breadth ? lastBreadthRef.current : null;
+  const breadth = snapshot?.breadth ?? carriedBreadth?.breadth ?? null;
+  const breadthCarriedAt = !snapshot?.breadth && carriedBreadth ? carriedBreadth.at : null;
   const statusLabel = snapshot?.status === "live" ? "实时" : snapshot?.status === "stale" ? "本地兜底" : "待连接";
   const refreshLabel = refreshStatusLabel(refreshMeta, isLoading);
   const phase = refreshMeta?.phase ?? snapshot?.market_phase;
@@ -191,7 +200,7 @@ export function MarketDashboard({ snapshot, isLoading = false, refreshMeta }: Pr
 
         <div className="breadth-panel">
           <div>
-            <span>红绿家数</span>
+            <span>红绿家数{breadthCarriedAt ? "（沿用）" : ""}</span>
             <strong>
               <TrendingUp size={18} aria-hidden="true" /> 红 {breadth?.up ?? "--"}
             </strong>
@@ -199,7 +208,10 @@ export function MarketDashboard({ snapshot, isLoading = false, refreshMeta }: Pr
               <TrendingDown size={18} aria-hidden="true" /> 绿 {breadth?.down ?? "--"}
             </strong>
           </div>
-          <small>平盘 {breadth?.flat ?? "--"} / 合计 {breadth?.total ?? "--"}</small>
+          <small>
+            平盘 {breadth?.flat ?? "--"} / 合计 {breadth?.total ?? "--"}
+            {breadthCarriedAt ? ` · 沿用 ${formatTime(breadthCarriedAt)} 数据` : ""}
+          </small>
         </div>
 
         <div className="sector-panel">

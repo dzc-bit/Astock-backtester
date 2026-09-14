@@ -11,6 +11,8 @@ import type {
   AiInsightOneshotResult,
   AiInsightScene,
   AiNewsDigest,
+  AiOverfitResult,
+  AiReportsResponse,
   AiStatus
 } from "./aiTypes";
 import type { BacktestSettingsConfig, OptimizeStreamHandlers, StrategyConfig } from "./types";
@@ -22,6 +24,7 @@ import {
   mockAiInsightOneshot,
   mockAiNewsDigest,
   mockAiOptimizeEvents,
+  mockAiReports,
   mockAiSaveConfig,
   mockAiStatus
 } from "./aiMocks";
@@ -108,6 +111,40 @@ export async function loadAiNewsDigest(baseUrl: string): Promise<AiNewsDigest> {
     throw new BackendError(typeof json.code === "string" ? json.code : "request_failed", "AI 资讯聚合读取失败");
   }
   return json as AiNewsDigest;
+}
+
+export async function loadAiReports(baseUrl: string): Promise<AiReportsResponse> {
+  if (!isTauriRuntime()) {
+    return mockAiReports();
+  }
+  const response = await fetch(`${baseUrl}/ai/reports`);
+  const json = await response.json();
+  if (!response.ok) {
+    throw new BackendError(typeof json.code === "string" ? json.code : "request_failed", "AI 报告列表读取失败");
+  }
+  return json as AiReportsResponse;
+}
+
+export async function loadAiReportFile(baseUrl: string, name: string): Promise<string> {
+  if (!isTauriRuntime()) {
+    return `# ${name}\n\n（预览模式：示例报告内容。）`;
+  }
+  const response = await fetch(`${baseUrl}/ai/report/file?name=${encodeURIComponent(name)}`);
+  const json = await response.json();
+  if (!response.ok) {
+    throw new BackendError(typeof json.code === "string" ? json.code : "request_failed", "AI 报告读取失败");
+  }
+  return String(json.content ?? "");
+}
+
+export async function aiOverfitCheck(
+  baseUrl: string,
+  payload: { metrics: Record<string, unknown>; combos?: Array<Record<string, unknown>> }
+): Promise<AiOverfitResult> {
+  if (!isTauriRuntime()) {
+    return { level: "none", findings: [] };
+  }
+  return aiPostJson<AiOverfitResult>(baseUrl, "/ai/overfit/check", payload, "过拟合检测失败");
 }
 
 export async function aiParseConditions(baseUrl: string, text: string): Promise<AiConditionParseResult> {

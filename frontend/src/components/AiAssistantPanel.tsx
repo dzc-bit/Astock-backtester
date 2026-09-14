@@ -2,8 +2,16 @@ import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeSanitize from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
-import { AlertTriangle, Bot, Send, Settings2, Sparkles, Square, X } from "lucide-react";
-import { loadAiConfig, loadAiStatus, revealAiKey, runAiChatStream, saveAiConfig } from "../aiApi";
+import { AlertTriangle, Bot, Download, Send, Settings2, Sparkles, Square, X } from "lucide-react";
+import {
+  loadAiConfig,
+  loadAiReportFile,
+  loadAiReports,
+  loadAiStatus,
+  revealAiKey,
+  runAiChatStream,
+  saveAiConfig
+} from "../aiApi";
 import { translateAiError } from "../aiTypes";
 import type {
   AiChartArtifact,
@@ -12,6 +20,7 @@ import type {
   AiConfigView,
   AiDisplayTurn,
   AiInsight,
+  AiReportMeta,
   AiStatus,
   AiTask,
   AiToolStep
@@ -66,6 +75,8 @@ export function AiAssistantPanel({
   const [configError, setConfigError] = useState<string | null>(null);
   const [lastStrategy, setLastStrategy] = useState<StrategyConfig | null>(null);
   const [lastChart, setLastChart] = useState<AiChartArtifact | null>(null);
+  const [reports, setReports] = useState<AiReportMeta[]>([]);
+  const [reportBusy, setReportBusy] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const streamingRef = useRef(false);
@@ -86,6 +97,17 @@ export function AiAssistantPanel({
       .catch(() => {
         if (!cancelled) {
           setStatus(null);
+        }
+      });
+    loadAiReports(baseUrl)
+      .then((next) => {
+        if (!cancelled) {
+          setReports(next.items ?? []);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setReports([]);
         }
       });
     onInsightsShown?.();
@@ -203,6 +225,29 @@ export function AiAssistantPanel({
     abortRef.current?.abort();
   };
 
+  const downloadReport = async (report: AiReportMeta) => {
+    if (!baseUrl) {
+      return;
+    }
+    setReportBusy(report.name);
+    try {
+      const content = await loadAiReportFile(baseUrl, report.name);
+      const blob = new Blob([content], { type: "text/markdown;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = report.name;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+    } catch {
+      // 下载失败保持安静：列表仍在，可重试。
+    } finally {
+      setReportBusy(null);
+    }
+  };
+
   const openSettings = async () => {
     setSettingsOpen(true);
     setConfigError(null);
@@ -290,6 +335,28 @@ export function AiAssistantPanel({
               <li key={insight.id} className={`ai-insight ${insight.level}`}>
                 <strong>{insight.title}</strong>
                 <span>{insight.digest}</span>
+              </li>
+            ))}
+          </ul>
+        </details>
+      ) : null}
+
+      {reports.length > 0 ? (
+        <details className="ai-insights" open>
+          <summary>定时报告（{reports.length}）</summary>
+          <ul>
+            {reports.slice(0, 8).map((report) => (
+              <li key={report.name} className="ai-insight ai-report-item">
+                <strong>{report.name.replace(/\.md$/, "")}</strong>
+                <button
+                  className="ai-reveal-button"
+                  type="button"
+                  disabled={reportBusy === report.name}
+                  onClick={() => void downloadReport(report)}
+                >
+                  <Download size={13} aria-hidden="true" />
+                  {reportBusy === report.name ? "下载中" : "下载"}
+                </button>
               </li>
             ))}
           </ul>

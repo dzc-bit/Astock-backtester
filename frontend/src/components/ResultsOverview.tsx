@@ -1,6 +1,8 @@
-import { Download, Play, Sparkles } from "lucide-react";
+import { useEffect, useState } from "react";
+import { Download, Play, Sparkles, ShieldQuestion } from "lucide-react";
 import { Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
-import type { AiTask } from "../aiTypes";
+import { aiOverfitCheck } from "../aiApi";
+import type { AiOverfitResult, AiTask } from "../aiTypes";
 import { downloadBacktestReport } from "../reportHtml";
 import type { BacktestResult, BacktestSettingsConfig, DailyStrategyMatches, StrategyConfig } from "../types";
 import { AiOneShotLine } from "./AiOneShotLine";
@@ -71,6 +73,42 @@ function normalizedEquityCurve(result: BacktestResult | null): BacktestResult["e
   return Array.from(byDate.values()).sort((left, right) => left.trade_date.localeCompare(right.trade_date));
 }
 
+const OVERFIT_LEVEL_LABELS: Record<string, string> = {
+  critical: "过拟合风险：高",
+  warning: "过拟合风险：存在疑点",
+  info: "过拟合检测：轻微提示",
+  none: ""
+};
+
+function useOverfitAssessment(
+  aiBaseUrl: string | null,
+  result: BacktestResult | null
+): AiOverfitResult | null {
+  const [assessment, setAssessment] = useState<AiOverfitResult | null>(null);
+  useEffect(() => {
+    if (!aiBaseUrl || !result) {
+      setAssessment(null);
+      return;
+    }
+    let cancelled = false;
+    aiOverfitCheck(aiBaseUrl, { metrics: result.metrics as unknown as Record<string, unknown> })
+      .then((next) => {
+        if (!cancelled) {
+          setAssessment(next);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setAssessment(null);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [aiBaseUrl, result]);
+  return assessment;
+}
+
 function MatchedStocksPanel({ dailyMatches }: { dailyMatches?: DailyStrategyMatches | null }) {
   const hasPayload = Boolean(dailyMatches);
   const rawItems = dailyMatches?.matches ?? [];
@@ -139,6 +177,8 @@ export function ResultsOverview({
   const zeroTradeHint = result && result.metrics.trade_count === 0
     ? "本次没有产生交易。常见原因是日期范围过短、股票池过窄、条件过严或本地字段缺失。"
     : null;
+  const overfit = useOverfitAssessment(aiBaseUrl, result);
+  const overfitFindings = overfit?.findings ?? [];
 
   return (
     <section className="surface results-surface">
@@ -215,6 +255,14 @@ export function ResultsOverview({
             <span>平均仓位 {(result.metrics.average_position_pct * 100).toFixed(2)}%</span>
             <span>最大仓位 {(result.metrics.max_position_pct * 100).toFixed(2)}%</span>
           </div>
+          {overfit && overfit.level !== "none" && overfitFindings.length > 0 ? (
+            <div className={`risk-strip overfit-strip overfit-${overfit.level}`} role="status">
+              <strong>
+                <ShieldQuestion size={14} aria-hidden="true" /> {OVERFIT_LEVEL_LABELS[overfit.level] ?? "过拟合检测"}
+              </strong>
+              <span>{overfitFindings.map((finding) => finding.message).join("；")}</span>
+            </div>
+          ) : null}
           {aiBaseUrl ? (
             <AiOneShotLine
               key={`${result.metrics.total_return_pct}-${result.metrics.trade_count}-${result.equity_curve.at(-1)?.trade_date ?? ""}`}

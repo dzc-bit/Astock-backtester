@@ -17,6 +17,8 @@ export function AiSettingsModal({ open, config, isSaving = false, errorMessage, 
   const [baseUrl, setBaseUrl] = useState("");
   const [model, setModel] = useState("");
   const [embeddingModel, setEmbeddingModel] = useState("");
+  const [embeddingBaseUrl, setEmbeddingBaseUrl] = useState("");
+  const [embeddingApiKey, setEmbeddingApiKey] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [keyVisible, setKeyVisible] = useState(false);
   const [apiStyle, setApiStyle] = useState<AiApiStyle>("chat-completions");
@@ -25,6 +27,10 @@ export function AiSettingsModal({ open, config, isSaving = false, errorMessage, 
   const [maxSteps, setMaxSteps] = useState(8);
   const [insightsEnabled, setInsightsEnabled] = useState(true);
   const [insightMaxPerHour, setInsightMaxPerHour] = useState(6);
+  const [reportEnabled, setReportEnabled] = useState(false);
+  const [reportTime, setReportTime] = useState("15:30");
+  const [evolutionEnabled, setEvolutionEnabled] = useState(false);
+  const [evolutionTime, setEvolutionTime] = useState("16:00");
 
   useEffect(() => {
     if (!open || !config) {
@@ -33,6 +39,8 @@ export function AiSettingsModal({ open, config, isSaving = false, errorMessage, 
     setBaseUrl(config.base_url);
     setModel(config.model);
     setEmbeddingModel(config.embedding_model);
+    setEmbeddingBaseUrl(config.embedding_base_url ?? "");
+    setEmbeddingApiKey("");
     setApiKey("");
     setKeyVisible(false);
     setApiStyle(config.api_style);
@@ -41,6 +49,10 @@ export function AiSettingsModal({ open, config, isSaving = false, errorMessage, 
     setMaxSteps(config.max_steps);
     setInsightsEnabled(config.insights_enabled);
     setInsightMaxPerHour(config.insight_max_per_hour);
+    setReportEnabled(config.report_enabled);
+    setReportTime(config.report_time || "15:30");
+    setEvolutionEnabled(config.evolution_enabled);
+    setEvolutionTime(config.evolution_time || "16:00");
   }, [open, config]);
 
   const toggleKeyVisible = async () => {
@@ -67,13 +79,19 @@ export function AiSettingsModal({ open, config, isSaving = false, errorMessage, 
       base_url: baseUrl.trim(),
       model: model.trim(),
       embedding_model: embeddingModel.trim(),
+      embedding_base_url: embeddingBaseUrl.trim(),
+      embedding_api_key: embeddingApiKey.trim(),
       api_key: apiKey.trim(),
       api_style: apiStyle,
       research_style: researchStyle,
       temperature: Number.isFinite(temperature) ? temperature : 0.3,
       max_steps: Number.isFinite(maxSteps) ? maxSteps : 8,
       insights_enabled: insightsEnabled,
-      insight_max_per_hour: Number.isFinite(insightMaxPerHour) ? insightMaxPerHour : 6
+      insight_max_per_hour: Number.isFinite(insightMaxPerHour) ? insightMaxPerHour : 6,
+      report_enabled: reportEnabled,
+      report_time: reportTime.trim() || "15:30",
+      evolution_enabled: evolutionEnabled,
+      evolution_time: evolutionTime.trim() || "16:00"
     });
   };
 
@@ -163,6 +181,63 @@ export function AiSettingsModal({ open, config, isSaving = false, errorMessage, 
               autoComplete="off"
             />
           </label>
+          <label className="ai-field">
+            <span>
+              Embedding Base URL（可选
+              {config?.embedding_base_url ? `，当前 ${config.embedding_base_url}，留空保持不变` : "，留空跟随上方主 Base URL"}）
+            </span>
+            <input
+              value={embeddingBaseUrl}
+              onChange={(event) => setEmbeddingBaseUrl(event.target.value)}
+              placeholder="https://api.siliconflow.cn/v1"
+              autoComplete="off"
+            />
+          </label>
+          <label className="ai-field">
+            <span>
+              Embedding API Key（可选
+              {config?.embedding_api_key_masked ? `，已配置 ${config.embedding_api_key_masked}` : "，留空跟随主 API Key"}）
+            </span>
+            <input
+              type="password"
+              value={embeddingApiKey}
+              onChange={(event) => setEmbeddingApiKey(event.target.value)}
+              placeholder={config?.embedding_api_key_masked ? "留空保持现有 Key" : "sk-..."}
+              autoComplete="new-password"
+            />
+          </label>
+          <div className="ai-field">
+            <span className="ai-field-label-row">定时任务（本地时间，桌面端运行期间生效）</span>
+            <div className="ai-field-row">
+              <label className="ai-checkbox">
+                <input type="checkbox" checked={reportEnabled} onChange={(event) => setReportEnabled(event.target.checked)} />
+                <span>定时复盘报告</span>
+              </label>
+              <input
+                type="time"
+                value={reportTime}
+                onChange={(event) => setReportTime(event.target.value)}
+                aria-label="复盘报告生成时间"
+              />
+            </div>
+            <div className="ai-field-row">
+              <label className="ai-checkbox">
+                <input
+                  type="checkbox"
+                  checked={evolutionEnabled}
+                  onChange={(event) => setEvolutionEnabled(event.target.checked)}
+                />
+                <span>策略库自动体检（含过拟合检测）</span>
+              </label>
+              <input
+                type="time"
+                value={evolutionTime}
+                onChange={(event) => setEvolutionTime(event.target.value)}
+                aria-label="策略体检运行时间"
+              />
+            </div>
+            <small className="ai-settings-note">报告生成后保存在“运行产物/AI报告”，可在 AI 助手面板下载。</small>
+          </div>
           <div className="ai-field-row">
             <label className="ai-field">
               <span>单次问题最大工具步数</span>

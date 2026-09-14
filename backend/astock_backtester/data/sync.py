@@ -100,6 +100,8 @@ class SyncJobManager:
             status.status = "completed"
             return status
         snapshot = self._daily_completeness_snapshot(effective_start_date, effective_end_date)
+        pending_frames: list[pd.DataFrame] = []
+        pending_rows = 0
         for symbol in symbols:
             status.current_symbol = symbol
             status.processed_symbols += 1
@@ -119,7 +121,17 @@ class SyncJobManager:
                     status.filled_missing_rows += filled.total
                     status.filled_daily_rows += filled.daily_rows
                     status.filled_market_cap_rows += filled.market_cap_rows
-                    self.warehouse.write_daily_bars(frame)
+                    # 攒批落盘：write_daily_bars 每批都要「读整个分区 → 合并 →
+                    # 整文件重写」，逐只写是 O(n²)。攒到阈值再写，把每只股票
+                    # 触发的分区重写次数从 1 降到 1/批。
+                    pending_frames.append(frame)
+                    pending_rows += int(len(frame))
+                    if pending_rows >= self.full_market_write_batch_rows:
+                        self.warehouse.write_daily_bars(
+                            pd.concat(pending_frames, ignore_index=True)
+                        )
+                        pending_frames = []
+                        pending_rows = 0
                     status.imported_rows += int(len(frame))
                     status.completed_symbols += 1
                 else:
@@ -128,6 +140,8 @@ class SyncJobManager:
             except Exception as exc:
                 status.failed_symbols += 1
                 status.errors.append(f"{symbol}: {exc}")
+        if pending_frames:
+            self.warehouse.write_daily_bars(pd.concat(pending_frames, ignore_index=True))
         status.current_symbol = None
         status.status = "completed_with_errors" if status.failed_symbols else "completed"
         return status

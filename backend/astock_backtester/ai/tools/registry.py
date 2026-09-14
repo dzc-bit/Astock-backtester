@@ -68,17 +68,52 @@ class ToolRegistry:
     def openai_schemas(self) -> list[dict[str, Any]]:
         return [tool.openai_schema() for tool in self._tools.values()]
 
+    def _param_hint(self, name: str) -> str:
+        """Human-readable parameter reminder used in failure feedback so the
+        model can self-correct on its next attempt instead of failing again."""
+        tool = self._tools.get(name)
+        if tool is None:
+            return ""
+        properties = (tool.parameters or {}).get("properties") or {}
+        required = set((tool.parameters or {}).get("required") or [])
+        if not properties:
+            return "本工具不需要参数"
+        parts = []
+        for key, schema in list(properties.items())[:6]:
+            mark = "*" if key in required else ""
+            description = str(schema.get("description", ""))[:40] if isinstance(schema, dict) else ""
+            parts.append(f'"{key}"{mark}: {description}')
+        suffix = "（* 为必填）" if required else ""
+        return f"参数格式：{{{'; '.join(parts)}}}{suffix}"
+
     def execute(self, name: str, arguments: str) -> ToolExecution:
         started = time.monotonic()
         tool = self._tools.get(name)
         if tool is None:
-            return ToolExecution(False, {"ok": False, "error": f"未知工具：{name}"}, f"未知工具 {name}", 0)
+            available = ", ".join(list(self._tools)[:6])
+            total = len(self._tools)
+            return ToolExecution(
+                False,
+                {"ok": False, "error": f"未知工具：{name}"},
+                f"未知工具 {name}（可用工具共 {total} 个，例如：{available}）。请从工具列表中选择正确名称重试。",
+                0,
+            )
         try:
             args = json.loads(arguments) if arguments.strip() else {}
         except json.JSONDecodeError as exc:
-            return ToolExecution(False, {"ok": False, "error": f"参数不是合法 JSON：{exc}"}, "参数解析失败", 0)
+            return ToolExecution(
+                False,
+                {"ok": False, "error": f"参数不是合法 JSON：{exc}"},
+                f"参数解析失败：{exc}。{self._param_hint(name)}",
+                0,
+            )
         if not isinstance(args, dict):
-            return ToolExecution(False, {"ok": False, "error": "工具参数必须是对象"}, "参数格式错误", 0)
+            return ToolExecution(
+                False,
+                {"ok": False, "error": "工具参数必须是 JSON 对象"},
+                f"参数格式错误：工具参数必须是 JSON 对象。{self._param_hint(name)}",
+                0,
+            )
         try:
             payload = tool.executor(args)
         except Exception as exc:  # noqa: BLE001 - tool failures must not kill the agent loop
@@ -87,6 +122,8 @@ class ToolRegistry:
         ok = bool(payload.get("ok", False))
         try:
             summary = tool.summarizer(payload) if ok else f"调用失败：{payload.get('error', '未知错误')}"
+            if not ok:
+                summary = f"{summary}（{self._param_hint(name)}）" if self._param_hint(name) else summary
         except Exception:  # noqa: BLE001 - summarizer bugs must not kill the loop either
             summary = "工具结果摘要生成失败"
         diagnostics = [str(item) for item in payload.get("diagnostics", []) if item]
