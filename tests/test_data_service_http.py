@@ -32,12 +32,20 @@ from astock_backtester.service import (
 # (http_proxy env vars or the Windows registry proxy would hijack these requests).
 _OPENER = build_opener(ProxyHandler({}))
 
+# /realtime/market-snapshot runs its index/breadth/sector fetches concurrently, and the
+# breadth chain alone may legitimately spend its full 8s budget (RealtimeMarketProvider
+# .breadth_time_budget) before falling back to a 2s local snapshot -- so a request whose
+# breadth sources all fail answers at roughly 10s. The client timeout has to stay above
+# that server-side budget, otherwise this harness reports a client timeout for a response
+# the server was still assembling.
+_LOOPBACK_TIMEOUT_S = 15
+
 
 def _request_json(method: str, url: str, payload: dict | None = None) -> dict:
     data = None if payload is None else json.dumps(payload).encode("utf-8")
     request = Request(url, data=data, method=method, headers={"Content-Type": "application/json"})
     try:
-        with _OPENER.open(request, timeout=5) as response:
+        with _OPENER.open(request, timeout=_LOOPBACK_TIMEOUT_S) as response:
             return json.loads(response.read().decode("utf-8"))
     except HTTPError as exc:
         return json.loads(exc.read().decode("utf-8"))
