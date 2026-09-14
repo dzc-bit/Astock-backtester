@@ -13,7 +13,7 @@ import requests
 from bs4 import BeautifulSoup
 
 from astock_backtester.data.cls import cls_telegraph_signed_params
-from astock_backtester.data.http_transport import MINIMAL_USER_AGENT, resilient_get, should_allow_alternate_transport
+from astock_backtester.data.http_transport import MINIMAL_USER_AGENT, resilient_get, scraping_get, should_allow_alternate_transport
 from astock_backtester.models import MarketNewsItem, MarketNewsResponse
 
 POSITIVE_WORDS = ("利好", "拉升", "走强", "活跃", "增长", "抢筹", "突破")
@@ -72,7 +72,7 @@ class MarketNewsProvider:
     time_budget: float | None = 12.0
     cache_ttl: float = 5.0
     recent_success_ttl: float = 15 * 60.0
-    requester: Callable[..., requests.Response] = requests.get
+    requester: Callable[..., requests.Response] = scraping_get
     alternate_requester: Callable[..., requests.Response] | None = None
     allow_alternate_transport: bool | None = None
     _refresh_lock: Lock = field(default_factory=Lock, init=False, repr=False)

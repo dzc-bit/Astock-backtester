@@ -11,7 +11,7 @@ import astock_backtester.data.realtime as realtime_module
 import pandas as pd
 import pytest
 import requests
-from astock_backtester.data.http_transport import resilient_get, should_allow_alternate_transport
+from astock_backtester.data.http_transport import resilient_get, scraping_get, scraping_session, should_allow_alternate_transport
 from astock_backtester.data.realtime import (
     HeavyMarketCrawlerProvider,
     RealtimeMarketProvider,
@@ -228,6 +228,46 @@ class TestShouldAllowAlternateTransport:
 
     def test_override_none_falls_back_to_default(self):
         assert should_allow_alternate_transport(requests.get, override=None) is True
+
+    def test_scraping_get_still_allows_alternate_transport(self):
+        # scraping_get is the trust_env=False stand-in for requests.get, so it must
+        # keep the curl_cffi fallback enabled for the same providers.
+        assert should_allow_alternate_transport(scraping_get) is True
+
+
+def test_crawler_provider_requesters_never_trust_environment_proxies():
+    """Provider defaults must not be ``requests.get``.
+
+    ``requests.get`` builds its session with ``trust_env=True``, so it adopts a
+    machine-wide ``HTTP_PROXY`` (Clash Verge and similar install one).  Such a
+    proxy terminates TLS to the domestic market hosts this project scrapes, and
+    every upstream read then fails with ``SSL: UNEXPECTED_EOF_WHILE_READING``.
+    """
+    from dataclasses import fields
+
+    from astock_backtester.data.cls_finance import ClsFinanceProvider
+    from astock_backtester.data.news import MarketNewsProvider
+
+    providers = (
+        RealtimeMarketProvider,
+        HeavyMarketCrawlerProvider,
+        MarketNewsProvider,
+        ClsFinanceProvider,
+    )
+    for provider in providers:
+        requester = next(field.default for field in fields(provider) if field.name == "requester")
+        assert requester is scraping_get, f"{provider.__name__} must default to scraping_get"
+        assert requester is not requests.get, f"{provider.__name__} must not default to requests.get"
+
+
+def test_scraping_session_ignores_proxy_environment(monkeypatch):
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:7897")
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:7897")
+
+    # Without trust_env=False, requests would route through this proxy.
+    assert requests.utils.get_environ_proxies("https://x-quote.cls.cn/")
+
+    assert scraping_session().trust_env is False
 
 
 # ===========================================================================
