@@ -19,6 +19,21 @@ SUPPORTED_API_STYLES = ("chat-completions", "responses", "anthropic")
 SUPPORTED_RESEARCH_STYLES = ("conservative", "balanced", "aggressive")
 
 
+def normalize_hhmm(value: str, fallback: str) -> str:
+    """Normalize a user-supplied HH:MM local time; invalid input falls back."""
+    text = str(value or "").strip()
+    parts = text.split(":")
+    if len(parts) != 2:
+        return fallback
+    try:
+        hour, minute = int(parts[0]), int(parts[1])
+    except ValueError:
+        return fallback
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return fallback
+    return f"{hour:02d}:{minute:02d}"
+
+
 @dataclass
 class AiConfig:
     """OpenAI-compatible provider settings. Empty by default until the user
@@ -37,12 +52,21 @@ class AiConfig:
     api_key: str = ""
     model: str = ""
     embedding_model: str = ""
+    # embedding 服务的独立入口：留空则跟随主 base_url / api_key。
+    # 常见场景：chat 走 DeepSeek，embedding 走 SiliconFlow 等独立供应商。
+    embedding_base_url: str = ""
+    embedding_api_key: str = ""
     api_style: str = "chat-completions"
     research_style: str = "balanced"
     temperature: float = 0.3
     max_steps: int = 8
     insights_enabled: bool = True
     insight_max_per_hour: int = 6
+    # 定时任务（本地时间 HH:MM）：收盘复盘报告 / 策略库自动体检。
+    report_enabled: bool = False
+    report_time: str = "15:30"
+    evolution_enabled: bool = False
+    evolution_time: str = "16:00"
 
     def is_configured(self) -> bool:
         return bool(self.base_url.strip() and self.api_key.strip() and self.model.strip())
@@ -53,6 +77,8 @@ class AiConfig:
         cfg.api_key = cfg.api_key.strip()
         cfg.model = cfg.model.strip()
         cfg.embedding_model = cfg.embedding_model.strip()
+        cfg.embedding_base_url = cfg.embedding_base_url.strip().rstrip("/")
+        cfg.embedding_api_key = cfg.embedding_api_key.strip()
         if cfg.api_style not in SUPPORTED_API_STYLES:
             cfg.api_style = "chat-completions"
         if cfg.research_style not in SUPPORTED_RESEARCH_STYLES:
@@ -60,7 +86,17 @@ class AiConfig:
         cfg.temperature = min(max(cfg.temperature, 0.0), 2.0)
         cfg.max_steps = max(1, min(int(cfg.max_steps), 16))
         cfg.insight_max_per_hour = max(0, min(int(cfg.insight_max_per_hour), 60))
+        cfg.report_time = normalize_hhmm(cfg.report_time, "15:30")
+        cfg.evolution_time = normalize_hhmm(cfg.evolution_time, "16:00")
         return cfg
+
+    def embedding_endpoint(self) -> tuple[str, str]:
+        """Effective (base_url, api_key) for embedding calls: dedicated values
+        when set, otherwise the main chat endpoint."""
+        return (
+            self.embedding_base_url or self.base_url,
+            self.embedding_api_key or self.api_key,
+        )
 
 
 def masked_key(api_key: str) -> str:
@@ -107,6 +143,12 @@ class AiConfigStore:
         merged = AiConfig(**asdict(config))
         if not merged.api_key.strip():
             merged.api_key = current.api_key
+        if not merged.embedding_api_key.strip():
+            merged.embedding_api_key = current.embedding_api_key
+        # 与 api_key / embedding_api_key 同一套“留空保持”语义：清空独立 embedding
+        # 入口应回落到主配置，而不是把已存的地址静默擦掉。
+        if not merged.embedding_base_url.strip():
+            merged.embedding_base_url = current.embedding_base_url
         merged = merged.sanitized()
         self._dir.mkdir(parents=True, exist_ok=True)
         tmp_path = self._path.with_suffix(".tmp")
@@ -123,6 +165,8 @@ class AiConfigStore:
             "base_url": config.base_url,
             "model": config.model,
             "embedding_model": config.embedding_model,
+            "embedding_base_url": config.embedding_base_url,
+            "embedding_api_key_masked": masked_key(config.embedding_api_key),
             "api_style": config.api_style,
             "research_style": config.research_style,
             "api_key_masked": masked_key(config.api_key),
@@ -130,6 +174,10 @@ class AiConfigStore:
             "max_steps": config.max_steps,
             "insights_enabled": config.insights_enabled,
             "insight_max_per_hour": config.insight_max_per_hour,
+            "report_enabled": config.report_enabled,
+            "report_time": config.report_time,
+            "evolution_enabled": config.evolution_enabled,
+            "evolution_time": config.evolution_time,
             "configured": config.is_configured(),
         }
 

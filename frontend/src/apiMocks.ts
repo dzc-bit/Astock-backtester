@@ -18,6 +18,7 @@ import type {
   DailyBarsCoverageResponse,
   DataServiceHealth,
   DataServiceStatus,
+  DiagnosticsDataGapsResponse,
   DiagnosticsSourcesResponse,
   FetchResult,
   ImportResult,
@@ -327,6 +328,30 @@ export function mockDiagnosticsSources(): DiagnosticsSourcesResponse {
         diagnostics: ["同花顺大盘评分读取失败：缺少浏览器脚本生成的访问凭证（演示数据）。"]
       }
     ]
+  };
+}
+
+export function mockDiagnosticsDataGaps(): DiagnosticsDataGapsResponse {
+  return {
+    ok: true,
+    generated_at: new Date().toISOString(),
+    profile: {
+      available: true,
+      window: { start_date: "2025-01-02", end_date: "2026-09-11", partitions: ["year=2025", "year=2026"] },
+      daily_bars: {
+        symbols: 5463,
+        symbols_current: 74,
+        symbols_stale: 5389,
+        stale_distribution: [
+          { last_date: "2026-07-14", symbols: 3084 },
+          { last_date: "2025-12-31", symbols: 1080 },
+          { last_date: "2026-09-04", symbols: 1222 }
+        ],
+        thin_days: [{ trade_date: "2026-09-07", rows: 74 }]
+      },
+      market_cap: { symbols: 5463, stale_distribution: [{ last_date: "2026-09-04", symbols: 1222 }] },
+      capital_flow: { symbols: 5463, stale_distribution: [{ last_date: "2026-08-28", symbols: 906 }] }
+    }
   };
 }
 

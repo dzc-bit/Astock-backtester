@@ -9,13 +9,17 @@ vi.mock("../aiApi", () => ({
   loadAiConfig: vi.fn(),
   saveAiConfig: vi.fn(),
   runAiChatStream: vi.fn(),
-  openAiEventStream: vi.fn()
+  openAiEventStream: vi.fn(),
+  loadAiReports: vi.fn(),
+  loadAiReportFile: vi.fn()
 }));
 
-import { loadAiStatus, runAiChatStream } from "../aiApi";
+import { loadAiReportFile, loadAiReports, loadAiStatus, runAiChatStream } from "../aiApi";
 
 const mockedLoadStatus = vi.mocked(loadAiStatus);
 const mockedRunChat = vi.mocked(runAiChatStream);
+const mockedLoadReports = vi.mocked(loadAiReports);
+const mockedLoadReportFile = vi.mocked(loadAiReportFile);
 
 const configuredStatus = {
   configured: true,
@@ -64,6 +68,7 @@ function scriptChatStream(reply: string, resultEvent: Partial<AiResultEvent> = {
 beforeEach(() => {
   vi.clearAllMocks();
   mockedLoadStatus.mockResolvedValue(configuredStatus);
+  mockedLoadReports.mockResolvedValue({ items: [] });
 });
 
 describe("AiAssistantPanel", () => {
@@ -72,6 +77,41 @@ describe("AiAssistantPanel", () => {
       <AiAssistantPanel open={false} baseUrl="http://x" insights={[]} task={null} onTaskConsumed={() => undefined} onClose={() => undefined} />
     );
     expect(container).toBeEmptyDOMElement();
+  });
+
+  it("lists scheduled reports and downloads one as a file", async () => {
+    const user = userEvent.setup();
+    mockedLoadReports.mockResolvedValue({
+      items: [{ name: "复盘报告-20260913-1530.md", size: 42, created_at: "2026-09-13T07:30:00Z" }]
+    });
+    mockedLoadReportFile.mockResolvedValue("# 收盘复盘正文");
+    const anchorClick = vi.fn();
+    const originalCreate = document.createElement.bind(document);
+    vi.stubGlobal(
+      "URL",
+      Object.assign(URL, {
+        createObjectURL: vi.fn(() => "blob:mock"),
+        revokeObjectURL: vi.fn()
+      })
+    );
+    vi.spyOn(document, "createElement").mockImplementation((tag: string, options) => {
+      const node = originalCreate(tag, options);
+      if (tag === "a") {
+        node.click = anchorClick;
+      }
+      return node;
+    });
+    try {
+      render(
+        <AiAssistantPanel open baseUrl="http://x" insights={[]} task={null} onTaskConsumed={() => undefined} onClose={() => undefined} />
+      );
+      expect(await screen.findByText("定时报告（1）")).toBeTruthy();
+      await user.click(screen.getByRole("button", { name: /下载/ }));
+      await waitFor(() => expect(mockedLoadReportFile).toHaveBeenCalledWith("http://x", "复盘报告-20260913-1530.md"));
+      expect(anchorClick).toHaveBeenCalled();
+    } finally {
+      vi.restoreAllMocks();
+    }
   });
 
   it("shows the unconfigured hint with a settings entry", async () => {

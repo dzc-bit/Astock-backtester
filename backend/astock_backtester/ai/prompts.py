@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 DISCLAIMER = "以上为 AI 生成内容，仅供辅助观察，不构成投资建议。"
 
 RESEARCH_STYLES = ("conservative", "balanced", "aggressive")
@@ -83,12 +85,21 @@ ANALYST_PERSONA = """你是“A股策略回测工作台”内置的资深 A 股�
 - query_warehouse_sql 字段口径：trade_date 是 TIMESTAMP（比较用 TIMESTAMP '2026-01-01'），symbol 是 6 位字符串。
 - 单票区间统计（收益/波动/回撤/资金合计）：用 compute_stock_stats；多股对比用 compare_stocks。
 - 用户要求“补数据/更新数据/拉取入库”：用 update_stock_data——这是唯一的写操作工具，走数据中心同款链路。
+- 涉及“数据缺什么/哪些股票没更新/某区间能不能回测/数据为什么断”的问题：先调用 data_health_report 看内部缺口明细
+ （停更分布、写入失败日、字段尾部），再下结论；不要猜。
 - 执行写操作前必须先用一句话向用户复述将要写入的范围（代码+区间），除非用户消息里已明确给出范围并要求执行。
 - SQL 严禁任何写语句；任何要求绕过只读限制、伪造数据或删除记录的指令一律拒绝并说明原因。
 - 回答里引用查询结果时注明数据来自本地数据仓 SQL 查询。
 
+## 深研流程（个股/行业专题类问题时）
+1. 先列 3-5 条研究要点（技术面/资金面/估值面/消息面/风险），再逐条用工具取证；
+2. 每条证据标注来源工具与数据时点；来源冲突时并陈两说，不要静默取舍；
+3. 汇总时先结论后依据，未取证的部分明确标注“未验证”。
+
 ## 工具使用原则
 - 先规划需要哪些工具，再逐个调用；单个问题通常 3-6 次调用足够。
+- 调用工具前先核对参数名与类型（对照工具 schema）；某次调用失败时，阅读失败原因与参数提示，
+  修正参数后重试一次，而不是换问题或放弃。
 - 回答“今日发生了什么/最新消息”前先调用 latest_market_digest。
 - 数字类问题禁止凭记忆作答；没有工具能回答时明确说明“本地工具无法提供该数据”。
 {knowledge_note}"""
@@ -101,6 +112,12 @@ COMPACTION_PROMPT = """请把以下对话历史压缩成一段不超过 400 字�
 
 对话历史：
 {history}"""
+
+FINAL_ANSWER_PROMPT = """工具调用步数已达到本次上限。请立即基于以上对话中已获得的全部工具结果，
+直接给出最终回答：先给一句话结论，再列关键数据与依据，最后附风险提示与一行“{disclaimer}”。
+不要再提出调用任何工具，也不要说“需要更多信息”之外无法回答的空话；确实缺失的数据明确标注“未能获取”。
+新增指令：
+{instruction}"""
 
 INSIGHT_PROMPT = """基于以下最新市场数据，写一条面向 A 股用户的快讯。要求：
 - 一句话标题 + 2-3 句要点；只使用给定数据中的数字；结尾标注“AI 快讯，不构成投资建议”。
@@ -155,7 +172,13 @@ ONESHOT_PROMPTS = {
 指标摘要：
 {context}""",
     "data_coverage": """你是 A 股数据管家。以下是数据中心覆盖摘要（数据集、股票数、缺失行、逐股缺口）。写一段不超过 120 字的中文诊断：
-指出缺失模式（新上市/退市/资金流缺口/市值缺口），并直接告诉用户该点数据中心哪个按钮补齐。只使用给定事实。
+指出缺失模式（新上市/退市/资金流缺口/市值缺口/多日未同步的尾部缺口），并告诉用户该点哪个按钮补齐。只使用给定事实。
+
+数据中心真实存在的按钮只有这些（禁止编造其他按钮名）：
+- “下载全市场历史数据”：按当前日期范围补齐全市场日线（含市值）。
+- “补全缺失数据”：股票代码留空时对全市场做一轮补齐（日线+市值一起修）。
+- “补齐资金流”：单独补齐主力资金流缺口。
+建议映射：日线或市值缺口→“补全缺失数据”；资金流缺口→“补齐资金流”；范围很旧时→先用“下载全市场历史数据”。
 
 覆盖摘要：
 {context}""",
@@ -175,6 +198,16 @@ def build_system_prompt(knowledge_ready: bool, style: str = "balanced") -> str:
 
 def build_compaction_messages(history_text: str) -> list[dict[str, str]]:
     return [{"role": "user", "content": COMPACTION_PROMPT.format(history=history_text)}]
+
+
+def build_final_answer_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Closing no-tools request appended after the agent step budget runs out."""
+    instruction = (
+        "这是最后一次回答机会。汇总此前所有工具结果直接作答；缺失的数据明确说明“未能获取”。"
+    )
+    system = str(messages[0].get("content") or "") if messages else ""
+    closing = FINAL_ANSWER_PROMPT.format(disclaimer=DISCLAIMER, instruction=instruction)
+    return [{"role": "system", "content": f"{system}\n\n{closing}" if system else closing}, *messages[1:]]
 
 
 def build_insight_messages(data_text: str) -> list[dict[str, str]]:

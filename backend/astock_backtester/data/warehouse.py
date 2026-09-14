@@ -1,17 +1,28 @@
 from __future__ import annotations
 
+import bisect
+import os
 import sqlite3
+import threading
+import time
+from collections import Counter
 from collections.abc import Sequence
 from datetime import date
 from pathlib import Path
+from statistics import median
 
 import pandas as pd
 import pyarrow.parquet as pq
 
+from astock_backtester.data.filelock import CrossProcessFileLock
 from astock_backtester.data.importer import normalize_daily_bars
+from astock_backtester.data.trading_calendar import a_share_trade_dates
 from astock_backtester.models import DatasetCoverage
 
 OHLC_COLUMNS = ["open", "high", "low", "close"]
+GAP_PROFILE_TTL_SECONDS = 600.0
+GAP_PROFILE_DEFAULT_PARTITION_YEARS = 2
+GAP_PROFILE_TOP_STALE = 12
 KNOWN_CAPITAL_FLOW_SOURCE_GAP_DATES = {
     pd.Timestamp("2018-08-07"),
     pd.Timestamp("2019-04-04"),
@@ -33,6 +44,10 @@ class Warehouse:
         self.daily_bars_root.mkdir(parents=True, exist_ok=True)
         self.sqlite_path = self.root / "metadata.sqlite"
         self._init_db()
+        self._gap_profile_lock = threading.Lock()
+        self._gap_profile_cache: tuple[float, dict[str, object]] | None = None
+        self._corrupt_partitions_lock = threading.Lock()
+        self._corrupt_partitions: dict[str, str] = {}
 
     def _init_db(self) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
@@ -111,18 +126,44 @@ class Warehouse:
             path = self._partition_path(int(year))
             path.parent.mkdir(parents=True, exist_ok=True)
             year_frame = year_frame.drop(columns=["year"])
-            if path.exists():
-                current = self._safe_read_parquet(path)
-                if not current.empty and {"symbol", "trade_date"}.issubset(current.columns):
-                    year_frame = (
-                        year_frame.set_index(["symbol", "trade_date"])
-                        .combine_first(current.set_index(["symbol", "trade_date"]))
-                        .reset_index()
-                    )
-            year_frame = year_frame.sort_values(["symbol", "trade_date"]).reset_index(drop=True)
-            year_frame.to_parquet(path, index=False)
+            # 跨进程互斥：read-modify-write 必须原子化，否则桌面端 sidecar 与
+            # 外部脚本并发写同一分区会丢失更新甚至撕裂文件（footer 不匹配）。
+            with CrossProcessFileLock(path):
+                if path.exists():
+                    current = self._safe_read_parquet(path)
+                    if not current.empty and {"symbol", "trade_date"}.issubset(current.columns):
+                        year_frame = (
+                            year_frame.set_index(["symbol", "trade_date"])
+                            .combine_first(current.set_index(["symbol", "trade_date"]))
+                            .reset_index()
+                        )
+                year_frame = year_frame.sort_values(["symbol", "trade_date"]).reset_index(drop=True)
+                self._atomic_write_parquet(year_frame, path)
         with sqlite3.connect(self.sqlite_path) as conn:
             conn.execute("INSERT OR REPLACE INTO datasets(dataset) VALUES('daily_bars')")
+        self.invalidate_gap_profile()
+
+    @staticmethod
+    def _atomic_write_parquet(frame: pd.DataFrame, path: Path) -> None:
+        """临时文件写完后 ``os.replace`` 原子替换。
+
+        ``to_parquet`` 直接写目标路径时会先 truncate 再逐块写，任何并发读取者
+        （包括桌面端自己读 coverage）都可能读到半成品并报
+        ``Parquet magic bytes not found in footer``。写到同目录下的临时文件再
+        ``os.replace`` 保证读取者要么看到旧文件、要么看到完整新文件。
+        """
+        tmp_path = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+        try:
+            frame.to_parquet(tmp_path, index=False)
+            os.replace(tmp_path, path)
+        except BaseException:
+            tmp_path.unlink(missing_ok=True)
+            raise
+
+    def invalidate_gap_profile(self) -> None:
+        """写入后丢弃缺口画像缓存，让下一次读取反映最新数据。"""
+        with self._gap_profile_lock:
+            self._gap_profile_cache = None
 
     def read_daily_bars(
         self,
@@ -255,8 +296,16 @@ class Warehouse:
         capital_flow_missing_rows = 0
         first_daily_date_by_symbol: dict[str, pd.Timestamp] = {}
         flow_start_by_symbol: dict[str, pd.Timestamp] = {}
-        daily_symbols_by_date: dict[pd.Timestamp, set[str]] = {}
         missing_capital_flow_frames: list[pd.DataFrame] = []
+        # 逐股统计（按年分区增量合并）：缺失行数改为“交易日历期望 − 实际持有”
+        # 的累计口径，让“多日未同步的尾部缺口”可见，而不是只数最新一天。
+        ohlc_rows_by_symbol: dict[str, int] = {}
+        ohlc_last_by_symbol: dict[str, pd.Timestamp] = {}
+        cap_rows_by_symbol: dict[str, int] = {}
+        cap_first_by_symbol: dict[str, pd.Timestamp] = {}
+        cap_last_by_symbol: dict[str, pd.Timestamp] = {}
+        flow_rows_by_symbol: dict[str, int] = {}
+        flow_last_by_symbol: dict[str, pd.Timestamp] = {}
 
         def update_range(current_start: date | None, current_end: date | None, frame: pd.DataFrame) -> tuple[date | None, date | None]:
             if frame.empty:
@@ -267,6 +316,29 @@ class Warehouse:
                 part_start if current_start is None else min(current_start, part_start),
                 part_end if current_end is None else max(current_end, part_end),
             )
+
+        def accumulate_symbol_stats(
+            frame: pd.DataFrame,
+            *,
+            rows: dict[str, int],
+            first: dict[str, pd.Timestamp] | None,
+            last: dict[str, pd.Timestamp],
+        ) -> None:
+            if frame.empty:
+                return
+            grouped = frame.groupby(frame["symbol"].astype(str))["trade_date"]
+            counts = grouped.count().to_dict()
+            mins = grouped.min().to_dict() if first is not None else {}
+            maxs = grouped.max().to_dict()
+            for symbol, count in counts.items():
+                rows[symbol] = rows.get(symbol, 0) + int(count)
+                if first is not None:
+                    symbol_min = pd.Timestamp(mins[symbol])
+                    if symbol not in first or symbol_min < first[symbol]:
+                        first[symbol] = symbol_min
+                symbol_max = pd.Timestamp(maxs[symbol])
+                if symbol not in last or symbol_max > last[symbol]:
+                    last[symbol] = symbol_max
 
         for path in paths:
             try:
@@ -292,10 +364,6 @@ class Warehouse:
             if not ohlc_complete.empty:
                 daily_symbols.update(str(symbol) for symbol in ohlc_complete["symbol"].dropna().astype(str).unique())
                 daily_start, daily_end = update_range(daily_start, daily_end, ohlc_complete)
-                for trade_date, date_frame in ohlc_complete.groupby("trade_date"):
-                    daily_symbols_by_date.setdefault(pd.Timestamp(trade_date), set()).update(
-                        str(symbol) for symbol in date_frame["symbol"].dropna().astype(str).unique()
-                    )
                 daily_starts = (
                     ohlc_complete.groupby(ohlc_complete["symbol"].astype(str))["trade_date"]
                     .min()
@@ -306,6 +374,12 @@ class Warehouse:
                     timestamp = pd.Timestamp(trade_date)
                     if current is None or timestamp < current:
                         first_daily_date_by_symbol[symbol] = timestamp
+                accumulate_symbol_stats(
+                    ohlc_complete,
+                    rows=ohlc_rows_by_symbol,
+                    first=None,
+                    last=ohlc_last_by_symbol,
+                )
 
             if "float_market_cap" in ohlc_complete:
                 market_cap_mask = ohlc_complete["float_market_cap"].notna()
@@ -313,6 +387,12 @@ class Warehouse:
                 market_cap_symbols.update(str(symbol) for symbol in market_cap_frame["symbol"].dropna().astype(str).unique())
                 market_cap_missing_rows += int((~market_cap_mask).sum())
                 market_cap_start, market_cap_end = update_range(market_cap_start, market_cap_end, market_cap_frame)
+                accumulate_symbol_stats(
+                    market_cap_frame,
+                    rows=cap_rows_by_symbol,
+                    first=cap_first_by_symbol,
+                    last=cap_last_by_symbol,
+                )
             else:
                 market_cap_missing_rows += int(len(ohlc_complete))
 
@@ -333,6 +413,12 @@ class Warehouse:
                     timestamp = pd.Timestamp(trade_date)
                     if current is None or timestamp < current:
                         flow_start_by_symbol[symbol] = timestamp
+                accumulate_symbol_stats(
+                    capital_flow_frame,
+                    rows=flow_rows_by_symbol,
+                    first=None,
+                    last=flow_last_by_symbol,
+                )
                 if not ohlc_complete.empty:
                     missing_flow = frame.loc[
                         ohlc_complete.index[frame.loc[ohlc_complete.index, "main_net_inflow"].isna()],
@@ -379,17 +465,42 @@ class Warehouse:
                     missing_flow = missing_flow.loc[~before_source_start]
             capital_flow_missing_rows += int(len(missing_flow))
 
+        lifecycle = self.read_symbol_lifecycle()
         if daily_symbols and daily_end is not None:
-            latest_symbols = daily_symbols_by_date.get(pd.Timestamp(daily_end), set())
-            lifecycle = self.read_symbol_lifecycle()
-            delisted_before_end = {
-                symbol
-                for symbol, record in lifecycle.items()
-                if _lifecycle_bound(record, "delisted_date") is not None
-                and _lifecycle_bound(record, "delisted_date") < pd.Timestamp(daily_end)
-            }
-            active_symbols = daily_symbols - delisted_before_end
-            daily_missing_rows = max(0, len(active_symbols) - len(latest_symbols - delisted_before_end))
+            # 日线：完整累计口径——期望交易日行数 − 实有行数（内部洞 + 停更尾部）。
+            daily_missing_rows = self._accumulated_missing_rows(
+                symbols=daily_symbols,
+                present_by_symbol=ohlc_rows_by_symbol,
+                first_by_symbol=first_daily_date_by_symbol,
+                last_by_symbol=ohlc_last_by_symbol,
+                window_end=pd.Timestamp(daily_end),
+                lifecycle=lifecycle,
+            )
+            # 市值/资金流：内部缺口（已有行但字段为空）沿用原统计；这里只补
+            # “最后一条数据之后到最新交易日的尾部停更缺口”——旧口径下股票
+            # 一旦停止写入就显示 0 缺口，多日未同步完全不可见。
+            market_cap_missing_rows += self._tail_missing_rows(
+                symbols=set(cap_rows_by_symbol) | {s for s in daily_symbols if s not in cap_rows_by_symbol},
+                boundary_by_symbol={
+                    **{s: ohlc_last_by_symbol[s] for s in daily_symbols if s in ohlc_last_by_symbol},
+                    **{s: cap_last_by_symbol[s] for s in cap_last_by_symbol if s not in ohlc_last_by_symbol},
+                },
+                window_end=pd.Timestamp(daily_end),
+                lifecycle=lifecycle,
+            )
+            capital_flow_missing_rows += self._tail_missing_rows(
+                # 与 market_cap 完全同构：边界优先取日线末行（日线在 → 说明该股
+                # 仍在正常交易），只在日线也缺该股时才退化为自身的资金流末行。
+                # 旧口径只遍历 flow_rows_by_symbol，从未采到资金流的股票不在其
+                # 中，于是它们不产生任何尾部缺口计数（看起来 0 缺口，实际天天缺）。
+                symbols=set(flow_rows_by_symbol) | {s for s in daily_symbols if s not in flow_rows_by_symbol},
+                boundary_by_symbol={
+                    **{s: ohlc_last_by_symbol[s] for s in daily_symbols if s in ohlc_last_by_symbol},
+                    **{s: flow_last_by_symbol[s] for s in flow_last_by_symbol if s not in ohlc_last_by_symbol},
+                },
+                window_end=pd.Timestamp(daily_end),
+                lifecycle=lifecycle,
+            )
 
         return [
             DatasetCoverage(
@@ -414,6 +525,224 @@ class Warehouse:
                 missing_rows=capital_flow_missing_rows,
             ),
         ]
+
+    def _trading_dates_between(self, start: pd.Timestamp, end: pd.Timestamp) -> list[pd.Timestamp]:
+        if end <= start:
+            return []
+        return sorted(a_share_trade_dates(start, end))
+
+    def _accumulated_missing_rows(
+        self,
+        *,
+        symbols: set[str],
+        present_by_symbol: dict[str, int],
+        first_by_symbol: dict[str, pd.Timestamp],
+        last_by_symbol: dict[str, pd.Timestamp],
+        window_end: pd.Timestamp,
+        lifecycle: dict[str, dict[str, str | None]],
+    ) -> int:
+        """累计缺失行：按交易日历数出每只股票在
+        [首行日期, min(最新数据日, 退市日)] 窗口内应有多少行，减去实有行数。
+
+        无生命周期记录的股票走保守口径（视为在市，缺口照算）。一只股票
+        数据停更在 7 月，7 月到最新交易日之间的每个交易日都算缺失——这是
+        旧口径（只数最新一天在场股票数）看不见的尾部缺口。
+        """
+        if not symbols or not first_by_symbol:
+            return 0
+        bounds_start = min(first_by_symbol.values())
+        if window_end <= bounds_start:
+            return 0
+        calendar = self._trading_dates_between(bounds_start, window_end)
+        if not calendar:
+            return 0
+        total = 0
+        for symbol in symbols:
+            sym_start = first_by_symbol.get(symbol)
+            if sym_start is None:
+                continue
+            record = lifecycle.get(symbol)
+            delisted = lifecycle_bound(record, "delisted_date")
+            listing = lifecycle_bound(record, "listing_date")
+            sym_end = min(window_end, pd.Timestamp(delisted)) if delisted is not None else window_end
+            if listing is not None and pd.Timestamp(listing) > sym_start:
+                sym_start = pd.Timestamp(listing)
+            if sym_end < sym_start:
+                continue
+            lo = bisect.bisect_left(calendar, sym_start)
+            hi = bisect.bisect_right(calendar, sym_end)
+            expected = max(0, hi - lo)
+            present = present_by_symbol.get(symbol, 0)
+            if expected > present:
+                total += expected - present
+        return total
+
+    def _tail_missing_rows(
+        self,
+        *,
+        symbols: set[str],
+        boundary_by_symbol: dict[str, pd.Timestamp],
+        window_end: pd.Timestamp,
+        lifecycle: dict[str, dict[str, str | None]],
+    ) -> int:
+        """统计每只股票“最后一条数据之后”到最新交易日之间的交易日数。
+
+        边界取该股票最后一条完整数据行（OHLC 行优先，退化到字段最后行），
+        之后的交易日整段无行，不会与“已有行但字段为空”的内部缺口重复计数。
+        """
+        if not symbols or not boundary_by_symbol:
+            return 0
+        bounds = [value for value in boundary_by_symbol.values() if value is not None]
+        if not bounds or window_end <= min(bounds):
+            return 0
+        calendar = self._trading_dates_between(min(bounds), window_end)
+        if not calendar:
+            return 0
+        total = 0
+        for symbol in symbols:
+            boundary = boundary_by_symbol.get(symbol)
+            if boundary is None:
+                continue
+            record = lifecycle.get(symbol)
+            delisted = lifecycle_bound(record, "delisted_date")
+            sym_end = min(window_end, pd.Timestamp(delisted)) if delisted is not None else window_end
+            if sym_end <= boundary:
+                continue
+            lo = bisect.bisect_right(calendar, boundary)
+            hi = bisect.bisect_right(calendar, sym_end)
+            total += max(0, hi - lo)
+        return total
+
+    def data_gap_profile(
+        self,
+        *,
+        partition_years: int = GAP_PROFILE_DEFAULT_PARTITION_YEARS,
+        thin_day_ratio: float = 0.5,
+        top_stale: int = GAP_PROFILE_TOP_STALE,
+    ) -> dict[str, object]:
+        """缺口画像：不只“缺多少行”，而是“具体缺在哪”。
+
+        - 停更分布：多少只股票的数据停在哪个日期（多日未同步的尾部）；
+        - 薄行日：行数远低于中位数的交易日（旧写入失败的可疑日期）；
+        - 市值/资金流的字段停更尾部。
+
+        只读最近 ``partition_years`` 个年分区（最新数据必然在其中），带
+        10 分钟缓存——AI 工具与诊断端点共用，避免每次全仓扫描。
+        """
+        with self._gap_profile_lock:
+            cached = self._gap_profile_cache
+            if cached is not None and time.monotonic() - cached[0] < GAP_PROFILE_TTL_SECONDS:
+                return cached[1]
+        profile = self._compute_gap_profile(
+            partition_years=partition_years,
+            thin_day_ratio=thin_day_ratio,
+            top_stale=top_stale,
+        )
+        with self._gap_profile_lock:
+            self._gap_profile_cache = (time.monotonic(), profile)
+        return profile
+
+    def _compute_gap_profile(
+        self,
+        *,
+        partition_years: int,
+        thin_day_ratio: float,
+        top_stale: int,
+    ) -> dict[str, object]:
+        paths = sorted(self.daily_bars_root.glob("year=*/daily_bars.parquet"))
+        if not paths:
+            return {"available": False, "reason": "本地数据仓还没有日线分区。"}
+        selected = paths[-max(1, partition_years) :]
+        wanted_columns = ["symbol", "trade_date", *OHLC_COLUMNS, "float_market_cap", "main_net_inflow"]
+        last_ohlc: dict[str, pd.Timestamp] = {}
+        last_cap: dict[str, pd.Timestamp] = {}
+        last_flow: dict[str, pd.Timestamp] = {}
+        rows_per_date: dict[pd.Timestamp, int] = {}
+        for path in selected:
+            try:
+                available = set(pq.ParquetFile(path).schema_arrow.names)
+            except FileNotFoundError:
+                continue
+            columns = [column for column in wanted_columns if column in available]
+            if "symbol" not in columns or "trade_date" not in columns:
+                continue
+            frame = self._safe_read_parquet(path, columns=columns)
+            if frame.empty:
+                continue
+            frame["trade_date"] = pd.to_datetime(frame["trade_date"])
+            present_ohlc = [column for column in OHLC_COLUMNS if column in frame]
+            complete = (
+                frame.loc[frame[present_ohlc].notna().all(axis=1)] if len(present_ohlc) >= 4 else frame.iloc[0:0]
+            )
+            if not complete.empty:
+                for symbol, last_date in complete.groupby(complete["symbol"].astype(str))["trade_date"].max().items():
+                    timestamp = pd.Timestamp(last_date)
+                    if symbol not in last_ohlc or timestamp > last_ohlc[symbol]:
+                        last_ohlc[symbol] = timestamp
+                for trade_date, count in complete.groupby("trade_date").size().items():
+                    key = pd.Timestamp(trade_date)
+                    rows_per_date[key] = rows_per_date.get(key, 0) + int(count)
+            if "float_market_cap" in complete:
+                cap_frame = complete.loc[complete["float_market_cap"].notna()]
+                for symbol, last_date in cap_frame.groupby(cap_frame["symbol"].astype(str))["trade_date"].max().items():
+                    timestamp = pd.Timestamp(last_date)
+                    if symbol not in last_cap or timestamp > last_cap[symbol]:
+                        last_cap[symbol] = timestamp
+            if "main_net_inflow" in frame:
+                # 资金流允许独立行（无 OHLC），从全 frame 统计。
+                flow_frame = frame.loc[frame["main_net_inflow"].notna()]
+                for symbol, last_date in flow_frame.groupby(flow_frame["symbol"].astype(str))["trade_date"].max().items():
+                    timestamp = pd.Timestamp(last_date)
+                    if symbol not in last_flow or timestamp > last_flow[symbol]:
+                        last_flow[symbol] = timestamp
+        if not rows_per_date or not last_ohlc:
+            return {"available": False, "reason": "选中分区内没有可用的日线行。"}
+        daily_end = max(rows_per_date)
+        window_start = min(rows_per_date)
+        current_symbols = sum(1 for timestamp in last_ohlc.values() if timestamp >= daily_end)
+        thin_days: list[dict[str, object]] = []
+        if len(rows_per_date) >= 4:
+            median_rows = median(rows_per_date.values())
+            threshold = max(1.0, median_rows * thin_day_ratio)
+            thin_days = [
+                {"trade_date": trade_date.date().isoformat(), "rows": count}
+                for trade_date, count in sorted(rows_per_date.items())
+                if count < threshold
+            ][:20]
+
+        def stale_entries(last_by_symbol: dict[str, pd.Timestamp]) -> list[dict[str, object]]:
+            counter = Counter(
+                timestamp.date().isoformat() for timestamp in last_by_symbol.values() if timestamp < daily_end
+            )
+            return [
+                {"last_date": last_date, "symbols": count}
+                for last_date, count in sorted(counter.items(), key=lambda item: (-item[1], item[0]))[:top_stale]
+            ]
+
+        profile: dict[str, object] = {
+            "available": True,
+            "window": {
+                "start_date": window_start.date().isoformat(),
+                "end_date": daily_end.date().isoformat(),
+                "partitions": [path.parent.name for path in selected],
+            },
+            "daily_bars": {
+                "symbols": len(last_ohlc),
+                "symbols_current": current_symbols,
+                "symbols_stale": len(last_ohlc) - current_symbols,
+                "stale_distribution": stale_entries(last_ohlc),
+                "thin_days": thin_days,
+            },
+            "market_cap": {
+                "symbols": len(last_cap),
+                "stale_distribution": stale_entries(last_cap),
+            },
+            "capital_flow": {
+                "symbols": len(last_flow),
+                "stale_distribution": stale_entries(last_flow),
+            },
+        }
+        return profile
 
     def upsert_symbol_lifecycle(self, rows: Sequence[dict[str, str | None]]) -> int:
         """Insert or update ``symbol_lifecycle`` rows.
@@ -549,10 +878,42 @@ class Warehouse:
         return set(has_any_flow[~has_any_flow].index)
 
     def _safe_read_parquet(self, path: Path, **kwargs) -> pd.DataFrame:
+        """Read a partition, distinguishing "absent" from "unreadable".
+
+        A missing file legitimately means "no data yet" and yields an empty
+        frame.  A file that exists but cannot be parsed means the partition is
+        corrupt — silently returning an empty frame there disguises corruption
+        as *missing rows*, which sends sync into a re-download loop that gets
+        overwritten again next round.  The original error is re-raised
+        unchanged, and the path is recorded in ``corrupt_partitions`` so the UI
+        and AI tools can tell "corrupt" apart from "not collected yet".
+        """
         try:
             return pd.read_parquet(path, **kwargs)
-        except FileNotFoundError:
+        except FileNotFoundError:  # 文件不存在 == 还没有数据
             return pd.DataFrame()
+        except Exception as exc:  # noqa: BLE001 - re-raised unchanged
+            if path.exists():
+                self._note_corrupt_partition(path, exc)
+            raise
+
+    def _note_corrupt_partition(self, path: Path, exc: Exception) -> None:
+        with self._corrupt_partitions_lock:
+            self._corrupt_partitions[str(path)] = str(exc)
+
+    @property
+    def corrupt_partitions(self) -> dict[str, str]:
+        """``{partition_path: error}`` for partitions that failed to parse.
+
+        Diagnostic surface for the UI/AI tools: a non-empty result means the
+        warehouse has a real corruption problem, not a coverage gap.
+        """
+        with self._corrupt_partitions_lock:
+            return dict(self._corrupt_partitions)
+
+    def clear_corrupt_partitions(self) -> None:
+        with self._corrupt_partitions_lock:
+            self._corrupt_partitions.clear()
 
 
 def _require_ohlc_rows(frame: pd.DataFrame) -> pd.DataFrame:

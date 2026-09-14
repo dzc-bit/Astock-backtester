@@ -24,12 +24,16 @@ class FakeWarehouse:
     def __init__(self, owner: FakeBackend) -> None:
         self._owner = owner
         self.parquet_paths: list[str] = []
+        self.gap_profile: dict[str, Any] = {"available": False, "reason": "fake warehouse 无数据"}
 
     def read_daily_bars(self, **kwargs: Any) -> pd.DataFrame:
         return self._owner.read_daily_bars(**kwargs)
 
     def daily_bars_parquet_paths(self) -> list[str]:
         return self.parquet_paths
+
+    def data_gap_profile(self, **kwargs: Any) -> dict[str, Any]:
+        return self.gap_profile
 
 
 class FakeBackend:
@@ -145,9 +149,49 @@ def test_local_tools_registered_with_schemas():
         "recent_daily_bars",
         "validate_strategy_conditions",
         "run_strategy_backtest",
+        "data_health_report",
     }.issubset(set(names))
     for schema in registry.openai_schemas():
         assert schema["function"]["parameters"]["type"] == "object"
+
+
+def test_data_health_report_tool_surfaces_gap_details():
+    backend = FakeBackend()
+    backend.warehouse.gap_profile = {
+        "available": True,
+        "window": {"start_date": "2026-06-01", "end_date": "2026-06-04", "partitions": ["year=2026"]},
+        "daily_bars": {
+            "symbols": 5463,
+            "symbols_current": 74,
+            "symbols_stale": 5389,
+            "stale_distribution": [
+                {"last_date": "2026-07-14", "symbols": 3084},
+                {"last_date": "2025-12-31", "symbols": 1080},
+            ],
+            "thin_days": [{"trade_date": "2026-09-09", "rows": 74}],
+        },
+        "market_cap": {"symbols": 5463, "stale_distribution": [{"last_date": "2026-09-04", "symbols": 1222}]},
+        "capital_flow": {"symbols": 5463, "stale_distribution": []},
+    }
+    registry = ToolRegistry()
+    registry.register_all(build_local_tools(backend))
+    execution = registry.execute("data_health_report", "{}")
+    assert execution.ok is True
+    # 摘要把“具体缺哪些”讲清楚：停更分布、写入失败日、字段尾部
+    assert "3084 只停在 2026-07-14" in execution.summary
+    assert "2026-09-09" in execution.summary
+    assert "市值停更" in execution.summary
+    assert execution.payload["profile"]["daily_bars"]["symbols_stale"] == 5389
+
+
+def test_data_health_report_tool_handles_empty_warehouse():
+    backend = FakeBackend()
+    backend.warehouse.gap_profile = {"available": False, "reason": "本地数据仓还没有日线分区。"}
+    registry = ToolRegistry()
+    registry.register_all(build_local_tools(backend))
+    execution = registry.execute("data_health_report", "{}")
+    assert execution.ok is False
+    assert "还没有日线分区" in execution.summary
 
 
 def test_realtime_and_news_tool_summaries():

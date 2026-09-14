@@ -16,6 +16,8 @@ __pycache__/
 .pytest_cache/
 .tmp-test/
 .tmp/
+.tmp_*
+.tmp-*
 .reference/
 backend/astock_backtester.egg-info/
 运行产物/
@@ -25,3 +27,7 @@ backend/astock_backtester.egg-info/
 coverage.xml
 htmlcov/
 frontend/coverage/
+
+# Vitest/Vite 在加载 TS 配置时落下的临时转译产物（每跑一次门禁必现）
+frontend/vitest.config.ts.timestamp-*.mjs
+frontend/vite.config.ts.timestamp-*.mjs

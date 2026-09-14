@@ -163,3 +163,27 @@ def test_insight_disabled_or_zero_cap_never_calls_model():
     engine2._last_breadth_ratio = 0.5
     engine2.tick()
     assert not model2.prompts
+
+
+def test_insight_same_breadth_bucket_is_deduped():
+    """宽度持续极端时同一去重桶不再连发（此前每分钟一条雷同快讯）。"""
+    broker = EventBroker()
+    stream = broker.subscribe()
+    backend = FakeBackend()
+    _wire(backend)
+    config = AiConfig(base_url="http://x", api_key="k", model="m", insight_max_per_hour=60)
+    engine, model = _engine(backend, broker, model_content="宽度异常", config=config)
+    backend.breadth_up = 500  # 9.6% → low 桶
+    engine.tick()
+    engine.tick()  # 同一 tick 周期内宽度不变 → 去重
+    backend.breadth_up = 640  # 12.3% → 同一 5pp 桶 → 仍去重
+    engine.tick()
+    backend.breadth_up = 60  # 1.2% → 桶变化（0 桶）→ 允许再次生成
+    engine.tick()
+    drained = []
+    while not stream.empty():
+        drained.append(stream.get_nowait())
+    insights = [event for event in drained if event["type"] == "insight"]
+    assert len(insights) == 2
+    # 模型调用次数 = 生成次数（去重的 tick 不调模型）
+    assert len(model.prompts) == 2

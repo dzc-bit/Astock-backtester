@@ -6,6 +6,7 @@ import type {
   DataServiceHealth,
   DataServiceStatus,
   DailyBarsCoverageResponse,
+  DiagnosticsDataGapsResponse,
   DiagnosticsSourcesResponse,
   FetchResult,
   ImportResult,
@@ -32,6 +33,7 @@ import {
   mockDataServiceHealth,
   mockDataServiceLogs,
   mockDataServiceStatus,
+  mockDiagnosticsDataGaps,
   mockDiagnosticsSources,
   mockFetchCapitalFlowResult,
   mockFetchDailyBarsResult,
@@ -301,7 +303,11 @@ function partialRealtimeSnapshot(
   } else if (event.type === "breadth") {
     next.breadth = event.breadth ?? null;
     next.source = event.breadth?.source ?? next.source;
-    next.message = "实时红绿家数已返回，继续加载板块";
+    // breadth 事件可能携带 null（provider 链整体超时）：如实说明“未返回”，
+    // 不能伪装成“已返回”。
+    next.message = event.breadth
+      ? "实时红绿家数已返回，继续加载板块"
+      : "实时红绿家数未返回，尝试备选数据源与本地统计";
   } else if (event.type === "sectors") {
     next.strong_sectors = event.strong_sectors ?? [];
     next.yesterday_strong_sectors = event.yesterday_strong_sectors ?? next.yesterday_strong_sectors;
@@ -412,6 +418,13 @@ export async function loadDiagnosticsSources(baseUrl: string): Promise<Diagnosti
     return mockDiagnosticsSources();
   }
   return serviceFetch<DiagnosticsSourcesResponse>(baseUrl, "/diagnostics/sources");
+}
+
+export async function loadDiagnosticsDataGaps(baseUrl: string): Promise<DiagnosticsDataGapsResponse> {
+  if (!isTauriRuntime()) {
+    return mockDiagnosticsDataGaps();
+  }
+  return serviceFetch<DiagnosticsDataGapsResponse>(baseUrl, "/diagnostics/data-gaps");
 }
 
 export async function validateConditionExpression(

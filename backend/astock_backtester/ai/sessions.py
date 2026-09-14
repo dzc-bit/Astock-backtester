@@ -24,6 +24,11 @@ def _safe_session_id(session_id: str) -> str | None:
     return cleaned[:64] or None
 
 
+def sanitize_session_id(session_id: str) -> str | None:
+    """Public wrapper used by the facade to key per-session locks."""
+    return _safe_session_id(session_id)
+
+
 class SessionStore:
     def __init__(self, ai_base_dir: str | Path) -> None:
         self._dir = Path(ai_base_dir) / SESSIONS_DIR_NAME

@@ -681,6 +681,16 @@ describe("DataCenter", () => {
     expect(screen.getByRole("status", { name: "数据中心状态" })).toHaveTextContent("network_error");
   });
 
+  it("renders the missing-data monitor with stale distribution details", async () => {
+    render(<DataCenter cacheDir=".astock-cache" coverage={coverage} onCoverageChange={vi.fn()} />);
+
+    await screen.findByText(/http:\/\/127\.0\.0\.1:9011/);
+    expect(await screen.findByText(/停更 5389 只/)).toBeTruthy();
+    expect(await screen.findByText("3084 只股票的数据停在 2026-07-14")).toBeTruthy();
+    expect(await screen.findByText(/2026-09-07 仅有 74 行/)).toBeTruthy();
+    expect(await screen.findByText(/市值 1222 只停在 2026-09-04/)).toBeTruthy();
+  });
+
   it("cancels a running capital-flow backfill job and refreshes coverage", async () => {
     const user = setupUser();
     const onCoverageChange = vi.fn();

@@ -12,6 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Event, Lock, Thread
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 from uuid import uuid4
 
 import pandas as pd
@@ -287,7 +288,17 @@ class DataServiceState:
             if any(item.symbols > 0 for item in coverage):
                 return coverage
         except Exception as exc:
-            self.log("warning", f"warehouse coverage read failed; falling back to cache: {exc}")
+            # 分区损坏会走到这里。回退到 cache 是为了不阻塞 UI，但必须让用户
+            # 看到"这是损坏不是缺失"，否则会误以为数据没同步而去反复重拉。
+            corrupt = getattr(self.warehouse, "corrupt_partitions", None) or {}
+            if corrupt:
+                self.log(
+                    "error",
+                    "数据仓分区损坏，无法读取 coverage（这不是数据缺失，请重建分区）："
+                    + "；".join(f"{path}（{err}）" for path, err in corrupt.items()),
+                )
+            else:
+                self.log("warning", f"warehouse coverage read failed; falling back to cache: {exc}")
         try:
             return self.cache.coverage()
         except Exception as exc:
@@ -684,6 +695,43 @@ class DataServiceHandler(BaseHTTPRequestHandler):
                     HTTPStatus.BAD_REQUEST,
                 )
             return
+        if self.path == "/diagnostics/data-gaps":
+            """缺口画像：停更分布 / 疑似写入失败日 / 字段尾部（warehouse 缓存，只读不触发抓取）。"""
+            try:
+                profile = self.server.state.warehouse.data_gap_profile()
+                # 分区损坏必须与"数据缺失"分开暴露：否则损坏会被当成缺口，
+                # 反复触发全量重拉（历史上正是"补了又没补上"的成因之一）。
+                corrupt = getattr(self.server.state.warehouse, "corrupt_partitions", None) or {}
+                self._send_json(
+                    {
+                        "ok": bool(profile.get("available")),
+                        "generated_at": datetime.now(UTC).isoformat(),
+                        "profile": profile,
+                        "warehouse_health": {
+                            "corrupt_partitions": corrupt,
+                            "healthy": not corrupt,
+                        },
+                    }
+                )
+            except Exception as exc:
+                self.server.state.log("error", f"data gap profile failed: {exc}")
+                # 画像失败时最需要 health：分区损坏正是 data_gap_profile() 抛异常的
+                # 常见原因，若不在这里带上，前端只能看到 400、把损坏误判为缺失。
+                corrupt = getattr(self.server.state.warehouse, "corrupt_partitions", None) or {}
+                self._send_json(
+                    {
+                        "ok": False,
+                        "code": "request_failed",
+                        "message": str(exc),
+                        "profile": {"available": False},
+                        "warehouse_health": {
+                            "corrupt_partitions": corrupt,
+                            "healthy": not corrupt,
+                        },
+                    },
+                    HTTPStatus.BAD_REQUEST,
+                )
+            return
         if self.path == "/logs/recent":
             self._send_json({"items": list(self.server.state.logs)})
             return
@@ -767,6 +815,27 @@ class DataServiceHandler(BaseHTTPRequestHandler):
             return
         if self.path == "/ai/events/stream":
             self._run_ai_events_stream()
+            return
+        if self.path == "/ai/reports":
+            try:
+                self._send_json(self.server.state.ai_service().list_reports())
+            except Exception as exc:
+                self.server.state.log("error", f"ai reports list failed: {exc}")
+                self._send_json(
+                    {"code": "request_failed", "message": str(exc), "items": []},
+                    HTTPStatus.BAD_REQUEST,
+                )
+            return
+        if self.path.startswith("/ai/report/file"):
+            query = parse_qs(urlsplit(self.path).query)
+            name = str((query.get("name") or [""])[0])
+            try:
+                self._send_json(self.server.state.ai_service().read_report(name))
+            except AiError as exc:
+                self._send_json({"code": exc.code, "message": str(exc)}, HTTPStatus.NOT_FOUND)
+            except Exception as exc:
+                self.server.state.log("error", f"ai report read failed: {exc}")
+                self._send_json({"code": "request_failed", "message": str(exc)}, HTTPStatus.BAD_REQUEST)
             return
         if self.path.startswith("/sync/jobs/"):
             job_id = self.path.rsplit("/", 1)[-1]
@@ -957,6 +1026,9 @@ class DataServiceHandler(BaseHTTPRequestHandler):
                 self._send_json(
                     self.server.state.ai_service().insight_oneshot(scene, payload.get("context"))
                 )
+                return
+            if self.path == "/ai/overfit/check":
+                self._send_json(self.server.state.ai_service().overfit_check(payload))
                 return
             if self.path == "/ai/optimize":
                 self._run_ai_optimize_stream(payload)

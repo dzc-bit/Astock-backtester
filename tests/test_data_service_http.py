@@ -118,6 +118,39 @@ def test_service_default_daily_provider_prefers_http_before_legacy_and_akshare(t
     assert provider_names == ["http", "adata", "akshare"]
 
 
+def test_diagnostics_data_gaps_endpoint(tmp_path):
+    """缺失数据监控端点：AI 与前端共用 warehouse 缺口画像（只读，不触发抓取）。"""
+    server = create_server(host="127.0.0.1", port=0, cache_dir=tmp_path)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        payload = _request_json("GET", f"http://127.0.0.1:{port}/diagnostics/data-gaps")
+        assert payload["ok"] is False  # 空仓 → 明确不可用而不是异常
+        assert payload["profile"]["available"] is False
+        assert payload["generated_at"]
+
+        server.state.warehouse.write_daily_bars(
+            pd.DataFrame(
+                {
+                    "symbol": ["000001", "000002"],
+                    "trade_date": ["2026-06-01", "2026-06-01"],
+                    "open": [10.0, 10.0],
+                    "high": [10.5, 10.5],
+                    "low": [9.8, 9.8],
+                    "close": [10.2, 10.2],
+                    "volume": [1000, 1000],
+                }
+            )
+        )
+        payload = _request_json("GET", f"http://127.0.0.1:{port}/diagnostics/data-gaps")
+        assert payload["ok"] is True
+        assert payload["profile"]["daily_bars"]["symbols"] == 2
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
 def test_service_health_returns_json_when_warehouse_coverage_fails(tmp_path):
     class BrokenWarehouse:
         def coverage(self):

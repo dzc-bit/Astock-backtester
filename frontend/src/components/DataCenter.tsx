@@ -8,12 +8,13 @@ import {
   loadDailyBarsCoverage,
   loadDataServiceHealth,
   loadDataServiceLogs,
+  loadDiagnosticsDataGaps,
   loadDiagnosticsSources,
   loadSyncJob,
   startFullMarketSync
 } from "../api";
 import { aiInsightOneshot } from "../aiApi";
-import type { DataSourceHealth, DiagnosticsSourcesResponse } from "../types";
+import type { DataSourceHealth, DiagnosticsDataGapsResponse, DiagnosticsSourcesResponse } from "../types";
 import { recentAShareTradingDateRange } from "../tradingCalendar";
 import type { DailyBarsCoverageItem, DataServiceStatus, DatasetCoverage, ServiceLogEntry, SyncJobStatus } from "../types";
 
@@ -208,6 +209,8 @@ export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceRead
   const [busyAction, setBusyAction] = useState<BusyAction>(null);
   const [coverageRefreshToken, setCoverageRefreshToken] = useState(0);
   const [diagnostics, setDiagnostics] = useState<DiagnosticsSourcesResponse | null>(null);
+  const [dataGaps, setDataGaps] = useState<DiagnosticsDataGapsResponse | null>(null);
+  const [isLoadingDataGaps, setIsLoadingDataGaps] = useState(false);
   const [isDiagnosing, setIsDiagnosing] = useState(false);
   const [aiCoverageDiagnosis, setAiCoverageDiagnosis] = useState<string | null>(null);
   const [diagnosisError, setDiagnosisError] = useState<string | null>(null);
@@ -296,6 +299,7 @@ export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceRead
     } else {
       setItems([]);
     }
+    void refreshDataGaps(activeService);
     return range;
   };
 
@@ -312,6 +316,20 @@ export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceRead
     }
   };
 
+  const refreshDataGaps = async (activeService: DataServiceStatus) => {
+    if (isLoadingDataGaps) {
+      return;
+    }
+    setIsLoadingDataGaps(true);
+    try {
+      setDataGaps(await loadDiagnosticsDataGaps(activeService.base_url));
+    } catch {
+      // 缺口画像失败保留上一次结果，不打扰主流程。
+    } finally {
+      setIsLoadingDataGaps(false);
+    }
+  };
+
   const handleDiagnoseCoverage = async () => {
     if (!service || isDiagnosing) {
       return;
@@ -320,9 +338,24 @@ export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceRead
     setDiagnosisError(null);
     setAiCoverageDiagnosis(null);
     try {
+      // 逐股明细按缺口降序取样：默认前 8 只往往是恰好完整的股票，
+      // 会让模型误判“逐股缺口为空”。
+      const worstItems = [...items]
+        .sort((left, right) => {
+          const leftMissing =
+            (left.missing_trade_dates?.length ?? 0) +
+            (left.missing_market_cap_dates?.length ?? 0) +
+            (left.missing_capital_flow_dates?.length ?? 0);
+          const rightMissing =
+            (right.missing_trade_dates?.length ?? 0) +
+            (right.missing_market_cap_dates?.length ?? 0) +
+            (right.missing_capital_flow_dates?.length ?? 0);
+          return rightMissing - leftMissing;
+        })
+        .slice(0, 8);
       const text = await aiInsightOneshot(service.base_url, "data_coverage", {
         coverage,
-        details: items.slice(0, 8)
+        details: worstItems
       });
       setAiCoverageDiagnosis(text);
     } catch (caught) {
@@ -347,6 +380,7 @@ export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceRead
         const range = await refreshServiceState(status);
         await refreshDetails(status, [], range.startDate, range.endDate);
         void refreshDiagnostics(status);
+        void refreshDataGaps(status);
       })
       .catch((error: unknown) => {
         if (!cancelled) {
@@ -837,6 +871,81 @@ export function DataCenter({ cacheDir, coverage, onCoverageChange, onServiceRead
         {service ? (
           <button className="secondary-button compact" type="button" onClick={() => void refreshDiagnostics(service)}>
             刷新数据源健康
+          </button>
+        ) : null}
+      </details>
+
+      <details className="source-health-card" aria-label="缺失数据监控">
+        <summary>
+          缺失数据监控
+          {dataGaps?.profile?.daily_bars
+            ? `（停更 ${dataGaps.profile.daily_bars.symbols_stale} 只）`
+            : ""}
+        </summary>
+        {dataGaps?.profile?.available ? (
+          <div className="data-gap-panel">
+            <p className="muted-code">
+              统计窗口 {dataGaps.profile.window?.start_date} ~ {dataGaps.profile.window?.end_date}
+              （{dataGaps.profile.window?.partitions?.join("、")} 分区）
+            </p>
+            <div className="data-gap-section">
+              <strong>
+                日线停更：{dataGaps.profile.daily_bars?.symbols_current} 只最新 / {dataGaps.profile.daily_bars?.symbols_stale} 只停更
+              </strong>
+              <ul>
+                {(dataGaps.profile.daily_bars?.stale_distribution ?? []).slice(0, 6).map((entry) => (
+                  <li key={entry.last_date}>
+                    {entry.symbols} 只股票的数据停在 {entry.last_date}
+                  </li>
+                ))}
+              </ul>
+            </div>
+            {(dataGaps.profile.daily_bars?.thin_days?.length ?? 0) > 0 ? (
+              <div className="data-gap-section">
+                <strong>疑似写入失败日</strong>
+                <ul>
+                  {(dataGaps.profile.daily_bars?.thin_days ?? []).slice(0, 6).map((entry) => (
+                    <li key={entry.trade_date}>
+                      {entry.trade_date} 仅有 {entry.rows} 行
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+            <div className="data-gap-section">
+              <strong>市值/资金流停更</strong>
+              <ul>
+                {(dataGaps.profile.market_cap?.stale_distribution ?? []).slice(0, 3).map((entry) => (
+                  <li key={`cap-${entry.last_date}`}>
+                    市值 {entry.symbols} 只停在 {entry.last_date}
+                  </li>
+                ))}
+                {(dataGaps.profile.capital_flow?.stale_distribution ?? []).slice(0, 3).map((entry) => (
+                  <li key={`flow-${entry.last_date}`}>
+                    资金流 {entry.symbols} 只停在 {entry.last_date}
+                  </li>
+                ))}
+                {((dataGaps.profile.market_cap?.stale_distribution?.length ?? 0) +
+                  (dataGaps.profile.capital_flow?.stale_distribution?.length ?? 0)) === 0 ? (
+                  <li>市值与资金流均更新到最新</li>
+                ) : null}
+              </ul>
+            </div>
+            <small className="muted-code">该明细同时提供给 AI 助手（data_health_report 工具）。</small>
+          </div>
+        ) : (
+          <p className="muted-code">
+            {isLoadingDataGaps ? "正在扫描数据仓缺口…" : dataGaps?.profile?.reason ?? "尚未获取缺口画像，连接本地服务后自动加载。"}
+          </p>
+        )}
+        {service ? (
+          <button
+            className="secondary-button compact"
+            type="button"
+            disabled={isLoadingDataGaps}
+            onClick={() => void refreshDataGaps(service)}
+          >
+            {isLoadingDataGaps ? "扫描中…" : "刷新缺口画像"}
           </button>
         ) : null}
       </details>

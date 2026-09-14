@@ -7,6 +7,7 @@ import type {
   AiEventStreamEvent,
   AiInsightScene,
   AiNewsDigest,
+  AiReportsResponse,
   AiStatus
 } from "./aiTypes";
 import type { BacktestSettingsConfig, OptimizeCombination, StrategyConfig } from "./types";
@@ -29,6 +30,8 @@ export function mockAiConfig(): AiConfigView {
     base_url: "https://mock.local/v1",
     model: "demo-model",
     embedding_model: "demo-embedding",
+    embedding_base_url: "",
+    embedding_api_key_masked: "",
     api_style: "chat-completions",
     research_style: "balanced",
     api_key_masked: "sk-****demo",
@@ -36,6 +39,10 @@ export function mockAiConfig(): AiConfigView {
     max_steps: 8,
     insights_enabled: true,
     insight_max_per_hour: 6,
+    report_enabled: false,
+    report_time: "15:30",
+    evolution_enabled: false,
+    evolution_time: "16:00",
     configured: true
   };
 }
@@ -46,9 +53,22 @@ export function mockAiSaveConfig(payload: AiConfigUpdatePayload): AiConfigView {
     base_url: payload.base_url,
     model: payload.model,
     embedding_model: payload.embedding_model,
+    embedding_base_url: payload.embedding_base_url,
     api_style: payload.api_style,
     research_style: payload.research_style,
     configured: Boolean(payload.base_url && payload.model)
+  };
+}
+
+export function mockAiReports(): AiReportsResponse {
+  return {
+    items: [
+      {
+        name: "复盘报告-演示.md",
+        size: 2048,
+        created_at: new Date().toISOString()
+      }
+    ]
   };
 }
 

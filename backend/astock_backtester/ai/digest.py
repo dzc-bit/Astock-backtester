@@ -195,9 +195,16 @@ class DigestEngine:
             if not parsed:
                 return {"ok": False, "skipped": "unparseable"}
             self._last_run = time.monotonic()
+            existing_titles = {re.sub(r"\s+", "", item.title) for item in self._store.load()}
             stored = self._store.extend(parsed)
             self._broker.publish({"type": "data_fresh", "module": "ai_news", "timestamp": datetime.now(UTC).isoformat()})
-            for item in parsed[:2]:
+            # 只把“新增”的要点推为快讯；与既有条目同题的不再重复推送。
+            fresh = [
+                item
+                for item in parsed
+                if re.sub(r"\s+", "", item.title) not in existing_titles
+            ]
+            for item in fresh[:2]:
                 self._broker.publish(
                     {
                         "type": "insight",
